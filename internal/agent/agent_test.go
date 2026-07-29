@@ -25,15 +25,41 @@ func TestLookupUnknownAgent(t *testing.T) {
 
 // opencode is the only additive agent. The distinction drives the --pure flag
 // and the warning shown by `ap create`.
+// Every agent replaces its config root. opencode used to be additive, which was
+// a limitation rather than a choice: it has no private config-dir variable, so it
+// is isolated through a shim instead. See profile.Shim and the Shim field.
 func TestModes(t *testing.T) {
-	oc, _ := Lookup("opencode")
-	if oc.Mode != Additive {
-		t.Errorf("opencode Mode = %v, want Additive", oc.Mode)
-	}
-	for _, name := range []string{"claude", "codex", "pi"} {
+	for _, name := range Names() {
 		a, _ := Lookup(name)
 		if a.Mode != Replace {
 			t.Errorf("%s Mode = %v, want Replace", name, a.Mode)
+		}
+	}
+}
+
+// A shim is only ever acceptable for an agent whose config variable is shared
+// with other programs. Setting a private variable through a shim would be a
+// pointless indirection, and an agent with a SHARED variable and NO shim would
+// redirect every process it spawns.
+func TestOnlySharedConfigVarsAreShimmed(t *testing.T) {
+	shared := map[string]bool{
+		"XDG_CONFIG_HOME": true,
+		"XDG_DATA_HOME":   true,
+		"XDG_STATE_HOME":  true,
+		"XDG_CACHE_HOME":  true,
+		"HOME":            true,
+	}
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		switch {
+		case shared[a.ConfigEnv] && a.Shim == nil:
+			t.Errorf("%s sets the shared variable %s with no shim: every process it spawns would be redirected into the profile",
+				name, a.ConfigEnv)
+		case !shared[a.ConfigEnv] && a.Shim != nil:
+			t.Errorf("%s has a private variable %s but also a shim: drop the indirection", name, a.ConfigEnv)
+		}
+		if a.Shim != nil && (a.Shim.Rel == "" || a.Shim.Entry == "") {
+			t.Errorf("%s has an incomplete shim spec %+v", name, *a.Shim)
 		}
 	}
 }

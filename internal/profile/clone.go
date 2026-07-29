@@ -20,10 +20,11 @@ import (
 //   - symlinks, because they are the shared entries; copying their contents
 //     would duplicate the user's session history, and copying the link is
 //     pointless since Link recreates it straight after.
-//   - anything at or under a Shared relative path, even when it is a real file
-//     in the source. That happens with profiles created before an entry was
-//     added to the registry, and copying it would make Link fail on the
-//     destination.
+//   - anything at or under a Shared relative path, or under the config shim,
+//     even when it is a real file in the source. That happens with profiles
+//     created before an entry was added to the registry, and copying it would
+//     make Link fail on the destination. The shim is rebuilt from the real config
+//     base anyway, so a copy would only go stale.
 //
 // No per-agent allowlist is needed: a profile only contains what ap and the
 // agent's own installer put there.
@@ -49,9 +50,12 @@ func Clone(a agent.Agent, src, dst string) error {
 		return err
 	}
 
-	shared := make([]string, 0, len(a.Shared))
+	shared := make([]string, 0, len(a.Shared)+1)
 	for _, s := range a.Shared {
 		shared = append(shared, filepath.Clean(s.Rel))
+	}
+	if a.Shim != nil {
+		shared = append(shared, filepath.Clean(a.Shim.Rel))
 	}
 
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {

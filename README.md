@@ -46,27 +46,20 @@ never install something into a profile you only thought you were in.
 | `ap list [agent]` | your profiles |
 | `ap create [--from <profile>] <agent>:<profile>` | create, optionally cloning |
 | `ap which <agent>:<profile>` | the profile directory, for editing by hand |
-| `ap env [--pure] <agent>:<profile>` | exactly which variables would be set (for reading, not for `eval`) |
-| `ap run [--pure] <agent>:<profile> [args...]` | run it; args pass through verbatim |
+| `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
+| `ap run <agent>:<profile> [args...]` | run it; args pass through verbatim |
 | `ap delete <agent>:<profile>` | remove the profile, never the shared state |
 
 Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent>/<profile>/`.
 
-### Flag order matters for `run` and `env`
+### Flag order matters for `run`
 
-For `ap run` and `ap env`, `ap`'s own flags go **before** the
-`<agent>:<profile>` reference. Everything after the reference is passed to the
-agent untouched — that is what lets you write `ap run claude:plan --effort xhigh`
-without `ap` trying to interpret `--effort`.
+Everything after `ap run`'s reference is passed to the agent untouched — that is
+what lets you write `ap run claude:plan --effort xhigh` without `ap` trying to
+interpret `--effort`.
 
-```bash
-ap run --pure opencode:review --model x    # --pure is ap's,  --model is opencode's
-ap run opencode:review --pure --model x    # BOTH go to opencode
-```
-
-The second line is not an error, which is what makes it worth knowing: opencode
-happens to have its own `--pure` flag, so it does something similar but not
-equivalent — `ap`'s suppressor variables are never set.
+`ap run` parses no flags of its own at all, so there is nothing to collide with:
+`ap run opencode:review --pure` passes opencode's own `--pure` to opencode.
 
 `ap create` is different, because it has nothing to pass through: `--from` works
 on either side of the reference.
@@ -87,26 +80,50 @@ agent is already stated to the left of the name.
 is replaced, so the agent owns the terminal directly: signals, the TUI and `ps`
 behave exactly as if you had typed the agent's name.
 
-| Agent | Variable | Mode |
+| Agent | Variable | Value |
 |---|---|---|
-| claude | `CLAUDE_CONFIG_DIR` | replaces its config root |
-| codex | `CODEX_HOME` | replaces its config root |
-| pi | `PI_CODING_AGENT_DIR` | replaces its config root |
-| opencode | `OPENCODE_CONFIG_DIR` | **adds** to its config |
+| claude | `CLAUDE_CONFIG_DIR` | the profile |
+| codex | `CODEX_HOME` | the profile |
+| pi | `PI_CODING_AGENT_DIR` | the profile |
+| opencode | `XDG_CONFIG_HOME` | the profile's config shim |
 
-### opencode is additive
+All four replace their config root, so a profile loads exactly what you put in
+it. Nothing under `XDG_DATA_HOME`, `XDG_STATE_HOME` or `XDG_CACHE_HOME` is ever
+redirected, which is what keeps sessions, logins and caches shared.
 
-`OPENCODE_CONFIG_DIR` is appended to opencode's config search path rather than
-replacing it, so your global `~/.config/opencode` still loads and the profile
-adds to it. `--pure` sets `OPENCODE_PURE`, `OPENCODE_DISABLE_PROJECT_CONFIG` and
-`OPENCODE_DISABLE_DEFAULT_PLUGINS` to get close to isolation.
+### opencode needs a config shim
 
-Full isolation would need `XDG_CONFIG_HOME`, and `ap` refuses to set it. It is a
-freedesktop-wide variable: every process opencode spawns — git, gh, npm,
-language servers — would inherit the redirect and start looking for *their*
-config in the profile directory. Additive behaviour is the better trade, and
-`TestEnvNeverTouchesGenericVars` locks the decision in so nobody "fixes" it
-later and breaks git for every subprocess.
+opencode has no private config-dir variable. `OPENCODE_CONFIG_DIR` only *appends*
+to its search path, and so do `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`. Its
+config root is computed as
+
+```
+(XDG_CONFIG_HOME || ~/.config) / opencode
+```
+
+and nothing else feeds into it, so `XDG_CONFIG_HOME` is the only lever there is.
+
+Setting it naively would be indefensible: it is a freedesktop-wide variable, so
+every process opencode spawns — git, gh, npm, language servers — would start
+looking for *their* config inside the profile. So the profile carries a shim
+directory, and that is what the variable points at:
+
+```
+<profile>/xdg/opencode  ->  <profile>          the only thing opencode finds
+<profile>/xdg/git       ->  ~/.config/git      passthrough
+<profile>/xdg/gh        ->  ~/.config/gh       passthrough
+<profile>/xdg/…         ->  one per entry of your real ~/.config
+```
+
+opencode finds only the profile under its own name — that single omission is the
+isolation — while everything else follows a link to its own real config. The shim
+is rebuilt on every `ap run`, because `~/.config` gains entries over time and a
+profile created last month must not hide a tool installed yesterday.
+
+**The one cost.** A program run inside opencode that creates a *brand-new* config
+directory writes it into the shim, where it is invisible from outside the profile.
+`ap` detects that on the next run and tells you which one and where to move it. It
+is never deleted.
 
 ### What every profile shares
 
@@ -117,7 +134,7 @@ Created as symlinks by `ap create` and re-asserted on every `ap run`:
 | claude | `projects/`, `.credentials.json`, `.claude.json`, `CLAUDE.md`, `plugins/cache/` |
 | codex | `sessions/`, `auth.json`, `history.jsonl` |
 | pi | `sessions/`, `auth.json` |
-| opencode | nothing — its data already lives in `~/.local/share/opencode` |
+| opencode | nothing — its sessions and auth live under `XDG_DATA_HOME`, which we never touch |
 
 So: one login per agent works in every profile, `-r` sees your whole history from
 any profile, and Claude Code's workspace-trust prompt does not come back

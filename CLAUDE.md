@@ -30,31 +30,54 @@ Do not add tool bootstrapping back into the Makefile — no `go install` into
 `./bin`. Tool versions belong in `Dockerfile.devtools`, pinned, so `make verify`
 means one thing everywhere.
 
-## Two tests that must never be deleted or weakened
+## Three tests that must never be deleted or weakened
+
+**`TestDeleteDoesNotFollowTheConfigShim`** (`internal/profile/shim_test.go`). The
+shim links to every entry of the user's real config directory, so a `Delete` that
+followed those links would erase the configuration of every application on the
+machine. This is the worst thing this program could do.
 
 **`TestDeleteDoesNotFollowSymlinks`** (`internal/profile/share_test.go`) and
 `TestDeleteDoesNotFollowNestedSymlinks` (`security_test.go`). A `Delete` that
 descended into the `projects` symlink would erase every Claude Code transcript
-the user has. That is the only irreversible bug this program can have.
+the user has.
 
-**`TestEnvNeverTouchesGenericVars`** (`internal/run/run_test.go`). It locks in
-that no shared environment variable is ever set. Without it, someone "improves"
-opencode isolation and breaks `git` for every subprocess the agent spawns.
+**`TestEnvOnlySetsPathsInsideTheProfile`** (`internal/run/run_test.go`). Whatever
+variable is set must point inside the profile. It replaced a blanket "never set
+XDG_CONFIG_HOME", and it is strictly stronger: the old rule would have allowed
+pointing a private variable at some unrelated place.
 
-If a change makes either fail, the change is wrong. Do not adjust the test.
+If a change makes any of them fail, the change is wrong. Do not adjust the test.
 
-## Never set a shared environment variable
+## A shared environment variable may only be set through a shim
 
-`ap` sets only each agent's own config-directory variable. Not `HOME`, not
-`XDG_CONFIG_HOME`, not anything another program also reads.
+Exactly one variable is set per run. Three agents have a private one. opencode
+does not: its config root is `(XDG_CONFIG_HOME || ~/.config)/opencode` and nothing
+else feeds into it — verified by reading the function that computes it, not the
+docs — so isolating opencode means setting a variable every other program reads.
 
-The agent runs as its own process and everything it spawns inherits the
-environment, so redirecting a shared variable sends `git`, `gh`, `npm` and every
-language server looking for *their* config inside the profile directory.
+Setting it at the profile directly would send `git`, `gh`, `npm` and every
+language server looking for *their* config inside the profile. So it is pointed at
+`<profile>/xdg`, which contains a link to the profile under the agent's own name
+plus one passthrough link per entry of the real config base. `profile.Shim` builds
+it and re-asserts it on every run.
 
-This is why opencode is **additive** rather than isolated: `OPENCODE_CONFIG_DIR`
-only appends to its search path, and the variable that would replace the root is
-`XDG_CONFIG_HOME`. Additive is the accepted trade. Do not "fix" it.
+Rules that follow:
+
+- Never point a shared variable at a raw profile directory.
+  `TestOnlySharedConfigVarsAreShimmed` fails if an agent has one without a shim.
+- Never shim a private variable: pointless indirection, same test catches it.
+- `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` and `HOME` are never
+  redirected at all. That is what keeps sessions, logins and caches shared, which
+  is the entire point of the tool.
+- The passthrough is not optional. Without it this is the bug the old blanket ban
+  existed to prevent.
+
+Levers already ruled out for opencode, each by running the binary — do not
+re-litigate without new measurements: `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG` and
+`OPENCODE_CONFIG_CONTENT` are all additive; `OPENCODE_TEST_HOME` moves `home` but
+not `config`; there is no config-level switch. All 82 `OPENCODE_*` variables in
+the binary were enumerated.
 
 ## The registry describes other people's software
 
@@ -67,7 +90,7 @@ If you change a row, prove it first:
 ```bash
 CODEX_HOME=/tmp/x codex doctor
 PI_CODING_AGENT_DIR=/tmp/x pi list
-OPENCODE_CONFIG_DIR=/tmp/x opencode debug config > /tmp/cfg.json
+XDG_CONFIG_HOME=/tmp/shim opencode debug paths   # config must be /tmp/shim/opencode
 CLAUDE_CONFIG_DIR=/tmp/x claude -p --debug-file /tmp/x.log "ok"
 ```
 
@@ -91,13 +114,13 @@ test still passes, the test is wrong.
 This is not ceremony — it is how the three real bugs here were found, along with
 two tests that passed vacuously.
 
-## Flag order is load-bearing for `run` and `env`
+## `run` parses no flags of its own
 
-Their own flags come **before** the `<agent>:<profile>` reference; everything
-after it goes to the agent verbatim. Do not add GNU-style intermixed parsing to
-`run`: passthrough is the feature, and `ap run claude:plan --effort xhigh` has to
-reach claude untouched. `TestDispatchRunDoesNotParseFlagsAfterTheRef` fails if
-someone "makes run consistent with create".
+Everything after its reference goes to the agent verbatim. Do not add flags to
+`run`, and do not add GNU-style intermixed parsing: passthrough is the feature,
+and `ap run claude:plan --effort xhigh` has to reach claude untouched.
+`TestDispatchRunDoesNotParseFlagsAfterTheRef` fails if someone "makes run
+consistent with create".
 
 `create` is the exception and uses `parseAroundRef`, because it has no
 passthrough at all, so `ap create claude:review --from plan` is unambiguous. Only
@@ -134,6 +157,12 @@ no dependency beyond curl, tar and sha256sum/shasum.
   directory that grows every release; a stale list copies caches silently.
 - **Windows.** It would need a second execution model and a second sharing
   mechanism. The build tags say so.
+- **`--pure`.** It set `OPENCODE_PURE` (identical to opencode's own `--pure`),
+  `OPENCODE_DISABLE_PROJECT_CONFIG` and `OPENCODE_DISABLE_DEFAULT_PLUGINS`. It did
+  not isolate anything — the global config still loaded — and the project-config
+  half suppressed the user's own repo, which is not this tool's business. The shim
+  made it obsolete. Its name also collided with opencode's flag, so misplacing it
+  failed silently.
 - **Dependencies.** Standard library only.
 
 ## The Go version floor is a security floor

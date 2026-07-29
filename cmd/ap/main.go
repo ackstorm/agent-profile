@@ -23,23 +23,19 @@ Usage:
   ap create [--from <profile>] <agent>:<profile>
                                        create a profile, optionally cloning one
   ap which <agent>:<profile>           print the profile directory
-  ap env [--pure] <agent>:<profile>    print the environment overrides
-  ap run [--pure] <agent>:<profile> [args...]
-                                       run the agent with that profile
+  ap env <agent>:<profile>             print the environment override
+  ap run <agent>:<profile> [args...]   run the agent with that profile
   ap delete <agent>:<profile>          delete a profile
   ap version                           print version, commit and build date
 
 There is no active profile: every command names one explicitly.
 
-For "ap run" and "ap env", ap's own flags must come BEFORE the reference.
-Everything after it is passed to the agent verbatim - that is what lets you
-write "ap run claude:plan --effort xhigh" without ap trying to interpret
---effort. A flag placed after the reference reaches the agent, not ap. Watch
-out with --pure: opencode has a flag of the same name, so
-"ap run opencode:x --pure" sets opencode's, not ap's.
+"ap run" parses no flags of its own. Everything after the reference goes to the
+agent verbatim, which is what lets you write "ap run claude:plan --effort xhigh"
+without ap trying to interpret --effort.
 
-"ap create" has nothing to pass through, so --from works on either side, and
-after the reference reads better because the agent is already stated:
+"ap create" has nothing to pass through, so --from works on either side of the
+reference, and after it reads better because the agent is already stated:
 "ap create claude:review --from plan" clones claude:plan.
 
 Examples:
@@ -48,7 +44,7 @@ Examples:
   ap run claude:plan plugin install caveman@caveman
   ap run claude:plan
   ap run claude:plan --effort xhigh
-  ap run --pure opencode:review --model anthropic/claude-sonnet-4-5
+  ap run opencode:review --model anthropic/claude-sonnet-4-5
 `
 
 func main() {
@@ -274,8 +270,8 @@ func cmdCreate(args []string) error {
 		fmt.Printf("NOT shared yet: %s - run %s once outside a profile first, then re-run `ap create`\n",
 			strings.Join(skipped, " "), a.Bin)
 	}
-	if a.Mode == agent.Additive {
-		fmt.Printf("note: %s is additive - your global config still loads; add --pure to suppress it\n", a.Name)
+	if err := shim(a, dir); err != nil {
+		return err
 	}
 	if srcDir == "" {
 		fmt.Printf("populate it: ap run %s:%s plugin install <plugin>\n", a.Name, name)
@@ -293,32 +289,24 @@ func cmdWhich(args []string) error {
 }
 
 func cmdEnv(args []string) error {
-	fs := flagSet("env")
-	pure := fs.Bool("pure", false, "show the --pure environment")
-	if stop, err := parse(fs, args); stop {
-		return err
-	}
-	a, name, err := ref(fs.Args(), "env")
+	a, name, err := ref(args, "env")
 	if err != nil {
 		return err
 	}
 	// Empty base, so only the overrides print.
-	for _, e := range run.Env(a, profile.Dir(a, name), nil, run.Options{Pure: *pure}) {
+	for _, e := range run.Env(a, profile.Dir(a, name), nil) {
 		fmt.Println(e)
 	}
 	return nil
 }
 
 func cmdRun(args []string) error {
-	fs := flagSet("run")
-	pure := fs.Bool("pure", false, "for additive agents, ignore global and project config")
-	if stop, err := parse(fs, args); stop {
-		return err
+	if len(args) == 0 {
+		return fmt.Errorf("usage: ap run <agent>:<profile> [args...]")
 	}
-	rest := fs.Args()
-	if len(rest) == 0 {
-		return fmt.Errorf("usage: ap run [--pure] <agent>:<profile> [args...]")
-	}
+	// No flag parsing at all: everything after the reference belongs to the agent,
+	// verbatim. See the flag-order note in usage.
+	rest := args
 	a, name, err := profile.ParseRef(rest[0])
 	if err != nil {
 		return err
@@ -335,7 +323,29 @@ func cmdRun(args []string) error {
 	if _, _, err := profile.Link(a, dir); err != nil {
 		return err
 	}
-	return run.Exec(a, dir, rest[1:], run.Options{Pure: *pure})
+	// Re-assert the config shim too: ~/.config gains entries over time, and a
+	// profile created last month must not hide a tool installed yesterday.
+	if err := shim(a, dir); err != nil {
+		return err
+	}
+	return run.Exec(a, dir, rest[1:])
+}
+
+// shim builds or refreshes the config shim and reports anything a program wrote
+// into it for real, which would otherwise be invisible from outside the profile.
+func shim(a agent.Agent, dir string) error {
+	_, foundReal, err := profile.Shim(a, dir)
+	if err != nil {
+		return err
+	}
+	if len(foundReal) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"ap: warning: real config inside the profile shim: %s\n"+
+				"    a program wrote there instead of following a passthrough link, so it is\n"+
+				"    invisible outside this profile. Move it to %s/ to share it.\n",
+			strings.Join(foundReal, " "), profile.ConfigBase())
+	}
+	return nil
 }
 
 func cmdDelete(args []string) error {

@@ -21,7 +21,8 @@ const (
 	// starts logged out with no history.
 	Replace Mode = iota
 	// Additive: the variable is an extra config directory searched alongside the
-	// normal one. Nothing forks, but the global config still applies.
+	// normal one. Nothing forks, but the global config still applies. No agent
+	// uses this today; it stays because the next one added might.
 	Additive
 )
 
@@ -56,17 +57,37 @@ type Share struct {
 	Kind Kind
 }
 
+// Shim describes an agent that has no config-directory variable of its own, so
+// isolating it means setting a variable other programs also read.
+//
+// The profile then carries a directory, Rel, that is safe to point that variable
+// at: it holds Entry (a link to the profile itself, which is what the agent
+// looks for) plus one passthrough link per entry of the real config base, so
+// every other program the agent spawns still resolves to its own real config.
+// profile.Shim builds it and re-asserts it on every run.
+//
+// Only reach for this when the agent genuinely has no private variable. Verify
+// by reading the code that computes its config path, not the documentation.
+type Shim struct {
+	// Rel is the subdirectory of the profile that ConfigEnv points at.
+	Rel string
+	// Entry is the name the agent looks for inside it, linked to the profile.
+	Entry string
+}
+
 // Agent is one supported CLI.
 type Agent struct {
 	Name string
 	// Bin is the executable name looked up on PATH.
 	Bin string
-	// ConfigEnv is the variable set to the profile directory. Always agent
-	// specific: we never set a generic variable such as XDG_CONFIG_HOME, because
-	// every child process the agent spawns would inherit it.
+	// ConfigEnv is the variable set to the profile directory, or to the shim
+	// directory inside it when Shim is set. Agent specific wherever the agent
+	// offers one, because every child process inherits what we set.
 	ConfigEnv string
 	Mode      Mode
 	Shared    []Share
+	// Shim is non-nil only for an agent whose isolation needs a shared variable.
+	Shim *Shim
 	// Note is shown by `ap agents`, explaining any caveat.
 	Note string
 }
@@ -127,14 +148,22 @@ func registry() map[string]Agent {
 			},
 		},
 		"opencode": {
-			Name:      "opencode",
-			Bin:       "opencode",
-			ConfigEnv: "OPENCODE_CONFIG_DIR",
-			Mode:      Additive,
-			// Sessions and auth live in ~/.local/share/opencode, outside the
-			// config root, so nothing needs linking.
+			Name: "opencode",
+			Bin:  "opencode",
+			// opencode has no private config-dir variable. OPENCODE_CONFIG_DIR only
+			// APPENDS to its search path, and OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT
+			// append too. Its config root is computed as
+			//     (XDG_CONFIG_HOME || homedir()/.config) / "opencode"
+			// and nothing else feeds into it, so XDG_CONFIG_HOME is the only lever.
+			// Pointing it at the shim rather than the raw profile is what keeps that
+			// safe for every other program in the process tree.
+			ConfigEnv: "XDG_CONFIG_HOME",
+			Mode:      Replace,
+			Shim:      &Shim{Rel: "xdg", Entry: "opencode"},
+			// Sessions, auth and state live under XDG_DATA_HOME and XDG_STATE_HOME,
+			// which we never touch, so nothing needs linking back.
 			Shared: nil,
-			Note:   "additive: your global ~/.config/opencode still loads; use `ap run --pure` to suppress it",
+			Note:   "isolated through a config shim; see `ap which` and the README",
 		},
 	}
 }

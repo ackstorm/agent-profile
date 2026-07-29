@@ -1,6 +1,7 @@
 package run
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func envMap(t *testing.T, env []string) map[string]string {
 
 func TestEnvSetsConfigVar(t *testing.T) {
 	a, _ := agent.Lookup("claude")
-	got := envMap(t, Env(a, "/p/plan", []string{"PATH=/usr/bin", "HOME=/home/x"}, Options{}))
+	got := envMap(t, Env(a, "/p/plan", []string{"PATH=/usr/bin", "HOME=/home/x"}))
 	if got["CLAUDE_CONFIG_DIR"] != "/p/plan" {
 		t.Errorf("CLAUDE_CONFIG_DIR = %q, want /p/plan", got["CLAUDE_CONFIG_DIR"])
 	}
@@ -35,7 +36,7 @@ func TestEnvSetsConfigVar(t *testing.T) {
 // the user may already have exported it.
 func TestEnvOverridesExistingValue(t *testing.T) {
 	a, _ := agent.Lookup("codex")
-	env := Env(a, "/p/review", []string{"CODEX_HOME=/home/x/.codex", "PATH=/usr/bin"}, Options{})
+	env := Env(a, "/p/review", []string{"CODEX_HOME=/home/x/.codex", "PATH=/usr/bin"})
 	if got := envMap(t, env); got["CODEX_HOME"] != "/p/review" {
 		t.Errorf("CODEX_HOME = %q, want /p/review", got["CODEX_HOME"])
 	}
@@ -50,12 +51,38 @@ func TestEnvOverridesExistingValue(t *testing.T) {
 	}
 }
 
-// The decision the whole design rests on: never touch XDG_CONFIG_HOME. It is a
-// freedesktop-wide variable, and every child process the agent spawns (git, gh,
-// npm, LSPs) would inherit a redirected value.
-func TestEnvNeverTouchesGenericVars(t *testing.T) {
-	generic := []string{
-		"XDG_CONFIG_HOME=/home/x/.config",
+// The decision the whole design rests on, in the only form that survives
+// shimming: whatever variable is set must point INSIDE the profile.
+//
+// This replaced a blanket "never touch XDG_CONFIG_HOME". That rule existed
+// because a redirected XDG_CONFIG_HOME sends every child process the agent spawns
+// — git, gh, npm, language servers — looking for their own config in the profile.
+// opencode has no private variable (its config root is
+// (XDG_CONFIG_HOME || ~/.config)/opencode and nothing else), so isolating it
+// means setting that variable, and the harm is prevented instead by pointing it
+// at a shim that passes every other program through. See profile.Shim.
+//
+// The invariant below is strictly stronger than the old one: it also forbids
+// pointing a variable at some unrelated place outside the profile, which the old
+// allowlist would have permitted.
+func TestEnvOnlySetsPathsInsideTheProfile(t *testing.T) {
+	const dir = "/p/x"
+	for _, name := range agent.Names() {
+		a, _ := agent.Lookup(name)
+		for k, v := range envMap(t, Env(a, dir, nil)) {
+			rel, err := filepath.Rel(dir, v)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+				t.Errorf("%s: %s=%q points outside the profile %s", name, k, v, dir)
+			}
+		}
+	}
+}
+
+// Data, state and cache are never redirected. That is what keeps sessions,
+// credentials and caches shared across every profile, which is the whole point of
+// the tool: shimming the CONFIG directory must not creep into the others.
+func TestEnvNeverRedirectsDataStateOrCache(t *testing.T) {
+	base := []string{
 		"XDG_DATA_HOME=/home/x/.local/share",
 		"XDG_STATE_HOME=/home/x/.local/state",
 		"XDG_CACHE_HOME=/home/x/.cache",
@@ -63,8 +90,8 @@ func TestEnvNeverTouchesGenericVars(t *testing.T) {
 	}
 	for _, name := range agent.Names() {
 		a, _ := agent.Lookup(name)
-		got := envMap(t, Env(a, "/p/x", generic, Options{Pure: true}))
-		for _, want := range generic {
+		got := envMap(t, Env(a, "/p/x", base))
+		for _, want := range base {
 			k, v, _ := strings.Cut(want, "=")
 			if got[k] != v {
 				t.Errorf("%s: %s = %q, want untouched %q", name, k, got[k], v)
@@ -73,49 +100,43 @@ func TestEnvNeverTouchesGenericVars(t *testing.T) {
 	}
 }
 
-// Each agent sets exactly one variable (plus opencode's suppressors under
-// --pure). A new variable appearing here should be a deliberate decision.
+// Exactly one variable per agent. A second one appearing here should be a
+// deliberate decision, not a side effect.
 func TestEnvSetsOnlyTheConfigVar(t *testing.T) {
 	for _, name := range agent.Names() {
 		a, _ := agent.Lookup(name)
-		got := Env(a, "/p/x", nil, Options{})
+		got := Env(a, "/p/x", nil)
 		if len(got) != 1 {
 			t.Errorf("%s: Env with empty base = %v, want exactly one entry", name, got)
 		}
 	}
 }
 
-// --pure only means something for the additive agent.
-func TestPureSuppressesOpencodeGlobals(t *testing.T) {
+// A shimmed agent's variable points at the shim subdirectory, not the profile
+// root: the agent looks for its own name inside whatever it is given, and the
+// profile root does not contain a directory called "opencode".
+func TestEnvPointsAShimmedAgentAtTheShimDir(t *testing.T) {
 	oc, _ := agent.Lookup("opencode")
-	got := envMap(t, Env(oc, "/p/plan", nil, Options{Pure: true}))
-	for _, k := range []string{"OPENCODE_PURE", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_DEFAULT_PLUGINS"} {
-		if got[k] != "1" {
-			t.Errorf("%s = %q, want 1", k, got[k])
-		}
+	if oc.Shim == nil {
+		t.Fatal("opencode has no shim spec; this test no longer describes it")
 	}
-	if got["OPENCODE_CONFIG_DIR"] != "/p/plan" {
-		t.Errorf("OPENCODE_CONFIG_DIR = %q, want /p/plan", got["OPENCODE_CONFIG_DIR"])
+	got := envMap(t, Env(oc, "/p/plan", nil))
+	want := filepath.Join("/p/plan", oc.Shim.Rel)
+	if got[oc.ConfigEnv] != want {
+		t.Errorf("%s = %q, want %q", oc.ConfigEnv, got[oc.ConfigEnv], want)
+	}
+	if got[oc.ConfigEnv] == "/p/plan" {
+		t.Error("shimmed agent was pointed at the profile root, so it would find no config of its own")
 	}
 }
 
-func TestPureIsANoOpForReplaceAgents(t *testing.T) {
+// An agent with no shim gets the profile itself, unchanged.
+func TestEnvPointsUnshimmedAgentsAtTheProfile(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "pi"} {
 		a, _ := agent.Lookup(name)
-		got := envMap(t, Env(a, "/p/plan", nil, Options{Pure: true}))
-		if len(got) != 1 {
-			t.Errorf("%s: --pure added variables: %v", name, got)
+		if got := envMap(t, Env(a, "/p/plan", nil)); got[a.ConfigEnv] != "/p/plan" {
+			t.Errorf("%s: %s = %q, want /p/plan", name, a.ConfigEnv, got[a.ConfigEnv])
 		}
-		if _, leaked := got["OPENCODE_PURE"]; leaked {
-			t.Errorf("%s: OPENCODE_PURE leaked", name)
-		}
-	}
-}
-
-func TestEnvWithoutPureLeavesOpencodeGlobalsAlone(t *testing.T) {
-	oc, _ := agent.Lookup("opencode")
-	if got := envMap(t, Env(oc, "/p/plan", nil, Options{})); len(got) != 1 {
-		t.Errorf("Env without --pure = %v, want only the config var", got)
 	}
 }
 
@@ -123,9 +144,9 @@ func TestEnvWithoutPureLeavesOpencodeGlobalsAlone(t *testing.T) {
 // without sorting the order changed on every invocation.
 func TestEnvOutputIsSorted(t *testing.T) {
 	oc, _ := agent.Lookup("opencode")
-	first := Env(oc, "/p/x", nil, Options{Pure: true})
+	first := Env(oc, "/p/x", nil)
 	for range 8 {
-		got := Env(oc, "/p/x", nil, Options{Pure: true})
+		got := Env(oc, "/p/x", nil)
 		for i := range got {
 			if got[i] != first[i] {
 				t.Fatalf("Env is not deterministic: %v vs %v", got, first)

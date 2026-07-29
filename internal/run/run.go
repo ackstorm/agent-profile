@@ -2,49 +2,36 @@
 package run
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 )
 
-// Options are per-invocation switches.
-type Options struct {
-	// Pure asks an additive agent to ignore its global and project config, so
-	// the profile is close to the only thing loaded. No effect on Replace-mode
-	// agents, which replace their config root outright.
-	Pure bool
+// ConfigDir is the value a.ConfigEnv is set to: the profile itself, or the shim
+// directory inside it for an agent that needs one.
+func ConfigDir(a agent.Agent, dir string) string {
+	if a.Shim != nil {
+		return filepath.Join(dir, a.Shim.Rel)
+	}
+	return dir
 }
 
-// pureEnv lists the suppression variables per agent. Only opencode has any.
-func pureEnv(a agent.Agent) map[string]string {
-	if a.Mode != agent.Additive {
-		return nil
-	}
-	if a.Name != "opencode" {
-		return nil
-	}
-	return map[string]string{
-		"OPENCODE_PURE":                    "1",
-		"OPENCODE_DISABLE_PROJECT_CONFIG":  "1",
-		"OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
-	}
-}
-
-// Env returns base with the agent's config variable pointed at dir. base is
-// normally os.Environ().
+// Env returns base with the agent's config variable pointed at the profile. base
+// is normally os.Environ().
 //
-// Nothing generic is ever set. XDG_CONFIG_HOME in particular would redirect
-// every child process the agent spawns — git, gh, npm, language servers — so we
-// use each agent's own variable even when that means settling for additive
-// behaviour (opencode).
-func Env(a agent.Agent, dir string, base []string, opts Options) []string {
-	overrides := map[string]string{a.ConfigEnv: dir}
-	if opts.Pure {
-		for k, v := range pureEnv(a) {
-			overrides[k] = v
-		}
-	}
+// Exactly one variable is ever set. Three of the four agents have a private one.
+// opencode does not — its config root is computed from XDG_CONFIG_HOME, which
+// every child process also reads — so for opencode the variable is pointed at a
+// shim directory that passes every other program's config straight through to
+// the real one. See profile.Shim; without it this would redirect git, gh, npm and
+// every language server into the profile.
+//
+// Nothing under XDG_DATA_HOME, XDG_STATE_HOME or XDG_CACHE_HOME is ever
+// redirected, which is what keeps sessions, credentials and caches shared.
+func Env(a agent.Agent, dir string, base []string) []string {
+	overrides := map[string]string{a.ConfigEnv: ConfigDir(a, dir)}
 
 	out := make([]string, 0, len(base)+len(overrides))
 	for _, e := range base {

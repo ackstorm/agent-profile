@@ -10,6 +10,9 @@ set -u
 AP=${AP:-./ap}
 [ -x "$AP" ] || { echo "no ap binary at $AP - run: make build" >&2; exit 1; }
 
+# Read the same way opencode and profile.ConfigBase do.
+real_config=${XDG_CONFIG_HOME:-$HOME/.config}
+
 fail=0
 pass() { printf '  \033[32mOK\033[0m   %-9s %s\n' "$1" "$2"; }
 bad()  { printf '  \033[31mFAIL\033[0m %-9s %s\n' "$1" "$2"; fail=1; }
@@ -84,37 +87,77 @@ if command -v opencode >/dev/null 2>&1; then
   # shellcheck disable=SC2016  # $schema is a literal JSON key, not a shell variable
   printf '{"$schema":"https://opencode.ai/config.json"}' > "$d/opencode.json"
   printf -- '---\ndescription: ap smoke\nmode: primary\n---\nsmoke\n' > "$d/agent/apsmoke.md"
-  # Capture to a file, never a pipe. `opencode debug config` emits ~730 KB but
-  # exits without waiting for the pipe to drain, so piping it into grep loses
-  # everything past 64 KiB (one pipe buffer) and silently truncates the JSON.
-  # Do not "simplify" this back into a pipeline.
+  # Capture to a file, never a pipe. `opencode debug config` emits ~730 KB
+  # unisolated but exits without waiting for the pipe to drain, so piping it into
+  # grep loses everything past 64 KiB (one pipe buffer) and silently truncates the
+  # JSON. Do not "simplify" this back into a pipeline.
   cfg="$d/debug-config.json"
   timeout 180 "$AP" run opencode:apsmoke debug config > "$cfg" 2>/dev/null
   if grep -q apsmoke "$cfg"; then
     pass opencode "profile agent loaded"
   else
-    bad opencode "profile agent NOT loaded - check OPENCODE_CONFIG_DIR"
+    bad opencode "profile agent NOT loaded - check the config shim"
   fi
-  # Documents the additive behaviour rather than asserting isolation: opencode
-  # cannot be isolated without XDG_CONFIG_HOME, which we refuse to set.
-  if grep -q '"provider"' "$cfg"; then
-    pass opencode "global config still loads (additive, as designed)"
+  # The config path must be the shim, not the real ~/.config/opencode. This is the
+  # single assertion that opencode is isolated at all.
+  if timeout 180 "$AP" run opencode:apsmoke debug paths 2>/dev/null \
+       | grep -E '^config' | grep -qF "$d/xdg/opencode"; then
+    pass opencode "config root is the profile, via the shim"
   else
-    bad opencode "global config vanished - is XDG_CONFIG_HOME being set?"
+    bad opencode "config root is NOT the profile - is XDG_CONFIG_HOME reaching opencode?"
+  fi
+  # And the global config must be gone. It used to be asserted PRESENT, because
+  # opencode was additive; the shim is what changed that.
+  gsize=$(wc -c < "$cfg")
+  if [ "$gsize" -lt 100000 ]; then
+    pass opencode "global config does NOT load ($gsize bytes resolved)"
+  else
+    bad opencode "resolved config is $gsize bytes - the global config is still loading"
+  fi
+  # The other half of the shim: every OTHER program must still find its own real
+  # config, or setting a shared variable would have broken the whole process tree.
+  if [ -d "$real_config/git" ]; then
+    a=$(git config --list --global 2>/dev/null | wc -l)
+    b=$(XDG_CONFIG_HOME="$d/xdg" git config --list --global 2>/dev/null | wc -l)
+    if [ "$a" = "$b" ] && [ "$a" != 0 ]; then
+      pass opencode "git still reads its own config through the shim ($a settings)"
+    else
+      bad opencode "git sees $b settings through the shim, $a outside - passthrough is broken"
+    fi
+  else
+    skip opencode
   fi
 else
   skip opencode
 fi
 
-# --- no generic variable is ever set ----------------------------------------
+# --- every variable set must point inside the profile -----------------------
+# This replaced a blanket "no XDG_* at all". opencode has no private config
+# variable, so isolating it means setting XDG_CONFIG_HOME; what is guaranteed now
+# is that it points INTO the profile, and that the data, state and cache
+# directories are never redirected, which is what keeps sessions shared.
+# internal/run.TestEnvOnlySetsPathsInsideTheProfile is the unit-level version.
 leak=0
 for ag in $("$AP" agents | awk '{print $1}'); do
-  if "$AP" env "$ag:apsmoke" 2>/dev/null | grep -qE '^(XDG_|HOME=)'; then
-    bad "$ag" "ap env sets a generic variable"
-    leak=1
-  fi
+  d=$("$AP" which "$ag:apsmoke" 2>/dev/null) || continue
+  while IFS='=' read -r k v; do
+    [ -n "$k" ] || continue
+    case "$k" in
+      HOME | XDG_DATA_HOME | XDG_STATE_HOME | XDG_CACHE_HOME)
+        bad "$ag" "ap env redirects $k, which must stay shared"
+        leak=1
+        ;;
+    esac
+    case "$v" in
+      "$d" | "$d"/*) ;;
+      *)
+        bad "$ag" "ap env sets $k=$v, which is outside the profile"
+        leak=1
+        ;;
+    esac
+  done < <("$AP" env "$ag:apsmoke" 2>/dev/null)
 done
-[ $leak -eq 0 ] && pass env "no XDG_* or HOME override in any agent"
+[ $leak -eq 0 ] && pass env "every override points inside the profile; data and state untouched"
 
 # --- delete must not touch shared data --------------------------------------
 before=$(find "$HOME/.claude/projects" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)

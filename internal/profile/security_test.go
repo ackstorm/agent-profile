@@ -315,7 +315,7 @@ func TestDiscardCannotEscapeTheAgentDirectory(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", data)
 	a := agentOrFail(t, "claude")
 
-	// A canary two levels above the agent directory, where a traversal would land.
+	// A canary three levels above the agent directory, where the traversal below would land.
 	if _, err := Create(a, "real"); err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +325,7 @@ func TestDiscardCannotEscapeTheAgentDirectory(t *testing.T) {
 	}
 
 	for _, name := range []string{
-		"../../canary.txt",
+		"../../../canary.txt",
 		"../..",
 		"../claude/real",
 	} {

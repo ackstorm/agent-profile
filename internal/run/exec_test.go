@@ -14,7 +14,7 @@ import (
 
 func TestExecMissingBinaryGivesUsefulError(t *testing.T) {
 	a := agent.Agent{Name: "nope", Bin: "definitely-not-installed-xyz", ConfigEnv: "X_DIR"}
-	err := Exec(a, t.TempDir(), nil, Options{})
+	err := Exec(a, t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("Exec = nil error, want not-found")
 	}
@@ -28,7 +28,7 @@ func TestExecMissingBinaryGivesUsefulError(t *testing.T) {
 func TestExecPassesConfigVarAndArgs(t *testing.T) {
 	if os.Getenv("AP_EXEC_CHILD") == "1" {
 		a := agent.Agent{Name: "fake", Bin: "fake-agent", ConfigEnv: "FAKE_CONFIG_DIR"}
-		if err := Exec(a, "/p/plan", []string{"plugin", "install", "x"}, Options{}); err != nil {
+		if err := Exec(a, "/p/plan", []string{"plugin", "install", "x"}); err != nil {
 			os.Stderr.WriteString("exec failed: " + err.Error())
 			os.Exit(3)
 		}
