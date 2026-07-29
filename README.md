@@ -38,48 +38,6 @@ There is **no active profile**. Every command names one. A bare `claude` in any
 shell still uses your normal `~/.claude` — that boundary is the point: you can
 never install something into a profile you only thought you were in.
 
-## Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ackstorm/agent-profile/main/install.sh | bash
-```
-
-That picks the archive for your OS and architecture, **verifies it against the
-release's `checksums.txt` before writing anything**, and installs to
-`~/.local/bin`. Override either end:
-
-```bash
-curl -fsSL .../install.sh | PREFIX=/usr/local/bin VERSION=v0.1.0 bash
-```
-
-Piping a script into a shell deserves a look first — `install.sh` is at the root
-of this repository, it is a hundred lines, and `make shellcheck` gates it.
-
-Prebuilt archives for linux and macOS (amd64 and arm64) are attached to each
-release if you would rather do it by hand:
-
-```bash
-sha256sum -c checksums.txt
-./ap version
-```
-
-From source — **docker is the only requirement**. There is no Go toolchain to
-install: the build runs inside a pinned devtools image (`Dockerfile.devtools`),
-cross-compiled for your host, and the binary lands in your working directory
-owned by you.
-
-```bash
-make build          # ./ap, stamped with version, commit and build date
-make install        # copy it into ~/.local/bin (override with PREFIX=)
-make doctor         # check docker, the image, and what it contains
-```
-
-The image is built on first use and pins Go along with golangci-lint,
-govulncheck, goreleaser and gitleaks, so `make verify` means the same thing on
-your machine as in CI. If you would rather use a host toolchain, set
-`AP_IN_DEVTOOLS=1` and every target runs directly — but mind the Go version
-floor, which is a security floor, not a language requirement. See CLAUDE.md.
-
 ## Commands
 
 | Command | What it does |
@@ -176,6 +134,48 @@ would need a per-agent list of what to take from a directory that grows with
 every release, and a stale list copies caches silently. Set the first profile up
 by hand — a curated minimal set is the point — then clone it. For a one-off,
 `cp ~/.claude/settings.json $(ap which claude:plan)/`.
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ackstorm/agent-profile/main/install.sh | bash
+```
+
+That picks the archive for your OS and architecture, **verifies it against the
+release's `checksums.txt` before writing anything**, and installs to
+`~/.local/bin`. Override either end:
+
+```bash
+curl -fsSL .../install.sh | PREFIX=/usr/local/bin VERSION=v0.1.0 bash
+```
+
+Piping a script into a shell deserves a look first — `install.sh` is at the root
+of this repository, it is a hundred lines, and `make shellcheck` gates it.
+
+Prebuilt archives for linux and macOS (amd64 and arm64) are attached to each
+release if you would rather do it by hand:
+
+```bash
+sha256sum -c checksums.txt
+./ap version
+```
+
+From source — **docker is the only requirement**. There is no Go toolchain to
+install: the build runs inside a pinned devtools image (`Dockerfile.devtools`),
+cross-compiled for your host, and the binary lands in your working directory
+owned by you.
+
+```bash
+make build          # ./ap, stamped with version, commit and build date
+make install        # copy it into ~/.local/bin (override with PREFIX=)
+make doctor         # check docker, the image, and what it contains
+```
+
+The image is built on first use and pins Go along with golangci-lint,
+govulncheck, goreleaser and gitleaks, so `make verify` means the same thing on
+your machine as in CI. If you would rather use a host toolchain, set
+`AP_IN_DEVTOOLS=1` and every target runs directly — but mind the Go version
+floor, which is a security floor, not a language requirement. See CLAUDE.md.
 
 ## Verifying
 
