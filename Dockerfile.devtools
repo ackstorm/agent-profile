@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.7
+#
+# Devtools image — the only toolchain this repo needs. The host runs no Go at
+# all: every `go`, `golangci-lint`, `govulncheck`, `goreleaser` and `gitleaks`
+# invocation goes through scripts/dev.sh, which mounts the workspace into this
+# image. `make <target>` wraps itself automatically.
+#
+# The host toolchain is not merely unnecessary, it is usually wrong: go.mod
+# requires Go 1.25.8 as a SECURITY floor (see CLAUDE.md), and a host sitting on
+# an older Go would either silently download a toolchain or build with the two
+# stdlib advisories this program is actually exposed to. GOTOOLCHAIN=local below
+# turns a too-old base image into a loud failure instead.
+
+# Floating patch on purpose: the point of this image is that patch-level Go
+# security fixes arrive without anyone editing a pin. 1.26 rather than 1.25
+# because goreleaser v2.17 requires Go >= 1.26.5 to build; a newer toolchain
+# still compiles a `go 1.25.8` module under 1.25 language semantics.
+FROM golang:1.26-bookworm
+
+# bash + pipefail for every RUN: a `curl ... | tar ...` that fails at the curl
+# end must abort the build rather than produce an image missing a binary.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG GOLANGCI_LINT_VERSION=v2.12.2
+ARG GORELEASER_VERSION=v2.17.1
+ARG GOVULNCHECK_VERSION=v1.6.0
+ARG GITLEAKS_VERSION=8.30.1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    GOTOOLCHAIN=local \
+    GOBIN=/usr/local/bin
+
+# git is not optional: the version stamp comes from `git describe`, and gitleaks
+# scans history rather than the working tree. shellcheck gates install.sh, which
+# people are invited to pipe into bash.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl make git shellcheck \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pinned Go-installed tools. GOBIN is /usr/local/bin so they land on PATH.
+RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION} \
+    && go install github.com/goreleaser/goreleaser/v2@${GORELEASER_VERSION} \
+    && go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+
+# gitleaks ships binaries only. Its asset names use x64/arm64, not Debian's
+# amd64/arm64, hence the mapping.
+RUN ARCH="$(dpkg --print-architecture)" \
+    && case "${ARCH}" in \
+         amd64) GL_ARCH=x64 ;; \
+         arm64) GL_ARCH=arm64 ;; \
+         *) echo "unsupported arch ${ARCH}" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
+         | tar -xz -C /usr/local/bin gitleaks \
+    && chmod +x /usr/local/bin/gitleaks
+
+# Fail the build, not the first `make test`, if any tool is missing or the base
+# image drifted below the go.mod floor.
+RUN go version && golangci-lint version && goreleaser --version \
+    && govulncheck -version && gitleaks version && shellcheck --version
+
+WORKDIR /workspace
+
+CMD ["bash"]

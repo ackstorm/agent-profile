@@ -1,0 +1,26 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # goreleaser creates the release and uploads archives
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs the tag history for the changelog
+
+      # Gate the tag before publishing anything: a broken release is far more
+      # annoying to withdraw than a failed workflow.
+      - name: verify
+        run: make verify
+
+      - name: release
+        run: make release-publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,11 @@
+/ap
+/bin/
+/dist/
+/.gocache/
+coverage.out
+*~
+*.bak
+*.orig
+*.swp
+docs/plans/
+.claude/

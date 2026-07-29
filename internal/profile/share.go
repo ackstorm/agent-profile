@@ -1,0 +1,99 @@
+//go:build unix
+
+package profile
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+
+	"github.com/ackstorm/agent-profile/internal/agent"
+)
+
+// Link points the profile's shared entries at the agent's real state, so
+// sessions, credentials and workspace trust never fork per profile.
+//
+// Called by `ap create` and again by every `ap run`. The repeat is deliberate:
+// agents rewrite their credential files (codex refreshes OAuth tokens into
+// auth.json), and a temp-file-plus-rename would replace our symlink with a
+// regular file, silently ending the sharing. Re-linking self-heals it.
+//
+// A missing Kind: Dir target is created, so directory shares always link. A
+// missing Kind: File target cannot be invented — you cannot fabricate a
+// credentials file — so it is reported in skipped for the caller to surface.
+// Staying silent about that was a trap: sharing quietly did not happen, the
+// agent then wrote its own real file into the profile, and every later run
+// dead-ended on "refusing to replace real file".
+func Link(a agent.Agent, dir string) (linked, skipped []string, err error) {
+	// Inspect and remove through an os.Root confined to the profile directory.
+	// os.Lstat only refuses to follow the FINAL path component: every ancestor is
+	// resolved by the kernel, so with a nested Rel such as "plugins/cache" a
+	// symlinked "plugins" would make the remove-and-relink happen inside the
+	// user's real home instead of the profile. os.Root refuses symlink traversal
+	// by construction, and every operation below goes through it — inspect, remove,
+	// mkdir and symlink — so no step in this loop can leave the profile.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	for _, s := range a.Shared {
+		if _, err := os.Stat(s.From); err != nil {
+			if s.Kind != agent.Dir {
+				// Cannot be invented; tell the caller so it can say so.
+				skipped = append(skipped, s.Rel)
+				continue
+			}
+			if err := os.MkdirAll(s.From, 0o700); err != nil {
+				return linked, skipped, fmt.Errorf("cannot create shared directory %s: %w", s.From, err)
+			}
+		}
+		dst := filepath.Join(dir, s.Rel)
+		fi, err := root.Lstat(s.Rel)
+		switch {
+		case err == nil && fi.Mode()&os.ModeSymlink != 0:
+			// Already a link. Remove it so the target is re-asserted; this is what
+			// makes Link idempotent and self-healing.
+			if err := root.Remove(s.Rel); err != nil {
+				return linked, skipped, err
+			}
+		case err == nil:
+			return linked, skipped, fmt.Errorf(
+				"refusing to replace real %s at %s: move it aside, then re-run (it should be a link to %s)",
+				s.Kind, dst, s.From)
+		case !errors.Is(err, fs.ErrNotExist):
+			// Anything other than "not there" — including a symlinked ancestor,
+			// which os.Root reports rather than following.
+			return linked, skipped, fmt.Errorf("cannot inspect %s in profile: %w", s.Rel, err)
+		}
+		if parent := filepath.Dir(s.Rel); parent != "." {
+			if err := root.Mkdir(parent, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+				return linked, skipped, err
+			}
+		}
+		if err := root.Symlink(s.From, s.Rel); err != nil {
+			return linked, skipped, err
+		}
+		linked = append(linked, s.Rel)
+	}
+	return linked, skipped, nil
+}
+
+// Delete removes a profile directory.
+//
+// os.RemoveAll lstats each entry and unlinks symlinks rather than descending
+// into them, so the shared session, credential and trust targets in the real
+// home are untouched. TestDeleteDoesNotFollowSymlinks is what keeps that true —
+// it is the one bug in this program that would be irreversible.
+func Delete(a agent.Agent, name string) error {
+	dir := Dir(a, name)
+	// Lstat, not Stat: a dangling symlink would otherwise report "does not exist"
+	// while staying on disk forever.
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("profile %s:%s does not exist", a.Name, name)
+	}
+	return os.RemoveAll(dir)
+}

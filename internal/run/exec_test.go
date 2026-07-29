@@ -1,0 +1,54 @@
+//go:build unix
+
+package run
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/ackstorm/agent-profile/internal/agent"
+)
+
+func TestExecMissingBinaryGivesUsefulError(t *testing.T) {
+	a := agent.Agent{Name: "nope", Bin: "definitely-not-installed-xyz", ConfigEnv: "X_DIR"}
+	err := Exec(a, t.TempDir(), nil, Options{})
+	if err == nil {
+		t.Fatal("Exec = nil error, want not-found")
+	}
+	if !strings.Contains(err.Error(), "definitely-not-installed-xyz") {
+		t.Errorf("error %q does not name the missing binary", err)
+	}
+}
+
+// Exec replaces the process, so it is verified from a child: a fake agent on
+// PATH prints its config variable and argv, and we assert both arrived.
+func TestExecPassesConfigVarAndArgs(t *testing.T) {
+	if os.Getenv("AP_EXEC_CHILD") == "1" {
+		a := agent.Agent{Name: "fake", Bin: "fake-agent", ConfigEnv: "FAKE_CONFIG_DIR"}
+		if err := Exec(a, "/p/plan", []string{"plugin", "install", "x"}, Options{}); err != nil {
+			os.Stderr.WriteString("exec failed: " + err.Error())
+			os.Exit(3)
+		}
+		return
+	}
+
+	bin := t.TempDir()
+	script := filepath.Join(bin, "fake-agent")
+	body := "#!/bin/sh\necho \"cfg=$FAKE_CONFIG_DIR argv=$*\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestExecPassesConfigVarAndArgs")
+	cmd.Env = append(os.Environ(), "AP_EXEC_CHILD=1", "PATH="+bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "cfg=/p/plan argv=plugin install x") {
+		t.Errorf("child output = %q, want cfg=/p/plan argv=plugin install x", out)
+	}
+}

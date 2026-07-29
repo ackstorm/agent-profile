@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Every gate through the same devtools image developers use, so a green CI
+  # and a green `make verify` mean the same thing. One image build, one hop.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags for the `git describe` version stamp, full history for gitleaks.
+          fetch-depth: 0
+      - name: verify (fmt, vet, lint, test, vulncheck)
+        run: make verify
+      - name: secrets
+        run: make secrets
+      - name: cross-build release archives
+        run: make snapshot
+
+  # Native Go on both supported platforms. macOS runners have no docker, so this
+  # job takes the AP_IN_DEVTOOLS escape hatch — which also keeps that path
+  # exercised. The symlink and os.Root behaviour this program depends on is the
+  # part most likely to differ between Linux and macOS.
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      AP_IN_DEVTOOLS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test
+        run: make test
+      # A short fuzz run on the path validation, because a traversal bug got
+      # through review here once.
+      - name: fuzz path validation
+        run: go test -run '^$' -fuzz FuzzValidName -fuzztime 30s ./internal/profile/

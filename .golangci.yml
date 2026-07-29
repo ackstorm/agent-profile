@@ -1,0 +1,54 @@
+# golangci-lint v2 schema. The v1 keys (disable-all, linters-settings) are not
+# accepted by v2 - `golangci-lint config verify` is the check.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # goconst is deliberately absent: its findings here are the agent names in the
+  # registry table and the command names in the dispatch switch. Hoisting those
+  # into constants makes both less readable, not more.
+  default: none
+  enable:
+    - copyloopvar
+    - errcheck
+    - gocyclo
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nakedret
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+  settings:
+    gosec:
+      # HIGH findings block; the interesting ones here are G304 (file path from
+      # a variable) and G404 (weak random), because this program spends its life
+      # building paths out of user input.
+      severity: high
+      confidence: low
+    gocyclo:
+      min-complexity: 20
+    revive:
+      rules:
+        - name: comment-spacings
+
+  exclusions:
+    rules:
+      # Tests deliberately build paths from fixture strings and ignore errors on
+      # cleanup; gosec and errcheck have nothing useful to say about that.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

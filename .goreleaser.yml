@@ -1,0 +1,73 @@
+version: 2
+
+project_name: agent-profile
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ap
+    main: ./cmd/ap
+    binary: ap
+    env:
+      - CGO_ENABLED=0
+    # Unix only, matching the //go:build unix tags: there is no Windows build to
+    # produce, so do not offer one that would fail to compile.
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: binaries
+    ids:
+      - ap
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+
+release:
+  prerelease: auto
+  footer: |
+    ## Install
+
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/ackstorm/agent-profile/main/install.sh | bash
+    ```
+
+    Picks the right archive for your OS and architecture, verifies it against
+    `checksums.txt`, and installs to `~/.local/bin`. Override with
+    `PREFIX=/usr/local/bin` or pin a tag with `VERSION={{ .Tag }}`.
+
+    Or by hand — unix only, amd64 and arm64:
+
+    ```bash
+    sha256sum -c checksums.txt
+    ./ap version
+    ```
