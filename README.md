@@ -6,6 +6,38 @@ your login and your workspace trust stay shared with your normal setup.
 
 Linux and macOS only, by design - see "Deliberately out of scope".
 
+## Why
+
+Every MCP server you connect and every skill and plugin you install is paid for
+on **every request**, not on the requests that use it. Tool schemas and skill
+descriptions live in the system prompt: they are re-sent each turn, they compete
+for the model's attention, and they push your actual work closer to the context
+limit.
+
+So the maximal setup is the wrong default. Planning does not need the deployment
+MCP server. A code review does not need the scaffolding skills. But keeping one
+configuration that suits all of them means it suits none of them, and trimming it
+by hand before each task is not something anyone actually does.
+
+`ap` gives each kind of work its own config directory, so `claude:plan` loads what
+planning needs and nothing else. What it deliberately does *not* fork is the part
+that is expensive to duplicate: you log in once, your session history stays in one
+place, and the workspace-trust prompt does not come back.
+
+## Use
+
+```bash
+ap create claude:plan                               # new, empty profile
+ap run claude:plan plugin install caveman@caveman   # populate it
+ap run claude:plan                                  # work in it
+ap create --from plan claude:review                 # clone it
+ap list
+```
+
+There is **no active profile**. Every command names one. A bare `claude` in any
+shell still uses your normal `~/.claude` — that boundary is the point: you can
+never install something into a profile you only thought you were in.
+
 ## Install
 
 ```bash
@@ -47,20 +79,6 @@ govulncheck, goreleaser and gitleaks, so `make verify` means the same thing on
 your machine as in CI. If you would rather use a host toolchain, set
 `AP_IN_DEVTOOLS=1` and every target runs directly — but mind the Go version
 floor, which is a security floor, not a language requirement. See CLAUDE.md.
-
-## Use
-
-```bash
-ap create claude:plan                               # new, empty profile
-ap run claude:plan plugin install caveman@caveman   # populate it
-ap run claude:plan                                  # work in it
-ap create --from plan claude:review                 # clone it
-ap list
-```
-
-There is **no active profile**. Every command names one. A bare `claude` in any
-shell still uses your normal `~/.claude` — that boundary is the point: you can
-never install something into a profile you only thought you were in.
 
 ## Commands
 
