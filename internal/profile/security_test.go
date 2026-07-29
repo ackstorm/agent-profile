@@ -152,7 +152,7 @@ func TestLinkRefusesToReachThroughSymlinkedAncestor(t *testing.T) {
 		{Rel: "plugins/cache", From: apThinks},
 	}}
 
-	if _, _, err := Link(a, dir); err == nil {
+	if _, _, _, err := Link(a, dir); err == nil {
 		t.Error("Link through a symlinked ancestor = nil error, want refusal")
 	}
 
@@ -180,7 +180,7 @@ func TestLinkIsIdempotentAndKeepsTheTarget(t *testing.T) {
 		{Rel: "sessions", From: sessions},
 	}}
 	for i := range 3 {
-		if _, _, err := Link(a, dir); err != nil {
+		if _, _, _, err := Link(a, dir); err != nil {
 			t.Fatalf("Link call %d: %v", i+1, err)
 		}
 		got, err := os.Readlink(filepath.Join(dir, "sessions"))
@@ -215,7 +215,7 @@ func TestDeleteDoesNotFollowNestedSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Link(a, dir); err != nil {
+	if _, _, _, err := Link(a, dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := Delete(a, "nested"); err != nil {
@@ -283,7 +283,7 @@ func TestLinkReportsSkippedFileShares(t *testing.T) {
 		{Rel: "auth.json", From: filepath.Join(realHome, "auth.json")},
 	}}
 
-	linked, skipped, err := Link(a, dir)
+	linked, skipped, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestLinkNeverInventsAMissingTarget(t *testing.T) {
 		{Rel: "auth.json", From: missing},
 	}}
 
-	linked, skipped, err := Link(a, dir)
+	linked, skipped, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}

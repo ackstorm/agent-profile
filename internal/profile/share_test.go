@@ -3,10 +3,71 @@ package profile
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 )
+
+func TestLinkRemovesAnUnsharedSymlink(t *testing.T) {
+	realHome := t.TempDir()
+	realFile := filepath.Join(realHome, ".claude.json")
+	if err := os.WriteFile(realFile, []byte(`{"real":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Symlink(realFile, filepath.Join(dir, ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
+	_, _, unshared, err := Link(a, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(unshared, ".claude.json") {
+		t.Errorf("unshared = %v, want it to report .claude.json", unshared)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".claude.json")); !os.IsNotExist(err) {
+		t.Error("the symlink is still in the profile")
+	}
+	// The one thing that must never happen.
+	if _, err := os.Stat(realFile); err != nil {
+		t.Fatalf("the real file was removed: %v", err)
+	}
+}
+
+func TestLinkLeavesARealFileAtAnUnsharedPath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, ".claude.json")
+	if err := os.WriteFile(p, []byte(`{"mine":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
+	_, _, unshared, err := Link(a, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unshared) != 0 {
+		t.Errorf("unshared = %v, want nothing: a real file belongs to the profile", unshared)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil || string(b) != `{"mine":true}` {
+		t.Errorf("the profile's own file was disturbed: %q, %v", b, err)
+	}
+}
+
+func TestLinkIsQuietWhenNothingIsUnshared(t *testing.T) {
+	dir := t.TempDir()
+	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
+	_, _, unshared, err := Link(a, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unshared) != 0 {
+		t.Errorf("unshared = %v, want nothing when the path is absent", unshared)
+	}
+}
 
 // Targets that do not exist yet (fresh agent install) are skipped, not an
 // error — otherwise creating a profile before ever running the agent fails.
@@ -19,7 +80,7 @@ func TestLinkSkipsMissingTargets(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "auth.json", From: filepath.Join(t.TempDir(), "nope.json")},
 	}}
-	linked, skipped, err := Link(a, dir)
+	linked, skipped, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -52,7 +113,7 @@ func TestLinkCreatesSymlinks(t *testing.T) {
 		{Rel: "auth.json", From: authFile},
 	}}
 
-	linked, _, err := Link(a, dir)
+	linked, _, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -81,7 +142,7 @@ func TestLinkCreatesParentDirs(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "plugins/cache", From: cache},
 	}}
-	if _, _, err := Link(a, dir); err != nil {
+	if _, _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	fi, err := os.Lstat(filepath.Join(dir, "plugins", "cache"))
@@ -104,10 +165,10 @@ func TestLinkIsIdempotent(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: sessions},
 	}}
-	if _, _, err := Link(a, dir); err != nil {
+	if _, _, _, err := Link(a, dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Link(a, dir); err != nil {
+	if _, _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("second Link: %v", err)
 	}
 }
@@ -126,7 +187,7 @@ func TestLinkRepointsStaleSymlink(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: want},
 	}}
-	if _, _, err := Link(a, dir); err != nil {
+	if _, _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	got, err := os.Readlink(filepath.Join(dir, "sessions"))
@@ -159,7 +220,7 @@ func TestLinkRefusesToClobberRealData(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: sessions},
 	}}
-	if _, _, err := Link(a, dir); err == nil {
+	if _, _, _, err := Link(a, dir); err == nil {
 		t.Fatal("Link over real data = nil error, want refusal")
 	}
 	if _, err := os.Stat(filepath.Join(real, "keepme")); err != nil {
@@ -189,7 +250,7 @@ func TestDeleteDoesNotFollowSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Link(a, dir); err != nil {
+	if _, _, _, err := Link(a, dir); err != nil {
 		t.Fatal(err)
 	}
 

@@ -256,7 +256,7 @@ func cmdCreate(args []string) error {
 		fmt.Printf("cloned from %s:%s\n", a.Name, *from)
 	}
 
-	linked, skipped, err := profile.Link(a, dir)
+	linked, skipped, unshared, err := profile.Link(a, dir)
 	if err != nil {
 		return err
 	}
@@ -269,6 +269,10 @@ func cmdCreate(args []string) error {
 		// dead-ended on "refusing to replace real file".
 		fmt.Printf("NOT shared yet: %s - run %s once outside a profile first, then re-run `ap create`\n",
 			strings.Join(skipped, " "), a.Bin)
+	}
+	if len(unshared) > 0 {
+		// Say it out loud: this is state the profile used to inherit and now owns.
+		fmt.Printf("no longer shared (now this profile's own): %s\n", strings.Join(unshared, " "))
 	}
 	if err := shim(a, dir); err != nil {
 		return err
@@ -320,7 +324,7 @@ func cmdRun(args []string) error {
 	// Re-assert the shared links on every run: agents rewrite their credential
 	// files, and a temp-file-plus-rename would leave a real file where our
 	// symlink was, silently unsharing auth. See internal/profile.Link.
-	if _, _, err := profile.Link(a, dir); err != nil {
+	if _, _, _, err := profile.Link(a, dir); err != nil {
 		return err
 	}
 	// Re-assert the config shim too: ~/.config gains entries over time, and a
