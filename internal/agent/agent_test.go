@@ -3,8 +3,70 @@ package agent
 import (
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 )
+
+func TestStateIsNeverAlsoShared(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		for _, st := range a.State {
+			for _, s := range a.Shared {
+				if s.Rel == st {
+					t.Errorf("%s: %q is both State and Shared", name, st)
+				}
+			}
+		}
+	}
+}
+
+func TestHistoryIsRecordedAsState(t *testing.T) {
+	want := map[string][]string{
+		"claude": {"projects"},
+		"codex":  {"sessions", "history.jsonl"},
+		"pi":     {"sessions"},
+	}
+	for name, rels := range want {
+		a, _ := Lookup(name)
+		for _, rel := range rels {
+			if !slices.Contains(a.State, rel) {
+				t.Errorf("%s: %q is not in State, so --from would copy it", name, rel)
+			}
+		}
+	}
+}
+
+func TestClaudeKnowsItsInstructionsFile(t *testing.T) {
+	a, _ := Lookup("claude")
+	if a.Instructions == nil || a.Instructions.Name != "CLAUDE.md" {
+		t.Fatalf("claude Instructions = %+v, want CLAUDE.md", a.Instructions)
+	}
+}
+
+// A copied instructions file must not also be a share: Link would create the symlink
+// and the copy would overwrite it, so which one won would depend on call order.
+func TestInstructionsAreNeverShared(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if a.Instructions == nil {
+			continue
+		}
+		for _, s := range a.Shared {
+			if s.Rel == a.Instructions.Name {
+				t.Errorf("%s: %q is both Instructions and Shared", name, s.Rel)
+			}
+		}
+	}
+}
+
+func TestEveryAgentSaysHowToSetUpAProfile(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if !strings.Contains(a.Setup, "%s") {
+			t.Errorf("%s: Setup %q must carry one %%s for the profile reference", name, a.Setup)
+		}
+	}
+}
 
 func TestLookupKnownAgents(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "opencode", "pi"} {

@@ -8,6 +8,32 @@ import (
 	"github.com/ackstorm/agent-profile/internal/agent"
 )
 
+// History is a real directory inside the profile now, not a symlink, so Clone's
+// first skip rule no longer drops it for free.
+func TestCloneSkipsState(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "projects", "deep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "projects", "deep", "a.jsonl"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "settings.json"), []byte(`{"model":"haiku"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a := agent.Agent{Name: "test", State: []string{"projects"}}
+	if err := Clone(a, src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "projects")); !os.IsNotExist(err) {
+		t.Error("the source profile's history was copied into the clone")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "settings.json")); err != nil {
+		t.Errorf("configuration was not cloned: %v", err)
+	}
+}
+
 // writeTree builds a directory from a path->content map. Empty content makes a
 // directory.
 func writeTree(t *testing.T, root string, files map[string]string) {

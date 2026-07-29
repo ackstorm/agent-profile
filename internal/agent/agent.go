@@ -104,6 +104,39 @@ type Agent struct {
 	// Entries can be deleted once no profile from the release that shared them is
 	// plausibly still on disk.
 	Unshared []string
+	// Instructions names the agent's global instructions file, for
+	// `ap create --copy-instructions`.
+	//
+	// Deliberately NOT a Share. A Share is linked, and re-asserted on every run; this
+	// is copied once, at create, and never looked at again. Same two strings, opposite
+	// lifecycle — sharing one struct between them would tell the next reader that Link
+	// handles this, and Link never touches it.
+	//
+	// nil means "not verified for this agent". Only fill it in once you have run the
+	// binary and watched it read the file, the same bar as every other row here. A
+	// guessed path is worse than none: the flag would silently copy nothing, or copy
+	// to a name the agent never opens.
+	Instructions *Instructions
+	// Setup is printed after `ap create`, because a profile now starts genuinely
+	// empty and the next step is different for every agent. One %s verb, given the
+	// <agent>:<profile> reference. Each command was taken from that binary's own
+	// --help output, not guessed; `scripts/smoke.sh` does not check these, so keep
+	// them short and keep them true.
+	Setup string
+	// State lists paths holding what a profile accumulates by being used — session
+	// transcripts, command history. Clone skips them, so `ap create --from` inherits
+	// the configuration and never the other profile's history.
+	//
+	// Distinct from Unshared, which is a migration list and will eventually empty.
+	// This one is permanent: it says what belongs to a profile rather than to the
+	// machine. A path may appear in both, and for the entries that stopped being
+	// shared in v0.2.0 it does.
+	//
+	// Not merely a size concern, though it is that too — 304 MB of transcripts on
+	// the reference machine. A clone that carried another profile's sessions would
+	// let you resume, inside the clone, a conversation that used tools the clone
+	// does not have.
+	State []string
 	// Shim is non-nil only for an agent whose isolation needs a shared variable.
 	Shim *Shim
 	// Note is shown by `ap agents`, explaining any caveat.
@@ -143,6 +176,10 @@ func registry() map[string]Agent {
 			// projects/ is session transcripts. See Share's doc comment for why they
 			// are not shared.
 			Unshared: []string{".claude.json", "CLAUDE.md", "plugins/cache", "projects"},
+			State:    []string{"projects"},
+			// Verified. It was in Shared until this release, so the path is known good.
+			Instructions: &Instructions{Name: "CLAUDE.md", Source: filepath.Join(h, ".claude", "CLAUDE.md")},
+			Setup:        "ap run %s plugin install <plugin>   (or build it from a file: ap create --spec <file>)",
 		},
 		"codex": {
 			Name:      "codex",
@@ -153,6 +190,16 @@ func registry() map[string]Agent {
 				{Rel: "auth.json", From: filepath.Join(h, ".codex", "auth.json")},
 			},
 			Unshared: []string{"sessions", "history.jsonl"},
+			State:    []string{"sessions", "history.jsonl"},
+			// Instructions is nil on purpose. The AGENTS.md convention is documented
+			// upstream for codex, opencode and pi, but no global file exists on the
+			// reference machine, so none of them has been watched reading one. Verify
+			// the way everything else here was verified — write a marker instruction
+			// into the candidate path, run the agent with a print-mode prompt, see
+			// whether the marker comes back — then add the row. Until then
+			// --copy-instructions fails loudly for these agents, which is the honest
+			// answer.
+			Setup: "ap run %s mcp   (settings live in config.toml inside the profile)",
 		},
 		"pi": {
 			Name:      "pi",
@@ -166,6 +213,8 @@ func registry() map[string]Agent {
 				{Rel: "auth.json", From: filepath.Join(h, ".pi", "agent", "auth.json")},
 			},
 			Unshared: []string{"sessions"},
+			State:    []string{"sessions"},
+			Setup:    "ap run %s config",
 		},
 		"opencode": {
 			Name: "opencode",
@@ -186,7 +235,10 @@ func registry() map[string]Agent {
 			// the one-credential rule: its sessions stay global across profiles. Known
 			// asymmetry, documented in docs/spec.md, not worth a second shim.
 			Shared: nil,
-			Note:   "isolated through a config shim; sessions stay global - see the README",
+			// State is nil for the same reason: its sessions are outside the profile
+			// entirely, so a clone cannot carry them.
+			Setup: "ap run %s providers   (a custom provider means editing opencode.json inside the profile)",
+			Note:  "isolated through a config shim; sessions stay global - see the README",
 		},
 	}
 }
