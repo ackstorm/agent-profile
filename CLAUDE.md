@@ -144,6 +144,18 @@ Two couplings that no compiler checks:
 `make shellcheck` gates it and runs inside `verify`. Keep it POSIX-ish bash with
 no dependency beyond curl, tar and sha256sum/shasum.
 
+## `.claude.json` is shared state, so expect surprises from it
+
+It is linked for `hasTrustDialogAccepted`, but Claude Code keeps far more in it,
+and all of it becomes common to every profile. Before treating "the profile
+behaves oddly" as an ap bug, check whether the behaviour is driven by a key in
+that file. Real example: `defaultToAgentsView` makes a profile open in the agents
+view, where a short message answers "Too short — describe the task" — which reads
+like a broken profile and is just an inherited UI preference.
+
+Do not add per-key filtering. Rewriting a file the agent owns would fight it on
+every write, and the symlink is what keeps trust and login working.
+
 ## Anything that turns user input into a path must call `profile.ValidName`
 
 `--from` once skipped it and became a path traversal that copied the user's real
