@@ -31,14 +31,20 @@ Usage:
 
 There is no active profile: every command names one explicitly.
 
-ap's own flags must come BEFORE the <agent>:<profile> reference. Everything
-after the reference is passed to the agent verbatim - that is what lets you
+For "ap run" and "ap env", ap's own flags must come BEFORE the reference.
+Everything after it is passed to the agent verbatim - that is what lets you
 write "ap run claude:plan --effort xhigh" without ap trying to interpret
---effort. A flag placed after the reference reaches the agent, not ap.
+--effort. A flag placed after the reference reaches the agent, not ap. Watch
+out with --pure: opencode has a flag of the same name, so
+"ap run opencode:x --pure" sets opencode's, not ap's.
+
+"ap create" has nothing to pass through, so --from works on either side, and
+after the reference reads better because the agent is already stated:
+"ap create claude:review --from plan" clones claude:plan.
 
 Examples:
   ap create claude:plan
-  ap create --from plan claude:review
+  ap create claude:review --from plan
   ap run claude:plan plugin install caveman@caveman
   ap run claude:plan
   ap run claude:plan --effort xhigh
@@ -101,6 +107,36 @@ func parse(fs *flag.FlagSet, args []string) (stop bool, err error) {
 		return true, err
 	}
 	return false, nil
+}
+
+// parseAroundRef parses flags that appear on either side of the reference, and
+// returns the reference.
+//
+// Only for commands with no passthrough. `run` must keep the strict "flags
+// first" rule, because everything after the reference belongs to the agent and
+// `ap run claude:plan --effort xhigh` has to reach claude untouched. `create`
+// has nothing to pass through, so `ap create claude:exec --from review` is
+// unambiguous — and it reads better, because the agent is already stated to the
+// left of the bare source name.
+//
+// flag.Parse stops at the first non-flag argument, so this parses twice: once up
+// to the reference, then again over whatever followed it.
+func parseAroundRef(fs *flag.FlagSet, args []string, cmd string) (stop bool, ref string, err error) {
+	if stop, err := parse(fs, args); stop {
+		return true, "", err
+	}
+	rest := fs.Args()
+	if len(rest) == 0 {
+		return true, "", fmt.Errorf("usage: ap %s", cmd)
+	}
+	ref = rest[0]
+	if stop, err := parse(fs, rest[1:]); stop {
+		return true, "", err
+	}
+	if extra := fs.Args(); len(extra) > 0 {
+		return true, "", fmt.Errorf("unexpected argument %q\nusage: ap %s", extra[0], cmd)
+	}
+	return false, ref, nil
 }
 
 // Filled in at link time by goreleaser (see .goreleaser.yml) and by
@@ -178,10 +214,11 @@ func ref(args []string, cmd string) (agent.Agent, string, error) {
 func cmdCreate(args []string) error {
 	fs := flagSet("create")
 	from := fs.String("from", "", "clone an existing profile of the same agent")
-	if stop, err := parse(fs, args); stop {
+	stop, r, err := parseAroundRef(fs, args, "create [--from <profile>] <agent>:<profile>")
+	if stop {
 		return err
 	}
-	a, name, err := ref(fs.Args(), "create [--from <profile>]")
+	a, name, err := profile.ParseRef(r)
 	if err != nil {
 		return err
 	}
@@ -217,7 +254,7 @@ func cmdCreate(args []string) error {
 			// Safe here specifically because Link has not run yet, so the directory
 			// provably contains no symlinks; the same cleanup after Link would not
 			// be safe to reason about so cheaply.
-			_ = os.RemoveAll(dir) // best effort; the Clone error is what matters
+			profile.Discard(a, name)
 			return err
 		}
 		fmt.Printf("cloned from %s:%s\n", a.Name, *from)

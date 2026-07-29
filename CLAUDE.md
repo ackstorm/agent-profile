@@ -91,12 +91,20 @@ test still passes, the test is wrong.
 This is not ceremony — it is how the three real bugs here were found, along with
 two tests that passed vacuously.
 
-## Flag order is load-bearing
+## Flag order is load-bearing for `run` and `env`
 
-`ap`'s own flags come **before** the `<agent>:<profile>` reference; everything
-after it goes to the agent verbatim. Do not add GNU-style intermixed parsing:
-passthrough is the feature, and `ap run claude:plan --effort xhigh` has to reach
-claude untouched.
+Their own flags come **before** the `<agent>:<profile>` reference; everything
+after it goes to the agent verbatim. Do not add GNU-style intermixed parsing to
+`run`: passthrough is the feature, and `ap run claude:plan --effort xhigh` has to
+reach claude untouched. `TestDispatchRunDoesNotParseFlagsAfterTheRef` fails if
+someone "makes run consistent with create".
+
+`create` is the exception and uses `parseAroundRef`, because it has no
+passthrough at all, so `ap create claude:review --from plan` is unambiguous. Only
+extend that helper to commands that pass nothing to the agent.
+
+`--from` takes a bare profile name, never a qualified reference: a profile is
+only ever cloned within its own agent, which the destination already names.
 
 ## install.sh is a `curl | bash` target, so treat it as one
 

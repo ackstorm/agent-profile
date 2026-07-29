@@ -30,7 +30,7 @@ place, and the workspace-trust prompt does not come back.
 ap create claude:plan                               # new, empty profile
 ap run claude:plan plugin install caveman@caveman   # populate it
 ap run claude:plan                                  # work in it
-ap create --from plan claude:review                 # clone it
+ap create claude:review --from plan                 # clone it
 ap list
 ```
 
@@ -52,12 +52,12 @@ never install something into a profile you only thought you were in.
 
 Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent>/<profile>/`.
 
-### Flag order matters
+### Flag order matters for `run` and `env`
 
-`ap`'s own flags go **before** the `<agent>:<profile>` reference. Everything
-after the reference is passed to the agent untouched — that is what lets you
-write `ap run claude:plan --effort xhigh` without `ap` trying to interpret
-`--effort`.
+For `ap run` and `ap env`, `ap`'s own flags go **before** the
+`<agent>:<profile>` reference. Everything after the reference is passed to the
+agent untouched — that is what lets you write `ap run claude:plan --effort xhigh`
+without `ap` trying to interpret `--effort`.
 
 ```bash
 ap run --pure opencode:review --model x    # --pure is ap's,  --model is opencode's
@@ -66,9 +66,20 @@ ap run opencode:review --pure --model x    # BOTH go to opencode
 
 The second line is not an error, which is what makes it worth knowing: opencode
 happens to have its own `--pure` flag, so it does something similar but not
-equivalent — `ap`'s suppressor variables are never set. Same idea for
-`ap create --from plan claude:review`; putting `--from` after the reference is a
-usage error.
+equivalent — `ap`'s suppressor variables are never set.
+
+`ap create` is different, because it has nothing to pass through: `--from` works
+on either side of the reference.
+
+```bash
+ap create claude:review --from plan        # clones claude:plan
+ap create --from plan claude:review        # the same thing
+```
+
+`--from` takes a bare profile name, never `<agent>:<profile>`, because a profile
+can only be cloned within its own agent — the source and the destination always
+share one. Putting the flag after the reference makes that read correctly: the
+agent is already stated to the left of the name.
 
 ## How it works
 

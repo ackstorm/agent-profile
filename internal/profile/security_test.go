@@ -303,3 +303,44 @@ func TestLinkCreatesMissingSharedDirectories(t *testing.T) {
 		t.Errorf("link target = %q (%v), want %q", got, err, missing)
 	}
 }
+
+// Discard removes a half-created profile, and the name it is given came from the
+// command line. ValidName is what normally makes that safe, but Discard does not
+// depend on ValidName having been called: it removes through an os.Root confined
+// to the agent directory, so confinement is enforced by the runtime.
+//
+// Reverting Discard to os.RemoveAll(Dir(a, name)) makes this test fail.
+func TestDiscardCannotEscapeTheAgentDirectory(t *testing.T) {
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	a := agentOrFail(t, "claude")
+
+	// A canary two levels above the agent directory, where a traversal would land.
+	if _, err := Create(a, "real"); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(data, "canary.txt")
+	if err := os.WriteFile(canary, []byte("do not lose me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{
+		"../../canary.txt",
+		"../..",
+		"../claude/real",
+	} {
+		Discard(a, name)
+		if _, err := os.Stat(canary); err != nil {
+			t.Fatalf("Discard(%q) removed the canary outside the agent directory: %v", name, err)
+		}
+		if _, err := os.Stat(Dir(a, "real")); err != nil {
+			t.Fatalf("Discard(%q) reached a sibling profile: %v", name, err)
+		}
+	}
+
+	// And it still does its actual job.
+	Discard(a, "real")
+	if _, err := os.Stat(Dir(a, "real")); !os.IsNotExist(err) {
+		t.Errorf("Discard did not remove the profile it was asked to: %v", err)
+	}
+}

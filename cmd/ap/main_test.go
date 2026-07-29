@@ -118,6 +118,65 @@ func TestDispatchCreateIsRetryableAfterAFailedClone(t *testing.T) {
 	}
 }
 
+// `create` has nothing to pass through, so --from is accepted on either side of
+// the reference. Asserting only "no error" would pass vacuously if the flag were
+// silently dropped, so check the clone actually happened both ways.
+func TestDispatchCreateTakesFromOnEitherSideOfTheRef(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", root)
+	if err := dispatch([]string{"create", "claude:plan"}); err != nil {
+		t.Fatalf("create source = %v", err)
+	}
+	profiles := filepath.Join(root, "agent-profile", "profiles", "claude")
+	if err := os.WriteFile(filepath.Join(profiles, "plan", "settings.json"), []byte(`{"x":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dispatch([]string{"create", "--from", "plan", "claude:before"}); err != nil {
+		t.Errorf("--from before the reference = %v", err)
+	}
+	if err := dispatch([]string{"create", "claude:after", "--from", "plan"}); err != nil {
+		t.Errorf("--from after the reference = %v", err)
+	}
+	for _, name := range []string{"before", "after"} {
+		if _, err := os.Stat(filepath.Join(profiles, name, "settings.json")); err != nil {
+			t.Errorf("claude:%s was created but not cloned: %v", name, err)
+		}
+	}
+}
+
+// Relaxing the flag order must not also start swallowing junk.
+func TestDispatchCreateRejectsExtraArgumentsAroundTheRef(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:x", "bogus"},
+		{"create", "claude:x", "--from"},
+		{"create", "claude:x", "--nosuchflag"},
+		{"create", "bogus", "claude:x"},
+	} {
+		if err := dispatch(args); err == nil {
+			t.Errorf("dispatch(%q) = nil error, want error", args)
+		}
+	}
+}
+
+// run must NOT get the treatment create just got. Everything after the reference
+// belongs to the agent, so an unknown flag there is the agent's business, not a
+// parse error from ap. If someone "makes run consistent with create", this fails.
+func TestDispatchRunDoesNotParseFlagsAfterTheRef(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"run", "claude:ghost", "--notapflag"})
+	if err == nil {
+		t.Fatal("run on a missing profile = nil error, want error")
+	}
+	if strings.Contains(err.Error(), "notapflag") {
+		t.Errorf("ap parsed a flag that belongs to the agent: %v", err)
+	}
+	if !strings.Contains(err.Error(), "claude:ghost") {
+		t.Errorf("error %q is not the missing-profile error", err)
+	}
+}
+
 func TestDispatchRunRequiresAnExistingProfile(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	err := dispatch([]string{"run", "claude:ghost"})

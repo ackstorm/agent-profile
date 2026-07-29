@@ -97,3 +97,19 @@ func Delete(a agent.Agent, name string) error {
 	}
 	return os.RemoveAll(dir)
 }
+
+// Discard removes a profile that was created but never finished, so `ap create`
+// can be retried. Best effort: the caller is already returning the real error.
+//
+// The removal goes through an os.Root confined to the agent's directory, so the
+// only thing it can delete is one entry directly inside it. That confinement is
+// enforced by the runtime rather than by ValidName having been called correctly
+// somewhere upstream — the same reason Link uses a Root.
+func Discard(a agent.Agent, name string) {
+	root, err := os.OpenRoot(filepath.Join(Root(), a.Name))
+	if err != nil {
+		return
+	}
+	defer func() { _ = root.Close() }()
+	_ = root.RemoveAll(name)
+}
