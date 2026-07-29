@@ -157,10 +157,12 @@ so anything Claude Code records there is common to every profile.
   own `settings.json` under `mcpServers`.
 - UI preferences ride along too. `defaultToAgentsView` is the one that surprises
   people: with it on, a profile opens in the agents view rather than the chat, and
-  typing a short message there answers `Too short — describe the task` because the
-  field wants a task description. Nothing is broken — your normal setup does the
-  same. Turn it off in `/config` ("Open agents view by default"), which changes it
-  everywhere at once.
+  typing a short message there answers `Too short — describe the task`, because the
+  field wants a task description. Nothing is broken and nothing is profile
+  specific — a bare `claude` outside any profile does exactly the same. Turn it off
+  from the agents view itself: `?` for shortcuts, then "Start in agent view". The
+  `/config` row for it is read-only. It cannot be overridden per profile — Claude
+  Code reads that key only from `.claude.json`, not from `settings.json`.
 
 ### Cloning
 

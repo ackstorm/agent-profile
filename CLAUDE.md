@@ -156,6 +156,14 @@ like a broken profile and is just an inherited UI preference.
 Do not add per-key filtering. Rewriting a file the agent owns would fight it on
 every write, and the symlink is what keeps trust and login working.
 
+Do not add profile-level overrides for these keys either. `defaultToAgentsView`
+was measured: Claude Code reads it only from `.claude.json`, so the same key in a
+profile's `settings.json` has no effect, and the only per-profile lever is
+`disableAgentView`, which removes background agents entirely rather than just
+choosing a startup view. Before believing a report that a profile behaves
+differently from a bare agent, run the bare agent — that one turned out to behave
+identically, and the profile was never involved.
+
 ## Anything that turns user input into a path must call `profile.ValidName`
 
 `--from` once skipped it and became a path traversal that copied the user's real
