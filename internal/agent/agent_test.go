@@ -157,7 +157,7 @@ func TestEveryAgentSharesOnlyItsCredential(t *testing.T) {
 	}
 	for _, name := range Names() {
 		a, _ := Lookup(name)
-		var rels []string
+		rels := make([]string, 0, len(a.Shared))
 		for _, s := range a.Shared {
 			rels = append(rels, s.Rel)
 		}
