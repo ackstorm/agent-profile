@@ -160,9 +160,11 @@ so anything Claude Code records there is common to every profile.
   typing a short message there answers `Too short — describe the task`, because the
   field wants a task description. Nothing is broken and nothing is profile
   specific — a bare `claude` outside any profile does exactly the same. Turn it off
-  from the agents view itself: `?` for shortcuts, then "Start in agent view". The
-  `/config` row for it is read-only. It cannot be overridden per profile — Claude
-  Code reads that key only from `.claude.json`, not from `settings.json`.
+  in `/config` under "Open agents view by default"; if a server-side flag has
+  replaced that row with a read-only one, use the agents view's own shortcuts (`?`)
+  and "Start in agent view", which is always available. It cannot be overridden per
+  profile: Claude Code reads that key only from `.claude.json`, never from
+  `settings.json`.
 
 ### Cloning
 

@@ -164,6 +164,11 @@ choosing a startup view. Before believing a report that a profile behaves
 differently from a bare agent, run the bare agent — that one turned out to behave
 identically, and the profile was never involved.
 
+Claude Code also gates behaviour on remote feature flags cached in that same file
+under `cachedGrowthBookFeatures`, so which settings rows are even writable can
+change without any local change. Read the flag rather than inferring it from a
+symptom: reading one wrong produced two contradictory diagnoses in a row here.
+
 ## Anything that turns user input into a path must call `profile.ValidName`
 
 `--from` once skipped it and became a path traversal that copied the user's real
