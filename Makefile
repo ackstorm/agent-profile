@@ -125,7 +125,8 @@ _snapshot:
 # Cutting a release is the one irreversible thing this repo does, so every gate
 # runs BEFORE the tag exists. A failure anywhere leaves origin with no orphan tag
 # and the fix is just another `make release` — no tag to delete, no release to
-# withdraw. That is why the tag push is the very last step.
+# withdraw. That is why the tag push is the very last step, and why the macOS half
+# of the gate is checked through CI (require-green-ci) rather than after tagging.
 .PHONY: release
 release: ## Host-only — cut a release: gates, tag, push. Usage: make release VERSION=v0.1.0
 	@echo '$(VERSION)' | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$$' \
@@ -143,6 +144,7 @@ release: ## Host-only — cut a release: gates, tag, push. Usage: make release V
 	$(MAKE) verify
 	$(MAKE) secrets
 	$(MAKE) snapshot
+	@$(MAKE) --no-print-directory require-green-ci
 	@echo
 	@echo "gates green — tagging $(VERSION) and pushing"
 	git tag -a $(VERSION) -m "$(VERSION)"
@@ -152,6 +154,36 @@ release: ## Host-only — cut a release: gates, tag, push. Usage: make release V
 	@echo
 	@echo "release.yml is now building $(VERSION). Watch it with:"
 	@echo "  gh run watch \$$(gh run list --workflow Release --limit 1 --json databaseId --jq '.[0].databaseId')"
+
+# `make verify` covers Linux only, because the devtools container is Linux. macOS
+# is the other supported platform, and a macOS-only defect has already shipped
+# this way: the Clone containment check compared a resolved path against an
+# unresolved one, which only diverges where /var is a symlink to /private/var.
+#
+# CI has already run on this commit — `release` refuses unless HEAD matches
+# origin/main — so require that run to be green rather than discovering a macOS
+# failure after the tag is public. That keeps the invariant: every gate passes
+# before the tag exists.
+.PHONY: require-green-ci
+require-green-ci:
+	@if ! command -v gh >/dev/null 2>&1; then \
+		echo "WARNING: gh not installed, so the macOS half of CI cannot be checked here."; \
+		echo "         make verify only covers Linux. If macOS fails after the tag is"; \
+		echo "         pushed you will have an orphan tag to delete. Continuing."; \
+		exit 0; \
+	fi; \
+	head=$$(git rev-parse HEAD); \
+	res=$$(gh run list --workflow CI --limit 20 \
+		--json headSha,conclusion,status --jq \
+		".[] | select(.headSha==\"$$head\") | \"\(.status) \(.conclusion)\"" 2>/dev/null | head -1); \
+	case "$$res" in \
+		"completed success") echo "OK   CI green on $$head (ubuntu + macos)" ;; \
+		"") echo "ERROR: no CI run found for HEAD ($$head). Push and let CI finish first." >&2; exit 1 ;; \
+		completed*) echo "ERROR: CI on HEAD concluded '$$res' — fix it before releasing." >&2; exit 1 ;; \
+		*) echo "CI on HEAD is still running ($$res). Wait for it, then re-run:" >&2; \
+		   echo "  gh run watch \$$(gh run list --workflow CI --limit 1 --json databaseId --jq '.[0].databaseId')" >&2; \
+		   exit 1 ;; \
+	esac
 
 .PHONY: release-publish
 release-publish: ## Internal — goreleaser publish for the tag at HEAD. release.yml calls this.

@@ -233,13 +233,21 @@ make release VERSION=v0.1.0
 
 Do not create the tag by hand. That target refuses unless the version is semver
 with a leading `v`, HEAD is a clean `main` in sync with `origin/main`, and the tag
-does not already exist — then it runs `verify`, `secrets` and `snapshot`, and only
-after all three pass does it tag and push. **Every gate runs before the tag exists**, so a failure
-leaves origin with no orphan tag and the fix is simply another `make release`.
+does not already exist — then it runs `verify`, `secrets`, `snapshot` and
+`require-green-ci`, and only after all of them pass does it tag and push.
+**Every gate passes before the tag exists**, so a failure leaves origin with no
+orphan tag and the fix is simply another `make release`.
 
-`release.yml` fires on the pushed tag, re-runs `verify`, then `make
-release-publish` (goreleaser). `release-publish` is CI-facing; it needs
-`GITHUB_TOKEN` and is the only target that publishes anything.
+`require-green-ci` exists because `make verify` runs in the devtools container and
+therefore covers Linux only. macOS is the other supported platform and a
+macOS-only defect has already shipped this way. CI has already run on HEAD — the
+in-sync check guarantees it — so the release refuses unless that run is green.
+Without gh installed it warns loudly and continues; do not make it silent.
+
+`release.yml` fires on the pushed tag and gates again on both platforms
+(`verify` on ubuntu, `test` on macos) before `make release-publish` runs.
+`release-publish` is CI-facing; it needs `GITHUB_TOKEN` and is the only target
+that publishes anything.
 
 `make snapshot` alone is the dry run: the same four archives and `checksums.txt`,
 nothing published.

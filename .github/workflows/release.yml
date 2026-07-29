@@ -5,21 +5,47 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write # goreleaser creates the release and uploads archives
+  contents: read
 
 jobs:
-  release:
+  # `make verify` runs inside the devtools container, which is Linux. That is the
+  # whole toolchain story for development, but it is only one of the two supported
+  # platforms — so a macOS-only defect can pass this gate. One did: the Clone
+  # containment check compared a resolved path against an unresolved one, which
+  # only diverges where /var is a symlink to /private/var, and it shipped in a
+  # release while the macos CI job was red.
+  #
+  # Both jobs must pass before anything is published.
+  verify:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # goreleaser needs the tag history for the changelog
-
-      # Gate the tag before publishing anything: a broken release is far more
-      # annoying to withdraw than a failed workflow.
       - name: verify
         run: make verify
 
+  test-macos:
+    runs-on: macos-latest
+    env:
+      AP_IN_DEVTOOLS: "1" # macOS runners have no docker; use the host toolchain
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test
+        run: make test
+
+  release:
+    needs: [verify, test-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # goreleaser creates the release and uploads archives
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: release
         run: make release-publish
         env:
