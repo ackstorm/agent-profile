@@ -101,7 +101,16 @@ func Clone(a agent.Agent, src, dst string) error {
 // the destination, so WalkDir descends into the directory Clone is writing to and
 // recurses until the path is too long for the filesystem — 2000+ directories, and
 // with a populated source it re-copies every real file at each level.
+// src arrives already resolved, so dst must be resolved too or the comparison is
+// between a real path and a symlinked one. On macOS that is the normal case:
+// /var is a symlink to /private/var, so an unresolved dst under /var/folders
+// looks like it escapes a src under /private/var/folders and the guard passes on
+// exactly the overlap it exists to catch.
 func containment(src, dst string) error {
+	dst, err := filepath.EvalSymlinks(dst)
+	if err != nil {
+		return fmt.Errorf("cannot read destination profile: %w", err)
+	}
 	rel, err := filepath.Rel(src, dst)
 	if err != nil {
 		return err // different volumes: cannot overlap

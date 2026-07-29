@@ -66,6 +66,31 @@ func TestCloneRefusesIdenticalSourceAndDestination(t *testing.T) {
 	}
 }
 
+// Clone resolves src, so an unresolved dst compares a real path against a
+// symlinked one and the containment guard passes on the overlap it exists to
+// catch. This is what macOS hits for free — /var is a symlink to /private/var,
+// so every t.TempDir() there reproduced it — and what Linux only hits through an
+// explicit symlink like this one.
+func TestCloneRefusesSymlinkedDestinationResolvingIntoSource(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Clone(agent.Agent{Name: "fake"}, real, link)
+	if err == nil {
+		t.Fatal("Clone into a symlink resolving to the source = nil error, want refusal")
+	}
+	if !strings.Contains(err.Error(), "same directory") {
+		t.Errorf("error %q does not explain the problem", err)
+	}
+}
+
 // WalkDir lstats its root, so a symlinked source profile used to walk nothing at
 // all: Clone reported success having copied zero files.
 func TestCloneResolvesSymlinkedSource(t *testing.T) {
