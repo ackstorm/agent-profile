@@ -11,14 +11,13 @@ import (
 // Targets that do not exist yet (fresh agent install) are skipped, not an
 // error — otherwise creating a profile before ever running the agent fails.
 //
-// This originally used a Kind: Dir target. Link now creates those instead, since
-// the agent would have created the directory itself anyway, so the case that
-// still skips is Kind: File — a credentials file cannot be fabricated. The Dir
-// half is covered by TestLinkCreatesMissingSharedDirectories.
+// Every share is the agent's credential, and a credentials file cannot be
+// fabricated, so a missing target is always skipped. TestLinkNeverInventsAMissingTarget
+// pins the other half: nothing is written into the real home either.
 func TestLinkSkipsMissingTargets(t *testing.T) {
 	dir := t.TempDir()
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "auth.json", From: filepath.Join(t.TempDir(), "nope.json"), Kind: agent.File},
+		{Rel: "auth.json", From: filepath.Join(t.TempDir(), "nope.json")},
 	}}
 	linked, skipped, err := Link(a, dir)
 	if err != nil {
@@ -49,8 +48,8 @@ func TestLinkCreatesSymlinks(t *testing.T) {
 
 	dir := t.TempDir()
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "sessions", From: sessions, Kind: agent.Dir},
-		{Rel: "auth.json", From: authFile, Kind: agent.File},
+		{Rel: "sessions", From: sessions},
+		{Rel: "auth.json", From: authFile},
 	}}
 
 	linked, _, err := Link(a, dir)
@@ -80,7 +79,7 @@ func TestLinkCreatesParentDirs(t *testing.T) {
 	}
 	dir := t.TempDir()
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "plugins/cache", From: cache, Kind: agent.Dir},
+		{Rel: "plugins/cache", From: cache},
 	}}
 	if _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("Link: %v", err)
@@ -103,7 +102,7 @@ func TestLinkIsIdempotent(t *testing.T) {
 	}
 	dir := t.TempDir()
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "sessions", From: sessions, Kind: agent.Dir},
+		{Rel: "sessions", From: sessions},
 	}}
 	if _, _, err := Link(a, dir); err != nil {
 		t.Fatal(err)
@@ -125,7 +124,7 @@ func TestLinkRepointsStaleSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "sessions", From: want, Kind: agent.Dir},
+		{Rel: "sessions", From: want},
 	}}
 	if _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("Link: %v", err)
@@ -158,7 +157,7 @@ func TestLinkRefusesToClobberRealData(t *testing.T) {
 	}
 
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "sessions", From: sessions, Kind: agent.Dir},
+		{Rel: "sessions", From: sessions},
 	}}
 	if _, _, err := Link(a, dir); err == nil {
 		t.Fatal("Link over real data = nil error, want refusal")
@@ -184,7 +183,7 @@ func TestDeleteDoesNotFollowSymlinks(t *testing.T) {
 	}
 
 	a := agent.Agent{Name: "claude", Shared: []agent.Share{
-		{Rel: "projects", From: realSessions, Kind: agent.Dir},
+		{Rel: "projects", From: realSessions},
 	}}
 	dir, err := Create(a, "plan")
 	if err != nil {

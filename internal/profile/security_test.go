@@ -149,7 +149,7 @@ func TestLinkRefusesToReachThroughSymlinkedAncestor(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "plugins/cache", From: apThinks, Kind: agent.Dir},
+		{Rel: "plugins/cache", From: apThinks},
 	}}
 
 	if _, _, err := Link(a, dir); err == nil {
@@ -177,7 +177,7 @@ func TestLinkIsIdempotentAndKeepsTheTarget(t *testing.T) {
 	}
 	dir := t.TempDir()
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "sessions", From: sessions, Kind: agent.Dir},
+		{Rel: "sessions", From: sessions},
 	}}
 	for i := range 3 {
 		if _, _, err := Link(a, dir); err != nil {
@@ -209,7 +209,7 @@ func TestDeleteDoesNotFollowNestedSymlinks(t *testing.T) {
 	}
 
 	a := agent.Agent{Name: "claude", Shared: []agent.Share{
-		{Rel: "plugins/cache", From: realCache, Kind: agent.Dir},
+		{Rel: "plugins/cache", From: realCache},
 	}}
 	dir, err := Create(a, "nested")
 	if err != nil {
@@ -266,10 +266,10 @@ func TestListIncludesSymlinkedProfiles(t *testing.T) {
 	}
 }
 
-// A Kind: File target that does not exist yet cannot be invented, so it must be
-// reported. Silence used to mean the user believed their login was shared when it
-// was not, and only found out much later when a run dead-ended on "refusing to
-// replace real file".
+// A target that does not exist yet cannot be invented, so it must be reported.
+// Silence used to mean the user believed their login was shared when it was not,
+// and only found out much later when a run dead-ended on "refusing to replace real
+// file".
 func TestLinkReportsSkippedFileShares(t *testing.T) {
 	realHome := t.TempDir()
 	present := filepath.Join(realHome, "CLAUDE.md")
@@ -279,8 +279,8 @@ func TestLinkReportsSkippedFileShares(t *testing.T) {
 
 	dir := t.TempDir()
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "CLAUDE.md", From: present, Kind: agent.File},
-		{Rel: "auth.json", From: filepath.Join(realHome, "auth.json"), Kind: agent.File},
+		{Rel: "CLAUDE.md", From: present},
+		{Rel: "auth.json", From: filepath.Join(realHome, "auth.json")},
 	}}
 
 	linked, skipped, err := Link(a, dir)
@@ -299,33 +299,30 @@ func TestLinkReportsSkippedFileShares(t *testing.T) {
 	}
 }
 
-// A Kind: Dir target CAN be created, so directory shares always link and never
-// land in skipped - the agent would have created the directory itself anyway.
-func TestLinkCreatesMissingSharedDirectories(t *testing.T) {
+// Link used to create a missing directory target, which was only ever right for a
+// directory share. Every share is the agent's credential now, so a missing target is
+// reported and nothing is written into the real home - not even an empty directory.
+func TestLinkNeverInventsAMissingTarget(t *testing.T) {
 	realHome := t.TempDir()
-	missing := filepath.Join(realHome, "sessions")
+	missing := filepath.Join(realHome, "auth.json")
 
 	dir := t.TempDir()
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "sessions", From: missing, Kind: agent.Dir},
+		{Rel: "auth.json", From: missing},
 	}}
 
 	linked, skipped, err := Link(a, dir)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
-	if len(skipped) != 0 {
-		t.Errorf("skipped = %v, want empty: a directory share can be created", skipped)
+	if len(linked) != 0 {
+		t.Errorf("linked = %v, want none: the target does not exist", linked)
 	}
-	if len(linked) != 1 || linked[0] != "sessions" {
-		t.Fatalf("linked = %v, want [sessions]", linked)
+	if len(skipped) != 1 || skipped[0] != "auth.json" {
+		t.Errorf("skipped = %v, want [auth.json]", skipped)
 	}
-	if fi, err := os.Stat(missing); err != nil || !fi.IsDir() {
-		t.Errorf("the shared directory was not created: %v", err)
-	}
-	got, err := os.Readlink(filepath.Join(dir, "sessions"))
-	if err != nil || got != missing {
-		t.Errorf("link target = %q (%v), want %q", got, err, missing)
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Error("Link created the missing target in the real home")
 	}
 }
 

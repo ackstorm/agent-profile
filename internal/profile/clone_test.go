@@ -76,7 +76,7 @@ func TestCloneSkipsSymlinks(t *testing.T) {
 	}
 
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "projects", From: realSessions, Kind: agent.Dir},
+		{Rel: "projects", From: realSessions},
 	}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
@@ -137,8 +137,8 @@ func TestCloneSkipsSharedPathsEvenWhenReal(t *testing.T) {
 	})
 
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "auth.json", From: "/nonexistent/auth.json", Kind: agent.File},
-		{Rel: "plugins/cache", From: "/nonexistent/cache", Kind: agent.Dir},
+		{Rel: "auth.json", From: "/nonexistent/auth.json"},
+		{Rel: "plugins/cache", From: "/nonexistent/cache"},
 	}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)

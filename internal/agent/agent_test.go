@@ -1,6 +1,10 @@
 package agent
 
-import "testing"
+import (
+	"slices"
+	"sort"
+	"testing"
+)
 
 func TestLookupKnownAgents(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "opencode", "pi"} {
@@ -79,29 +83,54 @@ func TestSharedEntries(t *testing.T) {
 	}
 }
 
-// Each of these has a specific reason to be shared; a regression here silently
-// costs the user their login, their history or their trust prompts.
-func TestClaudeSharesTrustAndCache(t *testing.T) {
-	a, _ := Lookup("claude")
-	want := map[string]Kind{
-		"projects":          Dir,  // session transcripts
-		".credentials.json": File, // one login for every profile
-		".claude.json":      File, // hasTrustDialogAccepted
-		"CLAUDE.md":         File, // global instructions
-		"plugins/cache":     Dir,  // content-addressed, no point duplicating
+// A profile is a separate environment: the credential is the only thing it
+// inherits from the machine. A regression here silently makes something common
+// to every profile again.
+func TestEveryAgentSharesOnlyItsCredential(t *testing.T) {
+	want := map[string][]string{
+		"claude":   {".credentials.json"},
+		"codex":    {"auth.json"},
+		"pi":       {"auth.json"},
+		"opencode": nil, // its auth lives under XDG_DATA_HOME, which ap never redirects
 	}
-	got := map[string]Kind{}
-	for _, s := range a.Shared {
-		got[s.Rel] = s.Kind
-	}
-	for rel, kind := range want {
-		k, ok := got[rel]
-		if !ok {
-			t.Errorf("claude does not share %q", rel)
-			continue
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		var rels []string
+		for _, s := range a.Shared {
+			rels = append(rels, s.Rel)
 		}
-		if k != kind {
-			t.Errorf("claude %q Kind = %v, want %v", rel, k, kind)
+		sort.Strings(rels)
+		if !slices.Equal(rels, want[name]) {
+			t.Errorf("%s shares %v, want %v (the credential, nothing else)", name, rels, want[name])
+		}
+	}
+}
+
+func TestDroppedSharesAreRecordedAsUnshared(t *testing.T) {
+	want := map[string][]string{
+		"claude": {".claude.json", "CLAUDE.md", "plugins/cache", "projects"},
+		"codex":  {"history.jsonl", "sessions"},
+		"pi":     {"sessions"},
+	}
+	for name, rels := range want {
+		a, _ := Lookup(name)
+		for _, rel := range rels {
+			if !slices.Contains(a.Unshared, rel) {
+				t.Errorf("%s: %q was dropped from Shared but is not in Unshared: "+
+					"existing profiles would keep the symlink and go on sharing it", name, rel)
+			}
+		}
+	}
+}
+
+// Nothing may be in both lists: Link would create the symlink and then remove it.
+func TestUnsharedAndSharedDoNotOverlap(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		for _, s := range a.Shared {
+			if slices.Contains(a.Unshared, s.Rel) {
+				t.Errorf("%s: %q is both Shared and Unshared", name, s.Rel)
+			}
 		}
 	}
 }

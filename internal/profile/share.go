@@ -20,12 +20,8 @@ import (
 // auth.json), and a temp-file-plus-rename would replace our symlink with a
 // regular file, silently ending the sharing. Re-linking self-heals it.
 //
-// A missing Kind: Dir target is created, so directory shares always link. A
-// missing Kind: File target cannot be invented — you cannot fabricate a
-// credentials file — so it is reported in skipped for the caller to surface.
-// Staying silent about that was a trap: sharing quietly did not happen, the
-// agent then wrote its own real file into the profile, and every later run
-// dead-ended on "refusing to replace real file".
+// Every share is a file — the agent's credential. A missing one cannot be invented,
+// so it is reported in skipped for the caller to surface.
 func Link(a agent.Agent, dir string) (linked, skipped []string, err error) {
 	// Inspect and remove through an os.Root confined to the profile directory.
 	// os.Lstat only refuses to follow the FINAL path component: every ancestor is
@@ -42,14 +38,12 @@ func Link(a agent.Agent, dir string) (linked, skipped []string, err error) {
 
 	for _, s := range a.Shared {
 		if _, err := os.Stat(s.From); err != nil {
-			if s.Kind != agent.Dir {
-				// Cannot be invented; tell the caller so it can say so.
-				skipped = append(skipped, s.Rel)
-				continue
-			}
-			if err := os.MkdirAll(s.From, 0o700); err != nil {
-				return linked, skipped, fmt.Errorf("cannot create shared directory %s: %w", s.From, err)
-			}
+			// A credential cannot be invented; tell the caller so it can say so.
+			// Staying silent about this was a trap: sharing quietly did not happen,
+			// the agent then wrote its own real file into the profile, and every
+			// later run dead-ended on "refusing to replace real file".
+			skipped = append(skipped, s.Rel)
+			continue
 		}
 		dst := filepath.Join(dir, s.Rel)
 		fi, err := root.Lstat(s.Rel)
@@ -62,8 +56,8 @@ func Link(a agent.Agent, dir string) (linked, skipped []string, err error) {
 			}
 		case err == nil:
 			return linked, skipped, fmt.Errorf(
-				"refusing to replace real %s at %s: move it aside, then re-run (it should be a link to %s)",
-				s.Kind, dst, s.From)
+				"refusing to replace real file at %s: move it aside, then re-run (it should be a link to %s)",
+				dst, s.From)
 		case !errors.Is(err, fs.ErrNotExist):
 			// Anything other than "not there" — including a symlinked ancestor,
 			// which os.Root reports rather than following.
