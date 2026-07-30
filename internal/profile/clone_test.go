@@ -3,6 +3,7 @@ package profile
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
@@ -258,5 +259,128 @@ func TestCloneAllowCannotEscape(t *testing.T) {
 	a := agent.Agent{Name: "test", CloneAllow: []string{"../../etc/passwd"}}
 	if err := Clone(a, src, dst); err == nil {
 		t.Error("want an error for an allowlist entry containing ..")
+	}
+}
+
+func TestCloneWarnsAboutAbsolutePathsIntoTheSourceConfig(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	body := `{"hooks":{"SessionStart":[{"hooks":[{"command":"` + src + `/hooks/x.sh"}]}]}}`
+	if err := os.WriteFile(filepath.Join(src, "settings.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "test", Config: src, CloneAllow: []string{"settings.json"}}
+	warnings, err := CloneWithWarnings(a, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("want a warning about the absolute path")
+	}
+	if !strings.Contains(warnings[0], "settings.json") {
+		t.Errorf("warning does not name the file: %q", warnings[0])
+	}
+}
+
+func TestCloneDoesNotWarnAboutProfileRelativePaths(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	body := `{"hooks":{"SessionStart":[{"hooks":[{"command":"$CLAUDE_CONFIG_DIR/hooks/x.sh"}]}]}}`
+	if err := os.WriteFile(filepath.Join(src, "settings.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "test", Config: src, CloneAllow: []string{"settings.json"}}
+	warnings, err := CloneWithWarnings(a, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("want no warning for a config-dir-relative path, got %v", warnings)
+	}
+}
+
+// codex never reconciles a config.toml plugin declaration against its own
+// plugins/cache on its own - verified by running codex against a profile cloned
+// with only config.toml: `codex plugin list` kept reporting the declared plugin
+// as not installed through a full session, during which codex happily installed
+// its own curated default instead. One `codex plugin add <p>@<m>` fixes it.
+func TestCloneWarnsAboutUninstalledCodexPlugins(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	body := "[plugins.\"probe@aptest\"]\nenabled = true\n"
+	if err := os.WriteFile(filepath.Join(src, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "codex", Config: src, CloneAllow: []string{"config.toml"}}
+	warnings, err := CloneWithWarnings(a, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, w := range warnings {
+		if strings.Contains(w, "plugin add probe@aptest") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("want a warning naming the fix command, got %v", warnings)
+	}
+}
+
+// A plugin that is enabled AND already cached in this profile needs no fix.
+func TestCloneDoesNotWarnWhenTheCodexPluginCacheIsPresent(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	body := "[plugins.\"probe@aptest\"]\nenabled = true\n"
+	if err := os.WriteFile(filepath.Join(src, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dst, "plugins", "cache", "aptest", "probe", "1.0.0"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "codex", Config: src, CloneAllow: []string{"config.toml"}}
+	warnings, err := CloneWithWarnings(a, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "plugin add") {
+			t.Errorf("want no plugin warning once the cache is present, got %q", w)
+		}
+	}
+}
+
+// Only enabled = true declarations warn: a disabled plugin left in config.toml is
+// not something a fresh profile needs installed.
+func TestCloneDoesNotWarnAboutDisabledCodexPlugins(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	body := "[plugins.\"probe@aptest\"]\nenabled = false\n"
+	if err := os.WriteFile(filepath.Join(src, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "codex", Config: src, CloneAllow: []string{"config.toml"}}
+	warnings, err := CloneWithWarnings(a, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "plugin add") {
+			t.Errorf("want no plugin warning for a disabled plugin, got %q", w)
+		}
+	}
+}
+
+// Only codex gets the plugin-cache check: other agents have no config.toml
+// convention, and a file that happens to be named that in another agent's
+// profile is not something this check should interpret.
+func TestCloneSkipsCodexPluginWarningForOtherAgents(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	body := "[plugins.\"probe@aptest\"]\nenabled = true\n"
+	if err := os.WriteFile(filepath.Join(src, "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "not-codex", Config: src, CloneAllow: []string{"config.toml"}}
+	warnings, err := CloneWithWarnings(a, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("want no warnings for a non-codex agent, got %v", warnings)
 	}
 }
