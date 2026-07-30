@@ -260,3 +260,134 @@ func TestCloneAllowCannotEscape(t *testing.T) {
 		t.Error("want an error for an allowlist entry containing ..")
 	}
 }
+
+// "." is a valid filepath.Clean result, so escapesRoot's ".." check alone let
+// it through - and a CloneAllow entry of "." means "src itself", cloning the
+// entire source directory rather than a named subset of it, which is exactly
+// what an allowlist exists to prevent.
+func TestCloneAllowRejectsDotEntry(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "everything.bin"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "test", CloneAllow: []string{"."}}
+	if err := Clone(a, src, dst); err == nil {
+		t.Error("want an error for a \".\" allowlist entry")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "everything.bin")); !os.IsNotExist(err) {
+		t.Error("\".\" cloned the entire source directory")
+	}
+}
+
+// An absolute entry is not a name relative to anything, and silently
+// resolving to a path that happens not to exist under src (rather than
+// erroring) contradicts escapesRoot's own doc comment that an entry can
+// never escape.
+func TestCloneAllowRejectsAbsoluteEntry(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	a := agent.Agent{Name: "test", CloneAllow: []string{"/etc/passwd"}}
+	if err := Clone(a, src, dst); err == nil {
+		t.Error("want an error for an absolute allowlist entry")
+	}
+}
+
+// Defense in depth: even if a future CloneAllow edit named a Shared path
+// directly, Clone must still refuse it - not rely solely on
+// TestCloneAllowNeverNamesASharedPath holding for every row forever. Not
+// exploitable today (that test already keeps the real registry clean); this
+// pins the code-level backstop.
+func TestCloneNeverCopiesASharedPathEvenIfAllowlisted(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeTree(t, src, map[string]string{
+		"settings.json": "{}",
+		"auth.json":     `{"token":"secret"}`,
+	})
+	a := agent.Agent{
+		Name:       "fake",
+		CloneAllow: []string{"settings.json", "auth.json"},
+		Shared:     []agent.Share{{Rel: "auth.json", From: "/nonexistent/auth.json"}},
+	}
+	if err := Clone(a, src, dst); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "auth.json")); !os.IsNotExist(err) {
+		t.Error("auth.json was copied although it is Shared")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "settings.json")); err != nil {
+		t.Errorf("settings.json was not copied: %v", err)
+	}
+}
+
+// Same backstop for State - a profile's own session history must never be
+// cloned even if a CloneAllow row is edited to include its parent directory.
+func TestCloneNeverCopiesAStatePathEvenIfAllowlisted(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeTree(t, src, map[string]string{
+		"settings.json":            "{}",
+		"projects/deep/a.jsonl":    "history",
+		"projects/sibling/ok.json": "history too",
+	})
+	a := agent.Agent{
+		Name:       "fake",
+		CloneAllow: []string{"settings.json", "projects"},
+		State:      []string{"projects"},
+	}
+	if err := Clone(a, src, dst); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "projects")); !os.IsNotExist(err) {
+		t.Error("projects was copied although it is State")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "settings.json")); err != nil {
+		t.Errorf("settings.json was not copied: %v", err)
+	}
+}
+
+// Same backstop for the config shim.
+func TestCloneNeverCopiesTheShimEvenIfAllowlisted(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeTree(t, src, map[string]string{
+		"opencode.json": "{}",
+		"xdg/opencode":  "shim entry",
+	})
+	a := agent.Agent{
+		Name:       "fake",
+		CloneAllow: []string{"opencode.json", "xdg"},
+		Shim:       &agent.Shim{Rel: "xdg", Entry: "opencode"},
+	}
+	if err := Clone(a, src, dst); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "xdg")); !os.IsNotExist(err) {
+		t.Error("xdg was copied although it is the config shim")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "opencode.json")); err != nil {
+		t.Errorf("opencode.json was not copied: %v", err)
+	}
+}
+
+// The skip must be by prefix, not exact match: a CloneAllow entry that is a
+// PARENT of a Shared/State/Shim path (e.g. "plugins" when "plugins/cache" is
+// Shared) must still exclude it while walking, and a sibling under the same
+// parent must still survive.
+func TestCloneSkipsASharedPathNestedUnderAnAllowedParent(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeTree(t, src, map[string]string{
+		"plugins/cache/x/file": "cached credential-adjacent data",
+		"plugins/config.json":  `{"keep":true}`,
+	})
+	a := agent.Agent{
+		Name:       "fake",
+		CloneAllow: []string{"plugins"},
+		Shared:     []agent.Share{{Rel: "plugins/cache", From: "/nonexistent/cache"}},
+	}
+	if err := Clone(a, src, dst); err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "plugins", "cache")); !os.IsNotExist(err) {
+		t.Error("plugins/cache was copied although it is nested under a Shared path")
+	}
+	if _, err := os.Stat(filepath.Join(dst, "plugins", "config.json")); err != nil {
+		t.Errorf("plugins/config.json was not copied: %v", err)
+	}
+}

@@ -55,8 +55,25 @@ func Clone(a agent.Agent, src, dst string) error {
 	}
 	defer func() { _ = root.Close() }()
 
+	// Never cloned, regardless of what CloneAllow says: the credential, a
+	// profile's own session history, and the config shim. Not exploitable by
+	// the current registry — TestCloneAllowNeverNamesASharedPath already keeps
+	// a Shared path itself out of CloneAllow — but this backstop does not
+	// depend on that discipline holding for every future edit, the same
+	// reason Delete re-checks Default independently of ParseRef.
+	skip := make([]string, 0, len(a.Shared)+len(a.State)+1)
+	for _, s := range a.Shared {
+		skip = append(skip, filepath.Clean(s.Rel))
+	}
+	for _, st := range a.State {
+		skip = append(skip, filepath.Clean(st))
+	}
+	if a.Shim != nil {
+		skip = append(skip, filepath.Clean(a.Shim.Rel))
+	}
+
 	for _, rel := range a.CloneAllow {
-		if err := cloneEntry(root, src, rel); err != nil {
+		if err := cloneEntry(root, src, rel, skip); err != nil {
 			return fmt.Errorf("cloning %s: %w", rel, err)
 		}
 	}
@@ -64,16 +81,22 @@ func Clone(a agent.Agent, src, dst string) error {
 }
 
 // cloneEntry copies one CloneAllow entry — a file or a whole directory — from
-// src into dst through root, which is confined to dst.
+// src into dst through root, which is confined to dst. skip is the Shared/
+// State/Shim backstop computed once by Clone; isShared checks it by prefix, so
+// an entry that is itself skipped, or a parent directory of something skipped,
+// is refused before anything is written.
 //
 // escapesRoot is checked before anything else, rather than left to os.Root to
 // catch: filepath.Join(src, rel) Cleans the two together, so a "rel" such as
 // "../../etc/passwd" can collapse into a path that simply does not exist under
 // src at typical temp-dir depths — which "tolerate missing" would then wave
 // through instead of rejecting.
-func cloneEntry(root *os.Root, src, rel string) error {
+func cloneEntry(root *os.Root, src, rel string, skip []string) error {
 	if escapesRoot(rel) {
 		return fmt.Errorf("allowlist entry %q escapes the profile directory", rel)
+	}
+	if isShared(rel, skip) {
+		return nil // never clone the credential, session history, or the shim
 	}
 	srcPath := filepath.Join(src, rel)
 	fi, err := os.Lstat(srcPath)
@@ -97,7 +120,7 @@ func cloneEntry(root *os.Root, src, rel string) error {
 		if err != nil {
 			return err
 		}
-		if d.Type()&os.ModeSymlink != 0 {
+		if isShared(entryRel, skip) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -113,8 +136,14 @@ func cloneEntry(root *os.Root, src, rel string) error {
 			// happens to be empty in the source still appear in the clone.
 			return root.MkdirAll(entryRel, info.Mode().Perm())
 		}
+		// A symlink lands here too, never in the branch above: WalkDir's
+		// DirEntry.IsDir() reflects the dirent's own type bit, and a symlink's
+		// type bit is ModeSymlink even when it points at a directory. So this
+		// is what actually skips a symlink — a dedicated branch before this
+		// point would be dead code, unreachable because IsDir() is already
+		// false for every symlink.
 		if !d.Type().IsRegular() {
-			return nil // sockets, fifos, devices: nothing a profile needs
+			return nil // symlinks, sockets, fifos, devices: nothing a profile needs
 		}
 		info, err := d.Info()
 		if err != nil {
@@ -124,13 +153,39 @@ func cloneEntry(root *os.Root, src, rel string) error {
 	})
 }
 
-// escapesRoot reports whether rel, once cleaned, references something above
-// the directory it will be joined onto — checked precisely rather than with
+// escapesRoot reports whether rel is not a safe, single-name-scoped entry:
+// "." (a valid filepath.Clean result, but never what a CloneAllow entry
+// means — it would clone the entire source directory rather than a named
+// subset of it), an absolute path (not a name relative to anything), or a
+// path that, once cleaned, references something above the directory it will
+// be joined onto — checked precisely rather than with
 // strings.Contains(rel, ".."), which would also reject a name that merely
-// contains the two characters, like "settings..bak".
+// contains the two characters, like "settings..bak". Clean already collapses
+// any interior ".." against a preceding component, so a cleaned rel that
+// still has one can only carry it as a leading run.
 func escapesRoot(rel string) bool {
+	if filepath.IsAbs(rel) {
+		return true
+	}
 	cleaned := filepath.Clean(rel)
+	if cleaned == "." {
+		return true
+	}
 	return cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator))
+}
+
+// isShared reports whether rel is one of the skip paths (Shared, State, or the
+// config shim) or lives under one — checked by prefix, not exact match, so a
+// CloneAllow entry that is a PARENT of a skip path (e.g. "plugins" when
+// "plugins/cache" is Shared) cannot walk into it either.
+func isShared(rel string, skip []string) bool {
+	rel = filepath.Clean(rel)
+	for _, s := range skip {
+		if rel == s || strings.HasPrefix(rel, s+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // containment rejects a destination that is src itself or lives inside src.
