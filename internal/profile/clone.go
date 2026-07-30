@@ -189,14 +189,26 @@ func containment(src, dst string) error {
 	return nil
 }
 
-// warnAbsolute reports cloned files that contain the source config directory as a
-// literal path. Those keep pointing at the real home from inside the profile: a hook
-// command of "/home/user/.claude/hooks/x.js" runs the real script, and the profile's
-// own copy is never used. "$CLAUDE_CONFIG_DIR/hooks/x.js" follows the profile -
-// verified, hooks inherit that variable and it resolves to the profile directory.
+// warnAbsolute reports cloned files that contain, as a literal path, either the
+// agent's real config directory (a.Config) or the profile Clone actually copied
+// from (src) — two distinct traps, both worth a warning:
 //
-// Reported, never rewritten. Editing someone's hook command on their behalf is how you
-// break a hook in a way nobody can find.
+//   - a.Config: a hook command of "/home/user/.claude/hooks/x.js" runs the real
+//     script forever, from every profile that was ever cloned from anything,
+//     because it never named a particular clone in the first place. This is the
+//     common case — it is what any settings.json carries once it has been
+//     copied out of the real config even once — and it is checked regardless of
+//     whether src happens to be that same real config directory (`--from
+//     default`) or some other profile.
+//   - src, when it differs from a.Config: the clone runs the SOURCE PROFILE's
+//     script, not its own copy. Reported with its own wording — calling a
+//     profile "the real config directory" would be simply wrong.
+//
+// "$CLAUDE_CONFIG_DIR/hooks/x.js" follows the profile in both cases - verified,
+// hooks inherit that variable and it resolves to whichever profile is running.
+//
+// Reported, never rewritten. Editing someone's hook command on their behalf is
+// how you break it in a way nobody can find.
 func warnAbsolute(a agent.Agent, src, dst string) ([]string, error) {
 	var warnings []string
 	err := filepath.WalkDir(dst, func(path string, d os.DirEntry, err error) error {
@@ -217,16 +229,24 @@ func warnAbsolute(a agent.Agent, src, dst string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if !strings.Contains(string(b), src) {
-			return nil
-		}
+		content := string(b)
 		rel, err := filepath.Rel(dst, path)
 		if err != nil {
 			return err
 		}
-		warnings = append(warnings, fmt.Sprintf(
-			"%s still names the real config directory (%s) - point it at $%s instead, which resolves to this profile",
-			rel, src, a.ConfigEnv))
+		if a.Config != "" && strings.Contains(content, a.Config) {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s names your real config directory (%s), so this profile will run that copy, not its own - point it at $%s instead",
+				rel, a.Config, a.ConfigEnv))
+		}
+		// Skipped when src is the real config directory (`--from default`): that
+		// is the case above, and reporting it twice under two different names
+		// would only confuse.
+		if src != a.Config && strings.Contains(content, src) {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s names the source profile (%s), so this clone will run the source profile's copy, not its own - point it at $%s instead",
+				rel, src, a.ConfigEnv))
+		}
 		return nil
 	})
 	return warnings, err
