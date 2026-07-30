@@ -183,31 +183,35 @@ func cmdList(args []string) error {
 	default:
 		return fmt.Errorf("usage: ap list [agent]")
 	}
-	var any bool
+	// List always includes Default, so there is no "no profiles yet" case left
+	// to report: every agent has at least its real config to show.
 	for _, name := range names {
 		a, _ := agent.Lookup(name)
 		profiles, err := profile.List(a)
 		if err != nil {
 			return err
 		}
-		if len(profiles) == 0 {
-			continue
-		}
-		any = true
 		fmt.Printf("%s: %s\n", name, strings.Join(profiles, " "))
-	}
-	if !any {
-		fmt.Println("no profiles yet - create one with: ap create claude:plan")
 	}
 	return nil
 }
 
-// ref parses the single positional argument shared by most commands.
+// ref parses the single positional argument shared by the writing commands
+// (create, delete). ParseRef rejects Default.
 func ref(args []string, cmd string) (agent.Agent, string, error) {
 	if len(args) != 1 {
 		return agent.Agent{}, "", fmt.Errorf("usage: ap %s <agent>:<profile>", cmd)
 	}
 	return profile.ParseRef(args[0])
+}
+
+// refAllowDefault is ref but also accepts Default, for the read-only commands
+// that may resolve to the agent's real config directory: which, env, run.
+func refAllowDefault(args []string, cmd string) (agent.Agent, string, error) {
+	if len(args) != 1 {
+		return agent.Agent{}, "", fmt.Errorf("usage: ap %s <agent>:<profile>", cmd)
+	}
+	return profile.ParseRefAllowDefault(args[0])
 }
 
 func cmdCreate(args []string) error {
@@ -230,7 +234,10 @@ func cmdCreate(args []string) error {
 		// Validate before building a path from it. Without this, --from is a
 		// traversal: profile.Dir joins and cleans, so "--from ../../../.claude"
 		// resolves outside the profile root and Clone copies the real home.
-		if err := profile.ValidName(*from); err != nil {
+		// ParseRefAllowDefault, not ValidName directly, because --from is one of
+		// the four read-only paths that may name Default: `--from default`
+		// clones the agent's real config.
+		if _, _, err := profile.ParseRefAllowDefault(a.Name + ":" + *from); err != nil {
 			return fmt.Errorf("--from: %w", err)
 		}
 		if *from == name {
@@ -367,7 +374,7 @@ func setupHint(a agent.Agent, name string) string {
 }
 
 func cmdWhich(args []string) error {
-	a, name, err := ref(args, "which")
+	a, name, err := refAllowDefault(args, "which")
 	if err != nil {
 		return err
 	}
@@ -376,12 +383,18 @@ func cmdWhich(args []string) error {
 }
 
 func cmdEnv(args []string) error {
-	a, name, err := ref(args, "env")
+	a, name, err := refAllowDefault(args, "env")
 	if err != nil {
 		return err
 	}
-	// Empty base, so only the overrides print.
-	for _, e := range run.Env(a, profile.Dir(a, name), nil) {
+	// Default sets no override: Env treats an empty dir as "none", which is
+	// what makes `ap env <agent>:default` print nothing rather than the real
+	// config directory it would otherwise be pointless to assign to itself.
+	dir := profile.Dir(a, name)
+	if name == profile.Default {
+		dir = ""
+	}
+	for _, e := range run.Env(a, dir, nil) {
 		fmt.Println(e)
 	}
 	return nil
@@ -394,7 +407,7 @@ func cmdRun(args []string) error {
 	// No flag parsing at all: everything after the reference belongs to the agent,
 	// verbatim. See the flag-order note in usage.
 	rest := args
-	a, name, err := profile.ParseRef(rest[0])
+	a, name, err := profile.ParseRefAllowDefault(rest[0])
 	if err != nil {
 		return err
 	}
@@ -402,6 +415,14 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}
+
+	// Default is the agent's real config, reached exactly as it already is:
+	// nothing is created, nothing is linked, no shim is built, and Exec gets no
+	// override at all (an empty dir), not even one that happens to equal it.
+	if name == profile.Default {
+		return run.Exec(a, "", rest[1:])
+	}
+
 	dir := profile.Dir(a, name)
 
 	// Re-assert the shared links on every run: agents rewrite their credential

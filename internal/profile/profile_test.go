@@ -3,9 +3,12 @@ package profile
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/internal/run"
 )
 
 func agentOrFail(t *testing.T, name string) agent.Agent {
@@ -76,12 +79,14 @@ func TestCreateAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != "plan" {
-		t.Errorf("List = %v, want [plan]", got)
+	// Default is always prepended, ahead of created profiles.
+	if len(got) != 2 || got[0] != Default || got[1] != "plan" {
+		t.Errorf("List = %v, want [%s plan]", got, Default)
 	}
 }
 
-// Profiles of one agent must not show up under another.
+// Profiles of one agent must not show up under another. codex has no created
+// profiles at all, so its List holds nothing but the always-present Default.
 func TestListIsPerAgent(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	if _, err := Create(agentOrFail(t, "claude"), "plan"); err != nil {
@@ -91,8 +96,8 @@ func TestListIsPerAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 0 {
-		t.Errorf("codex List = %v, want empty", got)
+	if len(got) != 1 || got[0] != Default {
+		t.Errorf("codex List = %v, want [%s]", got, Default)
 	}
 }
 
@@ -107,14 +112,15 @@ func TestCreateRejectsExisting(t *testing.T) {
 	}
 }
 
+// A missing profile directory is not an error; List reports only Default.
 func TestListEmptyIsNotAnError(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	got, err := List(agentOrFail(t, "codex"))
 	if err != nil {
 		t.Fatalf("List on missing dir: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("List = %v, want empty", got)
+	if len(got) != 1 || got[0] != Default {
+		t.Errorf("List = %v, want [%s]", got, Default)
 	}
 }
 
@@ -129,5 +135,87 @@ func TestExists(t *testing.T) {
 	}
 	if !Exists(a, "plan") {
 		t.Error("Exists = false after Create")
+	}
+}
+
+// Default names the agent's real config directory, never a directory ap
+// creates. Dir must resolve it that way for `ap which <agent>:default` and for
+// --from default to find something to clone.
+func TestWhichDefaultPrintsTheRealConfigDir(t *testing.T) {
+	a := agentOrFail(t, "claude")
+	if got := Dir(a, Default); got != a.Config {
+		t.Errorf("Dir(default) = %q, want %q", got, a.Config)
+	}
+}
+
+// Exists must track whether the real config directory happens to exist on this
+// machine, the same as Dir(a, Default) resolving to a.Config would imply — not
+// hardcode true, which would make `ap which claude:default` look usable on a
+// machine where claude was never even installed.
+func TestExistsForDefaultTracksTheRealConfigDir(t *testing.T) {
+	a := agentOrFail(t, "claude")
+	_, statErr := os.Stat(a.Config)
+	want := statErr == nil
+	if got := Exists(a, Default); got != want {
+		t.Errorf("Exists(default) = %v, want %v (whether %s exists)", got, want, a.Config)
+	}
+}
+
+// With no profiles created at all, Default is still there: it names the real
+// config, not something `ap create` produced.
+func TestListAlwaysIncludesDefault(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	out, err := List(agentOrFail(t, "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(out, Default) {
+		t.Errorf("List = %v, want it to include %q", out, Default)
+	}
+}
+
+// `ap run codex:default` execs with no config variable set at all — nothing is
+// created, nothing is linked, no shim is built. The empty dir is what cmd/ap
+// passes run.Env for Default, in place of a.Config, precisely so this holds.
+func TestRunDefaultSetsNoConfigVariable(t *testing.T) {
+	a := agentOrFail(t, "claude")
+	env := run.Env(a, "", nil)
+	for _, e := range env {
+		if strings.HasPrefix(e, a.ConfigEnv+"=") {
+			t.Errorf("default must set no config variable, got %q", e)
+		}
+	}
+}
+
+// Default is reserved: Dir(a, "default") is the user's real config directory,
+// and every writing path routes through ValidName, so this is what makes
+// `ap create claude:default` and `ap delete claude:default` refuse.
+func TestValidNameRejectsDefault(t *testing.T) {
+	if err := ValidName(Default); err == nil {
+		t.Error("ValidName(Default) = nil error, want a reservation error")
+	}
+}
+
+// ParseRef is the writing path and must keep rejecting Default. ParseRefAllowDefault
+// is the escape hatch for the four read-only paths (run, which, env, --from) that may
+// resolve to the real config directory.
+func TestParseRefRejectsDefaultButParseRefAllowDefaultAccepts(t *testing.T) {
+	if _, _, err := ParseRef("claude:default"); err == nil {
+		t.Error("ParseRef(claude:default) = nil error, want rejection")
+	}
+	a, name, err := ParseRefAllowDefault("claude:default")
+	if err != nil {
+		t.Fatalf("ParseRefAllowDefault(claude:default): %v", err)
+	}
+	if name != Default || a.Name != "claude" {
+		t.Errorf("ParseRefAllowDefault(claude:default) = (%q,%q), want (claude,%q)", a.Name, name, Default)
+	}
+}
+
+// ParseRefAllowDefault must still apply every other ValidName rule; the
+// allowance is for the literal sentinel, not a bypass of validation.
+func TestParseRefAllowDefaultStillRejectsTraversal(t *testing.T) {
+	if _, _, err := ParseRefAllowDefault("claude:../escape"); err == nil {
+		t.Error("ParseRefAllowDefault(claude:../escape) = nil error, want rejection")
 	}
 }

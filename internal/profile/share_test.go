@@ -274,3 +274,16 @@ func TestDeleteMissingProfileErrors(t *testing.T) {
 		t.Error("Delete of missing profile = nil error, want error")
 	}
 }
+
+// Belt as well as braces, the same defense in depth as
+// TestDeleteDoesNotFollowSymlinks and TestDeleteDoesNotFollowTheConfigShim:
+// Delete must refuse Default on its own, not only because ParseRef rejects it
+// upstream. Dir(a, Default) is the user's real config directory, and Delete is
+// os.RemoveAll — the guard must not depend on a validator having been called
+// correctly somewhere else.
+func TestDeleteRefusesDefaultDirectly(t *testing.T) {
+	a := agentOrFail(t, "claude")
+	if err := Delete(a, Default); err == nil {
+		t.Error("Delete(a, Default) = nil error, want refusal")
+	}
+}

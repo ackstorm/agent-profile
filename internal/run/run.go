@@ -28,10 +28,20 @@ func ConfigDir(a agent.Agent, dir string) string {
 // the real one. See profile.Shim; without it this would redirect git, gh, npm and
 // every language server into the profile.
 //
+// dir == "" sets no override at all: the shape `ap run <agent>:default` needs,
+// since the agent's real config directory is wherever it already looks with no
+// variable set. The caller passes that fact in explicitly — profile.Default
+// resolves to the real config directory for every other purpose, so inferring
+// "no override" from dir equaling it here would be one string comparison away
+// from silently breaking the day that directory moves.
+//
 // Nothing under XDG_DATA_HOME, XDG_STATE_HOME or XDG_CACHE_HOME is ever
 // redirected, which is what keeps sessions, credentials and caches shared.
 func Env(a agent.Agent, dir string, base []string) []string {
-	overrides := map[string]string{a.ConfigEnv: ConfigDir(a, dir)}
+	overrides := map[string]string{}
+	if dir != "" {
+		overrides[a.ConfigEnv] = ConfigDir(a, dir)
+	}
 
 	out := make([]string, 0, len(base)+len(overrides))
 	for _, e := range base {

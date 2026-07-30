@@ -223,6 +223,51 @@ func TestCopyInstructionsFailsBeforeCreatingAnythingWhenUnknown(t *testing.T) {
 	}
 }
 
+// The whole feature in one test. Dir(a, "default") is the user's real config, so a
+// delete that resolved it would remove the actual configuration of the agent. Nothing
+// that writes may accept the name.
+func TestDefaultIsRejectedByEverythingThatWrites(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:default"},
+		{"delete", "claude:default"},
+	} {
+		if err := dispatch(args); err == nil {
+			t.Errorf("ap %v was accepted and must not be", args)
+		}
+	}
+}
+
+func TestDeleteDefaultLeavesTheRealConfigAlone(t *testing.T) {
+	a, _ := agent.Lookup("claude")
+	before, err := os.Stat(a.Config)
+	if err != nil {
+		t.Skip("no real claude config on this machine")
+	}
+	if err := dispatch([]string{"delete", "claude:default"}); err == nil {
+		t.Fatal("ap delete claude:default must fail")
+	}
+	after, err := os.Stat(a.Config)
+	if err != nil {
+		t.Fatalf("the real config directory is gone: %v", err)
+	}
+	if before.ModTime() != after.ModTime() {
+		t.Error("the real config directory was modified")
+	}
+}
+
+// --from default must be accepted as a source, never rejected the same way the
+// create/delete destination case is. A rejection here would mean the --from
+// validation started reusing the plain ValidName check again instead of the
+// Default-aware one.
+func TestDispatchCreateFromDefaultIsNeverRejectedAsInvalid(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"create", "claude:fromdefault", "--from", "default"})
+	if err != nil && strings.Contains(err.Error(), "reserved") {
+		t.Errorf("--from default was rejected as an invalid name: %v", err)
+	}
+}
+
 func TestCopyInstructionsWritesARealFileNotALink(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a, _ := agent.Lookup("claude")
