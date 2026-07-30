@@ -200,6 +200,15 @@ every release, and a stale list copies caches silently. Set the first profile up
 by hand — a curated minimal set is the point — then clone it. For a one-off,
 `cp ~/.claude/settings.json $(ap which claude:plan)/`.
 
+Two things a clone carries over without being fixed, because `ap` places files
+rather than reading them: a hook command that names its script by absolute path
+into the real home keeps running that real script from inside the profile —
+point it at `$CLAUDE_CONFIG_DIR` (or the agent's own config variable) instead,
+which resolves to whichever profile is running. And a cloned codex profile can
+end up with `config.toml` saying a plugin is enabled while `codex plugin list`
+reports it as not installed, because codex does not reconcile that declaration
+against its own cache on its own — fix it with `codex plugin add <plugin>@<marketplace>`.
+
 ## Install
 
 ```bash
