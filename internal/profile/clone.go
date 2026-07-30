@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
@@ -33,58 +32,35 @@ import (
 // dst must be an existing empty directory that is not inside src. Clone does not
 // create it; the caller does.
 func Clone(a agent.Agent, src, dst string) error {
-	_, err := CloneWithWarnings(a, src, dst)
-	return err
-}
-
-// CloneWithWarnings does what Clone does, and additionally reports cloned files
-// that need a human's attention afterward: one that still names the source
-// config directory by absolute path (warnAbsolute), and, for codex, an enabled
-// plugin declaration whose cache this profile does not have
-// (warnUninstalledCodexPlugins). Clone is the plain entry point most callers
-// want; this one exists so cmd/ap can surface the warnings after `create --from`.
-func CloneWithWarnings(a agent.Agent, src, dst string) ([]string, error) {
 	// Resolve src before anything else. Lstat below would otherwise inspect the
 	// symlink rather than the directory it points to.
 	src, err := filepath.EvalSymlinks(src)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read source profile: %w", err)
+		return fmt.Errorf("cannot read source profile: %w", err)
 	}
 	fi, err := os.Lstat(src)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read source profile %s: %w", src, err)
+		return fmt.Errorf("cannot read source profile %s: %w", src, err)
 	}
 	if !fi.IsDir() {
-		return nil, fmt.Errorf("source profile %s is not a directory", src)
+		return fmt.Errorf("source profile %s is not a directory", src)
 	}
 	if err := containment(src, dst); err != nil {
-		return nil, err
+		return err
 	}
 
 	root, err := os.OpenRoot(dst)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = root.Close() }()
 
 	for _, rel := range a.CloneAllow {
 		if err := cloneEntry(root, src, rel); err != nil {
-			return nil, fmt.Errorf("cloning %s: %w", rel, err)
+			return fmt.Errorf("cloning %s: %w", rel, err)
 		}
 	}
-
-	warnings, err := warnAbsolute(a, src, dst)
-	if err != nil {
-		return nil, err
-	}
-	if a.Name == "codex" {
-		pluginWarnings, err := warnUninstalledCodexPlugins(dst, a.Name+":"+filepath.Base(dst))
-		if err != nil {
-			return nil, err
-		}
-		warnings = append(warnings, pluginWarnings...)
-	}
-	return warnings, nil
+	return nil
 }
 
 // cloneEntry copies one CloneAllow entry — a file or a whole directory — from
@@ -187,111 +163,6 @@ func containment(src, dst string) error {
 		return fmt.Errorf("destination %s is inside the source %s", dst, src)
 	}
 	return nil
-}
-
-// warnAbsolute reports cloned files that contain the source config directory as a
-// literal path. Those keep pointing at the real home from inside the profile: a hook
-// command of "/home/user/.claude/hooks/x.js" runs the real script, and the profile's
-// own copy is never used. "$CLAUDE_CONFIG_DIR/hooks/x.js" follows the profile -
-// verified, hooks inherit that variable and it resolves to the profile directory.
-//
-// Reported, never rewritten. Editing someone's hook command on their behalf is how you
-// break a hook in a way nobody can find.
-func warnAbsolute(a agent.Agent, src, dst string) ([]string, error) {
-	var warnings []string
-	err := filepath.WalkDir(dst, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !d.Type().IsRegular() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Size() > 1<<20 {
-			return nil // large files are never the small settings/config kind this looks for
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(string(b), src) {
-			return nil
-		}
-		rel, err := filepath.Rel(dst, path)
-		if err != nil {
-			return err
-		}
-		warnings = append(warnings, fmt.Sprintf(
-			"%s still names the real config directory (%s) - point it at $%s instead, which resolves to this profile",
-			rel, src, a.ConfigEnv))
-		return nil
-	})
-	return warnings, err
-}
-
-// codexPluginHeader matches a config.toml section header for a plugin
-// declaration, e.g. [plugins."probe@aptest"].
-var codexPluginHeader = regexp.MustCompile(`^\[plugins\."([^"]+)"\]$`)
-
-// warnUninstalledCodexPlugins reports a codex plugin declared enabled in the
-// cloned config.toml whose cache this profile does not have.
-//
-// codex keeps every plugin declaration in config.toml and nowhere else
-// ([marketplaces.<name>], [plugins."<p>@<m>"]), but unlike claude it never
-// reconciles that declaration against its cache on its own: a profile cloned
-// with only config.toml reports the plugin as not installed from
-// `codex plugin list`, and stays that way through a full session — during
-// which codex happily installs its own curated default instead. One
-// `codex plugin add <p>@<m>` fixes it, idempotently, so this is reported
-// rather than run on the user's behalf at create time.
-func warnUninstalledCodexPlugins(dst, ref string) ([]string, error) {
-	b, err := os.ReadFile(filepath.Join(dst, "config.toml"))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	var warnings []string
-	var current string
-	enabled := false
-	flush := func() {
-		if current == "" || !enabled {
-			return
-		}
-		plugin, marketplace, ok := strings.Cut(current, "@")
-		if !ok {
-			return
-		}
-		cacheDir := filepath.Join(dst, "plugins", "cache", marketplace, plugin)
-		if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
-			warnings = append(warnings, fmt.Sprintf(
-				"config.toml declares plugin %q as enabled, but it is not installed in this profile - fix with: ap run %s plugin add %s",
-				current, ref, current))
-		}
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if m := codexPluginHeader.FindStringSubmatch(line); m != nil {
-			flush()
-			current, enabled = m[1], false
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			flush()
-			current, enabled = "", false
-			continue
-		}
-		if current != "" && line == "enabled = true" {
-			enabled = true
-		}
-	}
-	flush()
-	return warnings, nil
 }
 
 // copyFileToRoot copies the regular file at src to rel inside root. Every write

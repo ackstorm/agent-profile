@@ -256,8 +256,7 @@ func cmdCreate(args []string) error {
 	fmt.Printf("created %s:%s at %s\n", a.Name, name, dir)
 
 	if srcDir != "" {
-		warnings, err := profile.CloneWithWarnings(a, srcDir, dir)
-		if err != nil {
+		if err := profile.Clone(a, srcDir, dir); err != nil {
 			// Remove the half-populated directory so `ap create` can be retried.
 			// Safe here specifically because Link has not run yet, so the directory
 			// provably contains no symlinks; the same cleanup after Link would not
@@ -266,9 +265,6 @@ func cmdCreate(args []string) error {
 			return err
 		}
 		fmt.Printf("cloned from %s:%s\n", a.Name, *from)
-		for _, w := range warnings {
-			fmt.Fprintf(os.Stderr, "ap: warning: %s\n", w)
-		}
 	}
 
 	if err := linkAndReport(a, dir); err != nil {
