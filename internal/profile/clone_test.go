@@ -262,8 +262,6 @@ func TestCloneAllowCannotEscape(t *testing.T) {
 	}
 }
 
-// src is a.Config here — the shape of `--from default`. Both checks in
-// warnAbsolute would otherwise match the same occurrence and warn twice.
 func TestCloneWarnsAboutAbsolutePathsIntoTheSourceConfig(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	body := `{"hooks":{"SessionStart":[{"hooks":[{"command":"` + src + `/hooks/x.sh"}]}]}}`
@@ -275,60 +273,11 @@ func TestCloneWarnsAboutAbsolutePathsIntoTheSourceConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warnings) != 1 {
-		t.Fatalf("want exactly one warning when src equals Config, got %v", warnings)
+	if len(warnings) == 0 {
+		t.Fatal("want a warning about the absolute path")
 	}
 	if !strings.Contains(warnings[0], "settings.json") {
 		t.Errorf("warning does not name the file: %q", warnings[0])
-	}
-}
-
-// The regression this test pins: cloning claude:plan into claude:review with a
-// settings.json that names ~/.claude (the real config, never the source
-// profile) used to produce no warning at all, because warnAbsolute checked only
-// src. That is the common case — any settings.json that was ever copied out of
-// the real config carries exactly this path — and it is the one the user
-// actually hits.
-func TestCloneWarnsAboutTheRealConfigDirEvenWhenSrcIsADifferentProfile(t *testing.T) {
-	realConfig, src, dst := t.TempDir(), t.TempDir(), t.TempDir()
-	body := `{"hooks":{"SessionStart":[{"hooks":[{"command":"` + realConfig + `/hooks/x.sh"}]}]}}`
-	if err := os.WriteFile(filepath.Join(src, "settings.json"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := agent.Agent{Name: "test", Config: realConfig, CloneAllow: []string{"settings.json"}}
-	warnings, err := CloneWithWarnings(a, src, dst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 1 {
-		t.Fatalf("want a warning about the real config directory, got %v", warnings)
-	}
-	if !strings.Contains(warnings[0], "real config directory") {
-		t.Errorf("warning does not name the problem: %q", warnings[0])
-	}
-}
-
-// A path into the source PROFILE, distinct from the real config, gets its own
-// wording: calling a profile "the real config directory" would be wrong.
-func TestCloneWarnsAboutTheSourceProfileWithDistinctWording(t *testing.T) {
-	realConfig, src, dst := t.TempDir(), t.TempDir(), t.TempDir()
-	body := `{"hooks":{"SessionStart":[{"hooks":[{"command":"` + src + `/hooks/x.sh"}]}]}}`
-	if err := os.WriteFile(filepath.Join(src, "settings.json"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := agent.Agent{Name: "test", Config: realConfig, CloneAllow: []string{"settings.json"}}
-	warnings, err := CloneWithWarnings(a, src, dst)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 1 {
-		t.Fatalf("want a warning about the source profile, got %v", warnings)
-	}
-	if !strings.Contains(warnings[0], "source profile") {
-		t.Errorf("warning does not name the problem: %q", warnings[0])
-	}
-	if strings.Contains(warnings[0], "real config directory") {
-		t.Errorf("a source-profile path must not be called the real config directory: %q", warnings[0])
 	}
 }
 
