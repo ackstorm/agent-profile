@@ -581,8 +581,16 @@ func removeWrapperIfOurs(ref string) error {
 	if err != nil {
 		return err
 	}
-	// Same os.Root confinement as cmdLink's write.
+	// Same os.Root confinement as cmdLink's write. A missing link dir means
+	// nothing was ever linked - there is no wrapper to remove, the same as a
+	// missing wrapper file below, not an error. Without this, ap delete and ap
+	// unlink failed on any machine that had never run `ap link` at all: the
+	// profile was already gone by the time this ran, so the command both broke
+	// and reported it as a failure.
 	root, err := os.OpenRoot(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

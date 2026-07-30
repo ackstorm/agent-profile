@@ -351,6 +351,37 @@ func TestUnlinkOfANeverLinkedProfileIsNotAnError(t *testing.T) {
 	}
 }
 
+// A missing link dir (nothing under it, unlike the case above where the dir
+// exists but is empty) means nothing was ever linked, on any machine that has
+// never run `ap link` at all - most of them. Regression: os.OpenRoot on a
+// nonexistent dir returned an error that neither unlink nor delete's automatic
+// wrapper cleanup treated as "nothing to remove".
+func TestUnlinkToleratesAMissingLinkDir(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"unlink", "claude:neverlinked"}); err != nil {
+		t.Errorf("unlink with a missing link dir = %v, want nil", err)
+	}
+}
+
+// The sharper case: delete must not report failure - or leave the profile
+// deleted while claiming otherwise - just because the link dir was never
+// created.
+func TestDeleteToleratesAMissingLinkDir(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:nolinkdir"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"delete", "claude:nolinkdir"}); err != nil {
+		t.Errorf("delete with a missing link dir = %v, want nil", err)
+	}
+	if profile.Exists(a, "nolinkdir") {
+		t.Error("delete reported success but the profile still exists")
+	}
+}
+
 // A deleted profile must not leave a wrapper that fails confusingly.
 func TestDeleteRemovesTheWrapper(t *testing.T) {
 	bin := t.TempDir()
