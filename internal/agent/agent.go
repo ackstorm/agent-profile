@@ -87,6 +87,14 @@ type Agent struct {
 	Name string
 	// Bin is the executable name looked up on PATH.
 	Bin string
+	// Config is the agent's real, machine-wide config directory — the one it uses
+	// when ap is not involved. It is the source for `--from default` and the target
+	// `<agent>:default` resolves to.
+	//
+	// Not derived from ConfigEnv: that variable says where to point an agent, not
+	// where it already looks. pi's is ~/.pi/agent and opencode's is under ~/.config,
+	// neither of which follows from the name.
+	Config string
 	// ConfigEnv is the variable set to the profile directory, or to the shim
 	// directory inside it when Shim is set. Agent specific wherever the agent
 	// offers one, because every child process inherits what we set.
@@ -165,6 +173,7 @@ func registry() map[string]Agent {
 		"claude": {
 			Name:      "claude",
 			Bin:       "claude",
+			Config:    filepath.Join(h, ".claude"),
 			ConfigEnv: "CLAUDE_CONFIG_DIR",
 			Mode:      Replace,
 			Shared: []Share{
@@ -184,6 +193,7 @@ func registry() map[string]Agent {
 		"codex": {
 			Name:      "codex",
 			Bin:       "codex",
+			Config:    filepath.Join(h, ".codex"),
 			ConfigEnv: "CODEX_HOME",
 			Mode:      Replace,
 			Shared: []Share{
@@ -204,6 +214,7 @@ func registry() map[string]Agent {
 		"pi": {
 			Name:      "pi",
 			Bin:       "pi",
+			Config:    filepath.Join(h, ".pi", "agent"),
 			ConfigEnv: "PI_CODING_AGENT_DIR",
 			Mode:      Replace,
 			Shared: []Share{
@@ -217,8 +228,9 @@ func registry() map[string]Agent {
 			Setup:    "ap run %s config",
 		},
 		"opencode": {
-			Name: "opencode",
-			Bin:  "opencode",
+			Name:   "opencode",
+			Bin:    "opencode",
+			Config: filepath.Join(h, ".config", "opencode"),
 			// opencode has no private config-dir variable. OPENCODE_CONFIG_DIR only
 			// APPENDS to its search path, and OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT
 			// append too. Its config root is computed as

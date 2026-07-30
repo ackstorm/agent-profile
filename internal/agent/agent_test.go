@@ -1,11 +1,45 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestEveryAgentKnowsItsRealConfigDir(t *testing.T) {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	want := map[string]string{
+		"claude":   filepath.Join(h, ".claude"),
+		"codex":    filepath.Join(h, ".codex"),
+		"pi":       filepath.Join(h, ".pi", "agent"),
+		"opencode": filepath.Join(h, ".config", "opencode"),
+	}
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if a.Config != want[name] {
+			t.Errorf("%s Config = %q, want %q", name, a.Config, want[name])
+		}
+	}
+}
+
+// Config must agree with what Shared already claims about the real home, or the two
+// would describe different machines.
+func TestConfigAgreesWithSharedSources(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		for _, s := range a.Shared {
+			if !strings.HasPrefix(s.From, a.Config+string(os.PathSeparator)) {
+				t.Errorf("%s: shared %q lives at %q, outside Config %q", name, s.Rel, s.From, a.Config)
+			}
+		}
+	}
+}
 
 func TestStateIsNeverAlsoShared(t *testing.T) {
 	for _, name := range Names() {
