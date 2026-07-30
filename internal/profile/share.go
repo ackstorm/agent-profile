@@ -20,13 +20,13 @@ import (
 // auth.json), and a temp-file-plus-rename would replace our symlink with a
 // regular file, silently ending the sharing. Re-linking self-heals it.
 //
-// A missing Kind: Dir target is created, so directory shares always link. A
-// missing Kind: File target cannot be invented — you cannot fabricate a
-// credentials file — so it is reported in skipped for the caller to surface.
-// Staying silent about that was a trap: sharing quietly did not happen, the
-// agent then wrote its own real file into the profile, and every later run
-// dead-ended on "refusing to replace real file".
-func Link(a agent.Agent, dir string) (linked, skipped []string, err error) {
+// Every share is a file — the agent's credential. A missing one cannot be invented,
+// so it is reported in skipped for the caller to surface.
+//
+// Link also removes any symlink sitting at a path the registry lists in Unshared —
+// state that used to be common and no longer is. That makes a change to the registry
+// take effect in profiles created before it, instead of only in new ones.
+func Link(a agent.Agent, dir string) (linked, skipped, unshared []string, err error) {
 	// Inspect and remove through an os.Root confined to the profile directory.
 	// os.Lstat only refuses to follow the FINAL path component: every ancestor is
 	// resolved by the kernel, so with a nested Rel such as "plugins/cache" a
@@ -36,20 +36,18 @@ func Link(a agent.Agent, dir string) (linked, skipped []string, err error) {
 	// mkdir and symlink — so no step in this loop can leave the profile.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	defer func() { _ = root.Close() }()
 
 	for _, s := range a.Shared {
 		if _, err := os.Stat(s.From); err != nil {
-			if s.Kind != agent.Dir {
-				// Cannot be invented; tell the caller so it can say so.
-				skipped = append(skipped, s.Rel)
-				continue
-			}
-			if err := os.MkdirAll(s.From, 0o700); err != nil {
-				return linked, skipped, fmt.Errorf("cannot create shared directory %s: %w", s.From, err)
-			}
+			// A credential cannot be invented; tell the caller so it can say so.
+			// Staying silent about this was a trap: sharing quietly did not happen,
+			// the agent then wrote its own real file into the profile, and every
+			// later run dead-ended on "refusing to replace real file".
+			skipped = append(skipped, s.Rel)
+			continue
 		}
 		dst := filepath.Join(dir, s.Rel)
 		fi, err := root.Lstat(s.Rel)
@@ -58,28 +56,47 @@ func Link(a agent.Agent, dir string) (linked, skipped []string, err error) {
 			// Already a link. Remove it so the target is re-asserted; this is what
 			// makes Link idempotent and self-healing.
 			if err := root.Remove(s.Rel); err != nil {
-				return linked, skipped, err
+				return linked, skipped, unshared, err
 			}
 		case err == nil:
-			return linked, skipped, fmt.Errorf(
-				"refusing to replace real %s at %s: move it aside, then re-run (it should be a link to %s)",
-				s.Kind, dst, s.From)
+			return linked, skipped, unshared, fmt.Errorf(
+				"refusing to replace real file at %s: move it aside, then re-run (it should be a link to %s)",
+				dst, s.From)
 		case !errors.Is(err, fs.ErrNotExist):
 			// Anything other than "not there" — including a symlinked ancestor,
 			// which os.Root reports rather than following.
-			return linked, skipped, fmt.Errorf("cannot inspect %s in profile: %w", s.Rel, err)
+			return linked, skipped, unshared, fmt.Errorf("cannot inspect %s in profile: %w", s.Rel, err)
 		}
 		if parent := filepath.Dir(s.Rel); parent != "." {
 			if err := root.Mkdir(parent, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
-				return linked, skipped, err
+				return linked, skipped, unshared, err
 			}
 		}
 		if err := root.Symlink(s.From, s.Rel); err != nil {
-			return linked, skipped, err
+			return linked, skipped, unshared, err
 		}
 		linked = append(linked, s.Rel)
 	}
-	return linked, skipped, nil
+
+	// Un-share what the registry used to share. Without this, dropping an entry
+	// from Shared is a no-op for every profile that already exists: the old symlink
+	// stays, and the file goes on being shared forever.
+	//
+	// Through the same os.Root as everything above, so a symlinked ancestor cannot
+	// turn this into a remove somewhere in the real home. Only a symlink is ever
+	// removed, and removing a symlink never touches its target — the profile loses
+	// the link, the real file is untouched, and the agent regenerates its own copy.
+	for _, rel := range a.Unshared {
+		fi, err := root.Lstat(rel)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			continue // absent, or a real file that belongs to the profile now
+		}
+		if err := root.Remove(rel); err != nil {
+			return linked, skipped, unshared, fmt.Errorf("cannot un-share %s: %w", rel, err)
+		}
+		unshared = append(unshared, rel)
+	}
+	return linked, skipped, unshared, nil
 }
 
 // Delete removes a profile directory.

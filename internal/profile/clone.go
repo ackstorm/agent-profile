@@ -20,11 +20,14 @@ import (
 //   - symlinks, because they are the shared entries; copying their contents
 //     would duplicate the user's session history, and copying the link is
 //     pointless since Link recreates it straight after.
-//   - anything at or under a Shared relative path, or under the config shim,
-//     even when it is a real file in the source. That happens with profiles
-//     created before an entry was added to the registry, and copying it would
-//     make Link fail on the destination. The shim is rebuilt from the real config
-//     base anyway, so a copy would only go stale.
+//   - anything at or under a Shared path, a State path, or the config shim, even
+//     when it is a real file in the source. For a Shared path that happens with
+//     profiles created before an entry was added to the registry, and copying it
+//     would make Link fail on the destination. A State path is the profile's own
+//     session history, which belongs to the profile that produced it: a clone
+//     carrying it could resume a conversation that used tools the clone does not
+//     have. The shim is rebuilt from the real config base anyway, so a copy would
+//     only go stale.
 //
 // No per-agent allowlist is needed: a profile only contains what ap and the
 // agent's own installer put there.
@@ -50,12 +53,16 @@ func Clone(a agent.Agent, src, dst string) error {
 		return err
 	}
 
-	shared := make([]string, 0, len(a.Shared)+1)
+	skip := make([]string, 0, len(a.Shared)+len(a.State)+1)
 	for _, s := range a.Shared {
-		shared = append(shared, filepath.Clean(s.Rel))
+		skip = append(skip, filepath.Clean(s.Rel))
+	}
+	// Accumulated history belongs to the profile that produced it.
+	for _, st := range a.State {
+		skip = append(skip, filepath.Clean(st))
 	}
 	if a.Shim != nil {
-		shared = append(shared, filepath.Clean(a.Shim.Rel))
+		skip = append(skip, filepath.Clean(a.Shim.Rel))
 	}
 
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
@@ -69,7 +76,7 @@ func Clone(a agent.Agent, src, dst string) error {
 		if rel == "." {
 			return nil
 		}
-		if isShared(rel, shared) {
+		if isShared(rel, skip) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

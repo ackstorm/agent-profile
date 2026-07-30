@@ -1,8 +1,9 @@
 # agent-profile
 
 `ap` launches `claude`, `codex`, `opencode` or `pi` with a named profile, so each
-profile carries its own plugins, skills and MCP servers — while your sessions,
-your login and your workspace trust stay shared with your normal setup.
+profile is a genuinely separate environment — its own plugins, skills, MCP
+servers, config and session history — while your login stays shared with your
+normal setup, so there is exactly one thing to sign in to per agent.
 
 Linux and macOS only, by design - see "Deliberately out of scope".
 
@@ -20,9 +21,11 @@ configuration that suits all of them means it suits none of them, and trimming i
 by hand before each task is not something anyone actually does.
 
 `ap` gives each kind of work its own config directory, so `claude:plan` loads what
-planning needs and nothing else. What it deliberately does *not* fork is the part
-that is expensive to duplicate: you log in once, your session history stays in one
-place, and the workspace-trust prompt does not come back.
+planning needs and nothing else. The one thing it deliberately does *not* fork is
+the one thing that cannot be recreated locally: your login. Everything else —
+plugins, skills, MCP servers, config, session history, workspace trust — is the
+profile's own, which is also why a `plan` session's transcript never shows up
+inside an `exec` profile that never installed the tools it used.
 
 ## Use
 
@@ -31,6 +34,7 @@ ap create claude:plan                               # new, empty profile
 ap run claude:plan plugin install caveman@caveman   # populate it
 ap run claude:plan                                  # work in it
 ap create claude:review --from plan                 # clone it
+ap create claude:work --copy-instructions           # seed it with your CLAUDE.md
 ap list
 ```
 
@@ -44,11 +48,11 @@ never install something into a profile you only thought you were in.
 |---|---|
 | `ap agents` | supported agents, their variable and their mode |
 | `ap list [agent]` | your profiles |
-| `ap create [--from <profile>] <agent>:<profile>` | create, optionally cloning |
+| `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create, optionally cloning and seeding it with your global instructions file |
 | `ap which <agent>:<profile>` | the profile directory, for editing by hand |
 | `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap run <agent>:<profile> [args...]` | run it; args pass through verbatim |
-| `ap delete <agent>:<profile>` | remove the profile, never the shared state |
+| `ap delete <agent>:<profile>` | remove the profile — including its own session history; see "What every profile shares" below |
 
 Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent>/<profile>/`.
 
@@ -61,8 +65,8 @@ interpret `--effort`.
 `ap run` parses no flags of its own at all, so there is nothing to collide with:
 `ap run opencode:review --pure` passes opencode's own `--pure` to opencode.
 
-`ap create` is different, because it has nothing to pass through: `--from` works
-on either side of the reference.
+`ap create` is different, because it has nothing to pass through: `--from` and
+`--copy-instructions` both work on either side of the reference.
 
 ```bash
 ap create claude:review --from plan        # clones claude:plan
@@ -88,8 +92,11 @@ behave exactly as if you had typed the agent's name.
 | opencode | `XDG_CONFIG_HOME` | the profile's config shim |
 
 All four replace their config root, so a profile loads exactly what you put in
-it. Nothing under `XDG_DATA_HOME`, `XDG_STATE_HOME` or `XDG_CACHE_HOME` is ever
-redirected, which is what keeps sessions, logins and caches shared.
+it — including, for claude, codex and pi, their session history: it lives inside
+that same config root, so replacing it is what makes each profile's history its
+own. `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` are never redirected
+at all; that is what keeps opencode's sessions, auth and caches global across
+profiles, since its own data lives under those instead of under its config root.
 
 ### opencode needs a config shim
 
@@ -127,49 +134,67 @@ is never deleted.
 
 ### What every profile shares
 
-Created as symlinks by `ap create` and re-asserted on every `ap run`:
+**The credential, and nothing else.** A profile is a different environment —
+that is what the word means. Everything a session depends on (config, plugins,
+skills, MCP servers, instructions) lives in the profile; anything that records a
+session belongs there too.
+
+Created as a symlink by `ap create` and re-asserted on every `ap run`:
 
 | Agent | Shared |
 |---|---|
-| claude | `projects/`, `.credentials.json`, `.claude.json`, `CLAUDE.md`, `plugins/cache/` |
-| codex | `sessions/`, `auth.json`, `history.jsonl` |
-| pi | `sessions/`, `auth.json` |
-| opencode | nothing — its sessions and auth live under `XDG_DATA_HOME`, which we never touch |
+| claude | `.credentials.json` |
+| codex | `auth.json` |
+| pi | `auth.json` |
+| opencode | nothing — see the asymmetry below |
 
-So: one login per agent works in every profile, `-r` sees your whole history from
-any profile, and Claude Code's workspace-trust prompt does not come back
-(`.claude.json` holds `hasTrustDialogAccepted`).
-
-The links are re-created on every run because agents rewrite their credential
+The link is re-created on every run because agents rewrite their credential
 files — codex refreshes OAuth tokens into `auth.json` — and a write via
 temp-file-plus-rename would silently replace the symlink with a regular file. If
 `ap` finds real data where a link belongs, it stops and says so instead of
 overwriting it.
 
-`plugins/cache/` is shared because it is content-addressed by
-`marketplace/name/version`: no point re-downloading every plugin per profile.
+**History is not shared, and `--from` never copies it either** — `projects/` for
+claude, `sessions/` and `history.jsonl` for codex, `sessions/` for pi. A `plan`
+session resumed inside an `exec` profile would replay a transcript full of tool
+calls to MCP servers and skills that are not installed there; the transcript
+describes an environment that no longer exists once it is opened somewhere else.
 
-**Accepted cost of sharing `.claude.json`:** it is a state file, not just trust,
-so anything Claude Code records there is common to every profile.
+Costs, stated plainly:
 
-- MCP servers added with `claude mcp add` are recorded per project in that file,
-  so they show up in every profile. Put per-profile MCP servers in the profile's
-  own `settings.json` under `mcpServers`.
-- UI preferences ride along too. `defaultToAgentsView` is the one that surprises
-  people: with it on, a profile opens in the agents view rather than the chat, and
-  typing a short message there answers `Too short — describe the task`, because the
-  field wants a task description. Nothing is broken and nothing is profile
-  specific — a bare `claude` outside any profile does exactly the same. Turn it off
-  in `/config` under "Open agents view by default"; if a server-side flag has
-  replaced that row with a read-only one, use the agents view's own shortcuts (`?`)
-  and "Start in agent view", which is always available. It cannot be overridden per
-  profile: Claude Code reads that key only from `.claude.json`, never from
-  `settings.json`.
+1. **One workspace-trust prompt per profile per project.** `.claude.json` — where
+   `hasTrustDialogAccepted` lives — is not shared either.
+2. **Plugin content is downloaded once per profile**, not once per machine.
+3. **`ap delete` removes that profile's session transcripts.** If you want a
+   profile's history, copy it out first.
+
+Login and onboarding survive on the credential alone — no other file is needed
+to be logged in.
+
+**The opencode asymmetry.** opencode's sessions, auth and account state all live
+under `XDG_DATA_HOME`, which `ap` deliberately never redirects — redirecting it is
+exactly what the config shim exists to avoid doing to every other program in the
+process tree (see above). So opencode gets auth and account sharing **for free**,
+with no code for it, but its *sessions* stay global across profiles too, which
+the one-credential rule would rather they were not. Known, not worth a second
+shim. `ap agents` carries the short form in its `Note` column.
+
+A direct consequence: **a new profile starts completely empty**, and populating
+it is real work, different per agent. `ap create` prints the next step for a
+fresh (non-cloned) profile — `ap agents` shows the exact command for each.
+
+**`--copy-instructions`** seeds a fresh profile with your global instructions
+file (`CLAUDE.md` for claude — the only agent with a verified one today; the flag
+errors by name for the others rather than guessing a path). It is a **copy taken
+once, at create** — not a share. Nothing re-asserts it afterwards, so your real
+file and the profile's copy are free to drift apart from the moment `ap create`
+returns; that is the point of copying rather than linking.
 
 ### Cloning
 
 `--from <profile>` copies a profile of the same agent, skipping symlinks and
-anything at a shared path. There is no `--from-base`: copying out of `~/.claude`
+anything at a shared or history path (`Shared` and `State` in
+`internal/agent/agent.go`). There is no `--from-base`: copying out of `~/.claude`
 would need a per-agent list of what to take from a directory that grows with
 every release, and a stale list copies caches silently. Set the first profile up
 by hand — a curated minimal set is the point — then clone it. For a one-off,
@@ -235,7 +260,7 @@ unchanged afterwards.
 Releases are cut with `make release VERSION=vX.Y.Z`. It gates first and tags
 last, so a failed release never leaves a tag behind on origin.
 
-`make test` runs 57 tests with `-race -shuffle=on`, all against fakes.
+`make test` runs 84 tests with `-race -shuffle=on`, all against fakes.
 `make fuzz` targets `ValidName`, because that is the boundary a traversal bug got
 through once: it asserts the property (an accepted name never resolves outside
 the profile root) rather than a list of known-bad inputs.

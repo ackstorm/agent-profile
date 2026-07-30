@@ -38,6 +38,22 @@ if command -v claude >/dev/null 2>&1; then
   else
     pass claude "authenticated via the shared credentials link"
   fi
+  # Only the credential is shared. Anything else that is still a symlink means
+  # the registry and Link disagree, and something is silently common again.
+  if [ ! -L "$d/.credentials.json" ]; then
+    bad claude ".credentials.json is not a symlink - the profile is not sharing auth"
+  else
+    pass claude "the credential is shared"
+  fi
+  stray=""
+  for p in .claude.json CLAUDE.md projects plugins/cache; do
+    [ -L "$d/$p" ] && stray="$stray $p"
+  done
+  if [ -n "$stray" ]; then
+    bad claude "still shared:$stray"
+  else
+    pass claude "config and history are the profile's own"
+  fi
 else
   skip claude
 fi
