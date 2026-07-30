@@ -33,6 +33,15 @@ need() {
 	command -v "$1" >/dev/null 2>&1 || die "$1 is required but not on PATH"
 }
 
+warn_path() {
+	case ":${PATH}:" in
+	*":$1:"*) return 0 ;;
+	esac
+	echo "install.sh: NOTE $1 is not on your PATH"
+	echo "install.sh:   add this to your shell profile (~/.zshrc, ~/.bashrc):"
+	echo "install.sh:     export PATH=\"$1:\$PATH\""
+}
+
 need curl
 need tar
 
@@ -100,7 +109,8 @@ install -m 0755 "${tmp}/${BIN}" "${PREFIX}/${BIN}" 2>/dev/null ||
 echo "install.sh: installed ${PREFIX}/${BIN}"
 "${PREFIX}/${BIN}" version
 
-case ":${PATH}:" in
-*":${PREFIX}:"*) ;;
-*) echo "install.sh: NOTE ${PREFIX} is not on your PATH — add it to your shell profile" ;;
-esac
+warn_path "$PREFIX"
+# Always, whatever PREFIX was: `ap link` writes its wrappers here regardless, so
+# installing ap to /usr/local/bin still leaves you unable to run `claude:plan`.
+link_dir="${HOME}/.local/bin"
+[ "$link_dir" = "$PREFIX" ] || warn_path "$link_dir"
