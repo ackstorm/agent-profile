@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -28,6 +29,9 @@ Usage:
   ap env <agent>:<profile>             print the environment override
   ap run <agent>:<profile> [args...]   run the agent with that profile
   ap delete <agent>:<profile>          delete a profile
+  ap link <agent>:<profile>            write a wrapper script so the profile
+                                       is a command you can type by name
+  ap unlink <agent>:<profile>          remove that wrapper
   ap version                           print version, commit and build date
 
 There is no active profile: every command names one explicitly.
@@ -48,6 +52,9 @@ Examples:
   ap run claude:plan
   ap run claude:plan --effort xhigh
   ap run opencode:review --model anthropic/claude-sonnet-4-5
+  ap link claude:plan && claude:plan   # now runnable directly, once its
+                                       # directory (~/.local/bin by default)
+                                       # is on PATH
 `
 
 func main() {
@@ -77,6 +84,10 @@ func dispatch(args []string) error {
 		return cmdRun(args[1:])
 	case "delete", "rm":
 		return cmdDelete(args[1:])
+	case "link":
+		return cmdLink(args[1:])
+	case "unlink":
+		return cmdUnlink(args[1:])
 	case "version", "--version", "-v":
 		return cmdVersion(args[1:])
 	case "help", "-h", "--help":
@@ -465,5 +476,114 @@ func cmdDelete(args []string) error {
 		return err
 	}
 	fmt.Printf("deleted %s:%s\n", a.Name, name)
+	// A deleted profile must not leave behind a wrapper that fails confusingly
+	// when someone types its name. Not an error if there never was one.
+	if err := removeWrapperIfOurs(a.Name + ":" + name); err != nil {
+		return err
+	}
+	return nil
+}
+
+// wrapperHeader opens every file `ap link` writes, and nothing else ever
+// writes it — the same principle as the module's other ownership markers: it
+// lives inside the artefact itself, so it cannot drift out of sync with it.
+// `link` and `unlink`, and the automatic cleanup in `delete`, all use it to
+// tell their own file from something else that happens to share its name.
+const wrapperHeader = "#!/bin/sh\n# written by ap link. Safe to delete.\n"
+
+// wrapperScript is the wrapper `ap link` writes for ref (an "<agent>:<profile>"
+// string). A script, not a symlink with argv[0] dispatch: it names `ap` by
+// PATH lookup rather than the currently running binary's own path, so it
+// survives ap being upgraded or moved elsewhere on PATH, and unlike a symlink
+// it can be read with `cat`.
+func wrapperScript(ref string) string {
+	return fmt.Sprintf("%sexec ap run %s \"$@\"\n", wrapperHeader, ref)
+}
+
+// linkDir is where `ap link` writes wrapper scripts. Always ~/.local/bin
+// regardless of where the ap binary itself was installed — install.sh warns
+// about that directory unconditionally for exactly this reason — except in
+// tests, which need to point it elsewhere.
+func linkDir() (string, error) {
+	if d := os.Getenv("AP_LINK_DIR"); d != "" {
+		return d, nil
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(h, ".local", "bin"), nil
+}
+
+func cmdLink(args []string) error {
+	a, name, err := ref(args, "link")
+	if err != nil {
+		return err
+	}
+	if name == profile.Default {
+		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, profile.Default)
+	}
+	if !profile.Exists(a, name) {
+		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
+			a.Name, name, a.Name, name)
+	}
+	dir, err := linkDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	refStr := a.Name + ":" + name
+	p := filepath.Join(dir, refStr)
+	// Overwriting something ap did not write would be a good way to lose a
+	// real binary — refuse unless the file is either absent or already one of
+	// ours.
+	if b, err := os.ReadFile(p); err == nil {
+		if !strings.HasPrefix(string(b), wrapperHeader) {
+			return fmt.Errorf("refusing to overwrite %s: it was not written by ap link", p)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(p, []byte(wrapperScript(refStr)), 0o755); err != nil {
+		return err
+	}
+	fmt.Printf("linked %s -> %s\n", p, refStr)
+	return nil
+}
+
+func cmdUnlink(args []string) error {
+	a, name, err := ref(args, "unlink")
+	if err != nil {
+		return err
+	}
+	return removeWrapperIfOurs(a.Name + ":" + name)
+}
+
+// removeWrapperIfOurs removes the wrapper at ref's path in linkDir, if any.
+// Absent is not an error: most profiles are never linked. Present but not
+// carrying wrapperHeader is refused, the same as cmdLink refuses to overwrite
+// it — either way, something ap did not write is left untouched.
+func removeWrapperIfOurs(ref string) error {
+	dir, err := linkDir()
+	if err != nil {
+		return err
+	}
+	p := filepath.Join(dir, ref)
+	b, err := os.ReadFile(p)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(string(b), wrapperHeader) {
+		return fmt.Errorf("refusing to remove %s: it was not written by ap link", p)
+	}
+	if err := os.Remove(p); err != nil {
+		return err
+	}
+	fmt.Printf("unlinked %s\n", p)
 	return nil
 }

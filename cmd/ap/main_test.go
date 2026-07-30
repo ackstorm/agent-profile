@@ -268,6 +268,104 @@ func TestDispatchCreateFromDefaultIsNeverRejectedAsInvalid(t *testing.T) {
 	}
 }
 
+func TestLinkWritesAnExecutableWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:linked"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"link", "claude:linked"}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(bin, "claude:linked")
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Error("wrapper is not executable")
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), "exec ap run claude:linked") {
+		t.Errorf("wrapper does not exec the profile: %q", b)
+	}
+}
+
+func TestLinkRefusesAProfileThatDoesNotExist(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"link", "claude:ghost"}); err == nil {
+		t.Error("want an error for a missing profile")
+	}
+}
+
+// There is nothing to link: `ap run codex:default` is already the real config.
+func TestLinkRefusesDefault(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"link", "claude:default"}); err == nil {
+		t.Error("want an error for claude:default")
+	}
+}
+
+// Overwriting something ap did not write would be a good way to lose a real binary.
+func TestLinkRefusesToOverwriteAForeignFile(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := os.WriteFile(filepath.Join(bin, "claude:linked"), []byte("#!/bin/sh\necho mine\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"create", "claude:linked"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"link", "claude:linked"}); err == nil {
+		t.Error("want a refusal rather than clobbering a file ap did not write")
+	}
+}
+
+func TestUnlinkRemovesOnlyOurWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	foreign := filepath.Join(bin, "claude:foreign")
+	if err := os.WriteFile(foreign, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"unlink", "claude:foreign"}); err == nil {
+		t.Error("unlink must refuse a file ap did not write")
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Error("unlink removed a foreign file")
+	}
+}
+
+// Unlinking a profile with no wrapper is not an error: most profiles are never
+// linked at all.
+func TestUnlinkOfANeverLinkedProfileIsNotAnError(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"unlink", "claude:neverlinked"}); err != nil {
+		t.Errorf("unlink of a never-linked profile = %v, want nil", err)
+	}
+}
+
+// A deleted profile must not leave a wrapper that fails confusingly.
+func TestDeleteRemovesTheWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{{"create", "claude:temp"}, {"link", "claude:temp"}, {"delete", "claude:temp"}} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:temp")); !os.IsNotExist(err) {
+		t.Error("the wrapper outlived its profile")
+	}
+}
+
 func TestCopyInstructionsWritesARealFileNotALink(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a, _ := agent.Lookup("claude")
