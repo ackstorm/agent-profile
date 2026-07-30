@@ -423,6 +423,13 @@ func cmdRun(args []string) error {
 		return err
 	}
 	if !profile.Exists(a, name) {
+		if name == profile.Default {
+			// "ap create claude:default" is unconditionally refused - that advice
+			// would be a dead end. Name the actual path instead: on this machine
+			// the agent has never been run outside ap, or its config lives
+			// somewhere this registry row does not expect.
+			return fmt.Errorf("%s's real config directory does not exist: %s", a.Name, profile.Dir(a, name))
+		}
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}

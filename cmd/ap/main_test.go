@@ -191,6 +191,28 @@ func TestDispatchRunRequiresAnExistingProfile(t *testing.T) {
 	}
 }
 
+// The generic missing-profile message tells the user to run `ap create
+// <agent>:default`, which is unconditionally refused - a dead end. On a
+// machine where the agent's real config does not exist yet, the message must
+// say that instead, naming the path, rather than pointing at a command that
+// can never succeed.
+func TestDispatchRunOnMissingDefaultNamesTheRealPathNotACreateCommand(t *testing.T) {
+	home := t.TempDir() // no .claude under here
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"run", "claude:default"})
+	if err == nil {
+		t.Fatal("run on a nonexistent real config = nil error, want error")
+	}
+	if strings.Contains(err.Error(), "ap create claude:default") {
+		t.Errorf("error %q points at a command that is always refused", err)
+	}
+	want := filepath.Join(home, ".claude")
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the real config path %q", err, want)
+	}
+}
+
 // The bug being fixed is one line printed for every agent, so that is what the test
 // pins. No stdout capture: the hint is a pure function, and testing the function
 // catches the regression that testing the pipe would.
