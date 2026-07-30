@@ -12,32 +12,28 @@ import (
 	"github.com/ackstorm/agent-profile/internal/agent"
 )
 
-// Clone copies the contents of one profile directory into another, skipping the
-// shared state.
+// Clone copies an agent's declared configuration from one config directory into
+// another. src may be another profile or, via `--from default`, the agent's real
+// config directory — Clone does not distinguish the two.
 //
-// Two skip rules:
+// One selection rule: only the paths named in a.CloneAllow are copied, each
+// walked whole (files and, for a directory entry, everything under it). A
+// symlink is never copied, whether it is the allowlisted entry itself or found
+// while walking under one — those are the Shared entries, and copying their
+// contents would duplicate the user's session history, while copying the link
+// itself is pointless since Link recreates it straight after. A missing
+// allowlist entry is not an error: profiles and real config directories differ
+// in what they happen to contain.
 //
-//   - symlinks, because they are the shared entries; copying their contents
-//     would duplicate the user's session history, and copying the link is
-//     pointless since Link recreates it straight after.
-//   - anything at or under a Shared path, a State path, or the config shim, even
-//     when it is a real file in the source. For a Shared path that happens with
-//     profiles created before an entry was added to the registry, and copying it
-//     would make Link fail on the destination. A State path is the profile's own
-//     session history, which belongs to the profile that produced it: a clone
-//     carrying it could resume a conversation that used tools the clone does not
-//     have. The shim is rebuilt from the real config base anyway, so a copy would
-//     only go stale.
-//
-// No per-agent allowlist is needed: a profile only contains what ap and the
-// agent's own installer put there.
+// Everything else in src — accumulated runtime state, caches, the config shim —
+// is left behind simply by never being named. See Agent.CloneAllow for why that
+// is an allowlist and not a list of exclusions.
 //
 // dst must be an existing empty directory that is not inside src. Clone does not
 // create it; the caller does.
 func Clone(a agent.Agent, src, dst string) error {
-	// Resolve src before anything else. WalkDir lstats its root, so a symlinked
-	// source profile would walk nothing at all and Clone would report success
-	// after copying zero files.
+	// Resolve src before anything else. Lstat below would otherwise inspect the
+	// symlink rather than the directory it points to.
 	src, err := filepath.EvalSymlinks(src)
 	if err != nil {
 		return fmt.Errorf("cannot read source profile: %w", err)
@@ -53,53 +49,88 @@ func Clone(a agent.Agent, src, dst string) error {
 		return err
 	}
 
-	skip := make([]string, 0, len(a.Shared)+len(a.State)+1)
-	for _, s := range a.Shared {
-		skip = append(skip, filepath.Clean(s.Rel))
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
 	}
-	// Accumulated history belongs to the profile that produced it.
-	for _, st := range a.State {
-		skip = append(skip, filepath.Clean(st))
-	}
-	if a.Shim != nil {
-		skip = append(skip, filepath.Clean(a.Shim.Rel))
-	}
+	defer func() { _ = root.Close() }()
 
-	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+	for _, rel := range a.CloneAllow {
+		if err := cloneEntry(root, src, rel); err != nil {
+			return fmt.Errorf("cloning %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+// cloneEntry copies one CloneAllow entry — a file or a whole directory — from
+// src into dst through root, which is confined to dst.
+//
+// escapesRoot is checked before anything else, rather than left to os.Root to
+// catch: filepath.Join(src, rel) Cleans the two together, so a "rel" such as
+// "../../etc/passwd" can collapse into a path that simply does not exist under
+// src at typical temp-dir depths — which "tolerate missing" would then wave
+// through instead of rejecting.
+func cloneEntry(root *os.Root, src, rel string) error {
+	if escapesRoot(rel) {
+		return fmt.Errorf("allowlist entry %q escapes the profile directory", rel)
+	}
+	srcPath := filepath.Join(src, rel)
+	fi, err := os.Lstat(srcPath)
+	if os.IsNotExist(err) {
+		return nil // tolerated: profiles and real config dirs differ in contents
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return nil // never copy a symlink; Link recreates the shared ones
+	}
+	if !fi.IsDir() {
+		return copyFileToRoot(root, srcPath, rel, fi)
+	}
+	return filepath.WalkDir(srcPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(src, path)
+		entryRel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
 		}
-		if rel == "." {
-			return nil
-		}
-		if isShared(rel, skip) {
+		if d.Type()&os.ModeSymlink != 0 {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		target := filepath.Join(dst, rel)
 		if d.IsDir() {
 			info, err := d.Info()
 			if err != nil {
 				return err
 			}
-			return os.MkdirAll(target, info.Mode().Perm())
+			// Also creates the entry's own root directory, on the first call
+			// (entryRel == rel), which is what makes an allowlisted directory that
+			// happens to be empty in the source still appear in the clone.
+			return root.MkdirAll(entryRel, info.Mode().Perm())
 		}
-		// Symlinks land here too, and are skipped: WalkDir never reports one as a
-		// directory, so it reaches this check rather than the branch above. That is
-		// the second skip rule from the doc comment - a separate ModeSymlink test
-		// before this one would be dead code. TestCloneSkipsAnUnsharedSymlink pins
-		// the behaviour so a future edit to this line cannot change it silently.
 		if !d.Type().IsRegular() {
-			return nil // symlinks, sockets, fifos, devices: nothing a profile needs
+			return nil // sockets, fifos, devices: nothing a profile needs
 		}
-		return copyFile(path, target, d)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return copyFileToRoot(root, path, entryRel, info)
 	})
+}
+
+// escapesRoot reports whether rel, once cleaned, references something above
+// the directory it will be joined onto — checked precisely rather than with
+// strings.Contains(rel, ".."), which would also reject a name that merely
+// contains the two characters, like "settings..bak".
+func escapesRoot(rel string) bool {
+	cleaned := filepath.Clean(rel)
+	return cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator))
 }
 
 // containment rejects a destination that is src itself or lives inside src.
@@ -134,24 +165,14 @@ func containment(src, dst string) error {
 	return nil
 }
 
-// isShared reports whether rel is one of the shared paths or lives under one.
-func isShared(rel string, shared []string) bool {
-	rel = filepath.Clean(rel)
-	for _, s := range shared {
-		if rel == s || strings.HasPrefix(rel, s+string(os.PathSeparator)) {
-			return true
+// copyFileToRoot copies the regular file at src to rel inside root. Every write
+// — the parent directory and the file itself — goes through root, confined to
+// dst, so a rel containing ".." fails instead of writing outside the clone.
+func copyFileToRoot(root *os.Root, src, rel string, fi os.FileInfo) error {
+	if parent := filepath.Dir(rel); parent != "." {
+		if err := root.MkdirAll(parent, 0o700); err != nil {
+			return err
 		}
-	}
-	return false
-}
-
-func copyFile(src, dst string, d os.DirEntry) error {
-	info, err := d.Info()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-		return err
 	}
 	in, err := os.Open(src)
 	if err != nil {
@@ -159,7 +180,7 @@ func copyFile(src, dst string, d os.DirEntry) error {
 	}
 	defer func() { _ = in.Close() }() // read-only: a close error says nothing
 	// Same permissions as the source: profiles hold credentials and settings.
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm())
+	out, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, fi.Mode().Perm())
 	if err != nil {
 		return err
 	}

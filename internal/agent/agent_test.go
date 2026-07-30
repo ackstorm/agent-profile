@@ -41,6 +41,28 @@ func TestConfigAgreesWithSharedSources(t *testing.T) {
 	}
 }
 
+func TestEveryAgentDeclaresWhatConfigMeans(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if len(a.CloneAllow) == 0 {
+			t.Errorf("%s declares no CloneAllow: --from would copy nothing", name)
+		}
+	}
+}
+
+// The allowlist must not name the credential: Link recreates it, and copying it
+// would put a real file where the symlink belongs.
+func TestCloneAllowNeverNamesASharedPath(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		for _, s := range a.Shared {
+			if slices.Contains(a.CloneAllow, s.Rel) {
+				t.Errorf("%s: %q is both CloneAllow and Shared", name, s.Rel)
+			}
+		}
+	}
+}
+
 func TestStateIsNeverAlsoShared(t *testing.T) {
 	for _, name := range Names() {
 		a, _ := Lookup(name)

@@ -8,8 +8,9 @@ import (
 	"github.com/ackstorm/agent-profile/internal/agent"
 )
 
-// History is a real directory inside the profile now, not a symlink, so Clone's
-// first skip rule no longer drops it for free.
+// State is a real directory inside the profile, never named in CloneAllow — the
+// same way "projects" is absent from claude's real row. It survives in the
+// source and simply never gets copied, because nothing ever names it.
 func TestCloneSkipsState(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	if err := os.MkdirAll(filepath.Join(src, "projects", "deep"), 0o700); err != nil {
@@ -22,7 +23,7 @@ func TestCloneSkipsState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "test", State: []string{"projects"}}
+	a := agent.Agent{Name: "test", CloneAllow: []string{"settings.json"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +65,7 @@ func TestCloneCopiesFilesAndNestedDirs(t *testing.T) {
 		"empty":                          "",
 	})
 
-	a := agent.Agent{Name: "fake"}
+	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json", "plugins", "skills", "empty"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -88,9 +89,11 @@ func TestCloneCopiesFilesAndNestedDirs(t *testing.T) {
 	}
 }
 
-// Symlinks are the shared state. Copying their contents would duplicate the
-// user's whole session history into the new profile.
-func TestCloneSkipsSymlinks(t *testing.T) {
+// A CloneAllow entry that is itself a symlink in the source — the shape every
+// Shared entry has — must never be copied. TestCloneAllowNeverNamesASharedPath
+// keeps the real registry from ever doing this; this pins the mechanism that
+// would make it safe even if it did.
+func TestCloneSkipsASymlinkedAllowlistEntry(t *testing.T) {
 	realHome := t.TempDir()
 	realSessions := filepath.Join(realHome, "projects")
 	writeTree(t, realSessions, map[string]string{"big-transcript.jsonl": "lots of data"})
@@ -101,9 +104,7 @@ func TestCloneSkipsSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "projects", From: realSessions},
-	}}
+	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json", "projects"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -116,44 +117,44 @@ func TestCloneSkipsSymlinks(t *testing.T) {
 	}
 }
 
-// The test above cannot pin the symlink rule: it declares the same path in
-// Shared, so isShared returns first and the symlink is never reached as a
-// symlink. This one uses a link the user made by hand, which no Shared entry
-// covers, so only the symlink rule can possibly skip it.
-func TestCloneSkipsAnUnsharedSymlink(t *testing.T) {
+// A symlink nested inside an allowed directory must be skipped too — not just
+// one named directly in CloneAllow. Only the WalkDir-level symlink check can
+// catch this, since the entry itself ("skills") is a real directory.
+func TestCloneSkipsASymlinkNestedInAnAllowedDirectory(t *testing.T) {
 	elsewhere := t.TempDir()
 	writeTree(t, elsewhere, map[string]string{"payload.txt": "should not be copied"})
 
 	src, dst := t.TempDir(), t.TempDir()
-	writeTree(t, src, map[string]string{"settings.json": "{}"})
-	// Neither of these is in Shared.
-	if err := os.Symlink(elsewhere, filepath.Join(src, "handmade-dir-link")); err != nil {
+	writeTree(t, src, map[string]string{"skills/mine/SKILL.md": "# mine"})
+	if err := os.Symlink(elsewhere, filepath.Join(src, "skills", "handmade-dir-link")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(elsewhere, "payload.txt"), filepath.Join(src, "handmade-file-link")); err != nil {
+	if err := os.Symlink(filepath.Join(elsewhere, "payload.txt"), filepath.Join(src, "skills", "handmade-file-link")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := Clone(agent.Agent{Name: "fake"}, src, dst); err != nil {
+	a := agent.Agent{Name: "fake", CloneAllow: []string{"skills"}}
+	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
 
-	for _, rel := range []string{"handmade-dir-link", "handmade-file-link"} {
+	for _, rel := range []string{"skills/handmade-dir-link", "skills/handmade-file-link"} {
 		if _, err := os.Lstat(filepath.Join(dst, rel)); !os.IsNotExist(err) {
 			t.Errorf("%s was reproduced in the clone; symlinks must be skipped", rel)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dst, "handmade-dir-link", "payload.txt")); err == nil {
+	if _, err := os.Stat(filepath.Join(dst, "skills", "handmade-dir-link", "payload.txt")); err == nil {
 		t.Error("Clone followed a symlink and copied its contents")
 	}
-	if _, err := os.Stat(filepath.Join(dst, "settings.json")); err != nil {
-		t.Errorf("settings.json was not copied: %v", err)
+	if _, err := os.Stat(filepath.Join(dst, "skills", "mine", "SKILL.md")); err != nil {
+		t.Errorf("skills/mine/SKILL.md was not copied: %v", err)
 	}
 }
 
-// A Shared entry may be a real file in the source (older profile, or an agent
-// that rewrote it). Skipping by relative path keeps Link working afterwards.
-func TestCloneSkipsSharedPathsEvenWhenReal(t *testing.T) {
+// Selection is purely by name now: a path absent from CloneAllow is never
+// copied, whether it is the credential, accumulated runtime, or anything else —
+// there is no separate skip list to keep in sync with the allowlist.
+func TestCloneNeverCopiesAPathOutsideCloneAllow(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
 	writeTree(t, src, map[string]string{
 		"settings.json":        "{}",
@@ -162,10 +163,7 @@ func TestCloneSkipsSharedPathsEvenWhenReal(t *testing.T) {
 		"plugins/config.json":  `{"keep":true}`,
 	})
 
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
-		{Rel: "auth.json", From: "/nonexistent/auth.json"},
-		{Rel: "plugins/cache", From: "/nonexistent/cache"},
-	}}
+	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json", "plugins/config.json"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -174,12 +172,12 @@ func TestCloneSkipsSharedPathsEvenWhenReal(t *testing.T) {
 		t.Error("auth.json was copied; credentials must never be duplicated")
 	}
 	if _, err := os.Stat(filepath.Join(dst, "plugins", "cache")); !os.IsNotExist(err) {
-		t.Error("plugins/cache was copied; it is shared, not per profile")
+		t.Error("plugins/cache was copied; it was never named in CloneAllow")
 	}
-	// A sibling under the same parent must survive: the skip is per path, not
+	// A sibling under the same parent must survive: selection is per path, not
 	// per parent directory.
 	if _, err := os.Stat(filepath.Join(dst, "plugins", "config.json")); err != nil {
-		t.Errorf("plugins/config.json was skipped too: %v", err)
+		t.Errorf("plugins/config.json was not copied: %v", err)
 	}
 }
 
@@ -190,7 +188,7 @@ func TestClonePreservesFileMode(t *testing.T) {
 	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Clone(agent.Agent{Name: "fake"}, src, dst); err != nil {
+	if err := Clone(agent.Agent{Name: "fake", CloneAllow: []string{"private.json"}}, src, dst); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(filepath.Join(dst, "private.json"))
@@ -205,5 +203,60 @@ func TestClonePreservesFileMode(t *testing.T) {
 func TestCloneMissingSourceErrors(t *testing.T) {
 	if err := Clone(agent.Agent{Name: "fake"}, filepath.Join(t.TempDir(), "nope"), t.TempDir()); err == nil {
 		t.Error("Clone from missing source = nil error, want error")
+	}
+}
+
+func TestCloneCopiesOnlyTheAllowlist(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	for _, rel := range []string{
+		"settings.json",          // allowed
+		"skills/x/SKILL.md",      // allowed, nested
+		"tmp/huge.bin",           // runtime, must not be copied
+		"telemetry/events.jsonl", // runtime
+		"file-history/a",         // runtime
+	} {
+		p := filepath.Join(src, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := agent.Agent{Name: "test", CloneAllow: []string{"settings.json", "skills"}}
+	if err := Clone(a, src, dst); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"settings.json", "skills/x/SKILL.md"} {
+		if _, err := os.Stat(filepath.Join(dst, want)); err != nil {
+			t.Errorf("%s was not cloned: %v", want, err)
+		}
+	}
+	for _, unwanted := range []string{"tmp", "telemetry", "file-history"} {
+		if _, err := os.Stat(filepath.Join(dst, unwanted)); !os.IsNotExist(err) {
+			t.Errorf("%s was cloned and should not have been", unwanted)
+		}
+	}
+}
+
+// An allowlist entry that is not present in the source is not an error: profiles and
+// real config dirs differ in what they happen to contain.
+func TestCloneToleratesAMissingAllowlistEntry(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "settings.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "test", CloneAllow: []string{"settings.json", "nope", "also/nope"}}
+	if err := Clone(a, src, dst); err != nil {
+		t.Fatalf("a missing entry must not fail the clone: %v", err)
+	}
+}
+
+// The allowlist is a list of names, not patterns: an entry must never escape dst.
+func TestCloneAllowCannotEscape(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	a := agent.Agent{Name: "test", CloneAllow: []string{"../../etc/passwd"}}
+	if err := Clone(a, src, dst); err == nil {
+		t.Error("want an error for an allowlist entry containing ..")
 	}
 }

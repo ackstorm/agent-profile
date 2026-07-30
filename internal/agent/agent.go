@@ -145,6 +145,23 @@ type Agent struct {
 	// let you resume, inside the clone, a conversation that used tools the clone
 	// does not have.
 	State []string
+	// CloneAllow is what "configuration" means for this agent: the paths, relative to
+	// the config directory, that `ap create --from` copies. Everything else is left
+	// behind.
+	//
+	// An allowlist rather than a list of exclusions, and the difference matters. A
+	// real config directory is mostly accumulated runtime — on the reference machine
+	// claude's held 1.4 GB of tmp, 309 MB of transcripts and 108 MB of plugin content
+	// — and that set grows with every upstream release. An exclusion list would start
+	// copying each new cache directory silently. This way a new config file is simply
+	// not cloned, which someone notices and fixes.
+	//
+	// Directories are copied whole. A missing entry is not an error: profiles and real
+	// config directories differ in what they happen to contain.
+	//
+	// Hardcoded here for now. These belong in a user config file, so cases like a hook
+	// script living somewhere unusual can be declared per machine.
+	CloneAllow []string
 	// Shim is non-nil only for an agent whose isolation needs a shared variable.
 	Shim *Shim
 	// Note is shown by `ap agents`, explaining any caveat.
@@ -186,6 +203,11 @@ func registry() map[string]Agent {
 			// are not shared.
 			Unshared: []string{".claude.json", "CLAUDE.md", "plugins/cache", "projects"},
 			State:    []string{"projects"},
+			// Plugin intent rides in settings.json (extraKnownMarketplaces /
+			// enabledPlugins), so cloning it carries the same plugins without copying
+			// the 108 MB of plugin content — claude re-materialises them itself on the
+			// next couple of starts.
+			CloneAllow: []string{"settings.json", "CLAUDE.md", "skills", "commands", "hooks", "agents"},
 			// Verified. It was in Shared until this release, so the path is known good.
 			Instructions: &Instructions{Name: "CLAUDE.md", Source: filepath.Join(h, ".claude", "CLAUDE.md")},
 			Setup:        "ap run %s plugin install <plugin>",
@@ -201,6 +223,21 @@ func registry() map[string]Agent {
 			},
 			Unshared: []string{"sessions", "history.jsonl"},
 			State:    []string{"sessions", "history.jsonl"},
+			// Every plugin declaration lives in config.toml and nowhere else:
+			// [marketplaces.<name>] (source_type/source) and [plugins."<p>@<m>"]
+			// (enabled = true). plugins/ itself (28 MB on the reference machine,
+			// plugins/cache/<marketplace>/<plugin>/<version>/) is a regenerable
+			// cache — even the built-in openai-curated marketplace resyncs itself
+			// into .tmp/plugins — so no plugins path belongs here.
+			//
+			// Verified by running codex against a profile cloned with only
+			// config.toml: `codex plugin list` reported the declared plugin as not
+			// installed, and stayed that way through a full session, during which
+			// codex happily installed its own curated default instead. Unlike
+			// claude, codex never reconciles a declaration against its cache on its
+			// own — one `codex plugin add <p>@<m>` fixes it, idempotently. See the
+			// clone warning in clone.go that surfaces exactly that command.
+			CloneAllow: []string{"config.toml", "hooks.json", "skills"},
 			// Instructions is nil on purpose. The AGENTS.md convention is documented
 			// upstream for codex, opencode and pi, but no global file exists on the
 			// reference machine, so none of them has been watched reading one. Verify
@@ -223,9 +260,10 @@ func registry() map[string]Agent {
 				// and covers the case where keys are stored here.
 				{Rel: "auth.json", From: filepath.Join(h, ".pi", "agent", "auth.json")},
 			},
-			Unshared: []string{"sessions"},
-			State:    []string{"sessions"},
-			Setup:    "ap run %s config",
+			Unshared:   []string{"sessions"},
+			State:      []string{"sessions"},
+			CloneAllow: []string{"settings.json", "models.json"},
+			Setup:      "ap run %s config",
 		},
 		"opencode": {
 			Name:   "opencode",
@@ -241,6 +279,9 @@ func registry() map[string]Agent {
 			ConfigEnv: "XDG_CONFIG_HOME",
 			Mode:      Replace,
 			Shim:      &Shim{Rel: "xdg", Entry: "opencode"},
+			// Never node_modules — 62 MB on the reference machine, and reinstalled
+			// by opencode itself.
+			CloneAllow: []string{"opencode.json", "agents", "command", "skills"},
 			// Sessions AND auth live under XDG_DATA_HOME and XDG_STATE_HOME, which ap
 			// never redirects — redirecting them is exactly what the shim exists to
 			// avoid doing to every other program in the tree. So opencode cannot honour

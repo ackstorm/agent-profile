@@ -103,7 +103,8 @@ func TestCloneResolvesSymlinkedSource(t *testing.T) {
 	}
 
 	dst := t.TempDir()
-	if err := Clone(agent.Agent{Name: "fake"}, link, dst); err != nil {
+	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json"}}
+	if err := Clone(a, link, dst); err != nil {
 		t.Fatalf("Clone from a symlinked source: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dst, "settings.json"))
