@@ -36,6 +36,8 @@ ap run claude:plan                                  # work in it
 claude:plan                                         # same thing, typed directly
 ap create claude:review --from plan                 # clone it
 ap create claude:work --copy-instructions           # seed it with your CLAUDE.md
+ap env claude:plan npx skills add <src> --skill <s> -g -a claude-code
+ap env codex:plan env | grep CODEX                  # what a command inherits
 ap list
 ```
 
@@ -80,10 +82,36 @@ and installs global skills into `<that>/skills`. `-g` is not optional: without
 it the skill lands in `./.claude/skills` in the current directory, which is
 project scope and has nothing to do with the profile.
 
+The same installer then reports where it put it:
+
+```console
+$ ap env claude:plan npx skills list -g
+web-design-guidelines  ~/.local/share/agent-profile/profiles/claude/plan/skills/web-design-guidelines
+  Agents: Claude Code  Source: vercel-labs/agent-skills
+```
+
 This is `env(1)`'s second form and it behaves like it — the variable is set for
 that one command and nothing outlives it. `ap env <agent>:<profile>` on its own
 still just prints. Everything after the reference belongs to the command, so
 its own flags arrive untouched.
+
+Which makes `env` itself the shortest way to see what a command would inherit:
+
+```console
+$ ap env codex:plan env | grep CODEX
+CODEX_HOME=/home/jcm/.local/share/agent-profile/profiles/codex/plan
+
+$ ap env opencode:plan env | grep XDG_CONFIG_HOME
+XDG_CONFIG_HOME=/home/jcm/.local/share/agent-profile/profiles/opencode/plan/xdg
+
+$ ap env claude:default env | grep -c CLAUDE_CONFIG_DIR
+0
+```
+
+Three things in one view: codex gets its own private variable; opencode gets the
+shim directory rather than the profile itself, which is what keeps `git` and
+`npm` out of it (see "The opencode asymmetry"); and `default` sets nothing at
+all, because your real config is already where the agent looks.
 
 Piping works the same way, since `ap` execs rather than wrapping:
 
