@@ -178,8 +178,12 @@ symptom: reading one wrong produced two contradictory diagnoses in a row here.
 
 - **`ap use` / `ap shell` / an active profile.** A "current profile" that a bare
   `claude` would ignore is hidden state that lies to the user.
-- **`--from-base`.** Copying out of `~/.claude` needs a per-agent allowlist of a
-  directory that grows every release; a stale list copies caches silently.
+- **A separate `--from-base` flag.** Copying out of `~/.claude` needed a
+  per-agent allowlist of a directory that grows every release — that allowlist
+  now exists (`Agent.CloneAllow` in `internal/agent/agent.go`), and `--from
+  default` (the `default` sentinel — see `profile.Default`) reaches the real
+  config through the existing `--from` flag. A second flag would be
+  redundant, not missing.
 - **Windows.** It would need a second execution model and a second sharing
   mechanism. The build tags say so.
 - **`--pure`.** It set `OPENCODE_PURE` (identical to opencode's own `--pure`),

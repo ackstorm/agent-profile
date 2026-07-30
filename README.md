@@ -90,7 +90,8 @@ never leaves behind a command that fails confusingly.
 The wrapper always goes to `~/.local/bin`, regardless of where the `ap` binary
 itself is installed, and it names `ap` by `PATH` lookup rather than its own
 location — see "Install" for why that directory gets a `PATH` warning
-unconditionally.
+unconditionally. (`AP_LINK_DIR` overrides the location — an escape hatch for
+tests, not something to reach for day to day.)
 
 ### Flag order matters for `run`
 
