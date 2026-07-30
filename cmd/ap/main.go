@@ -534,19 +534,30 @@ func cmdLink(args []string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// Through an os.Root confined to dir, same as everything else that writes
+	// into a directory named partly by user input — see internal/profile.Link
+	// and copyInstructions above. refStr can never itself contain a path
+	// separator (ValidName already guarantees that), but the confinement is
+	// what makes that a property of the code rather than of the caller.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
 	refStr := a.Name + ":" + name
 	p := filepath.Join(dir, refStr)
 	// Overwriting something ap did not write would be a good way to lose a
 	// real binary — refuse unless the file is either absent or already one of
 	// ours.
-	if b, err := os.ReadFile(p); err == nil {
+	if b, err := root.ReadFile(refStr); err == nil {
 		if !strings.HasPrefix(string(b), wrapperHeader) {
 			return fmt.Errorf("refusing to overwrite %s: it was not written by ap link", p)
 		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.WriteFile(p, []byte(wrapperScript(refStr)), 0o755); err != nil {
+	if err := root.WriteFile(refStr, []byte(wrapperScript(refStr)), 0o755); err != nil {
 		return err
 	}
 	fmt.Printf("linked %s -> %s\n", p, refStr)
@@ -570,8 +581,15 @@ func removeWrapperIfOurs(ref string) error {
 	if err != nil {
 		return err
 	}
+	// Same os.Root confinement as cmdLink's write.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
 	p := filepath.Join(dir, ref)
-	b, err := os.ReadFile(p)
+	b, err := root.ReadFile(ref)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -581,7 +599,7 @@ func removeWrapperIfOurs(ref string) error {
 	if !strings.HasPrefix(string(b), wrapperHeader) {
 		return fmt.Errorf("refusing to remove %s: it was not written by ap link", p)
 	}
-	if err := os.Remove(p); err != nil {
+	if err := root.Remove(ref); err != nil {
 		return err
 	}
 	fmt.Printf("unlinked %s\n", p)
