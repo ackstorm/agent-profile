@@ -45,10 +45,14 @@ func Env(a agent.Agent, dir string, base []string) []string {
 
 	out := make([]string, 0, len(base)+len(overrides))
 	for _, e := range base {
-		if k, _, ok := strings.Cut(e, "="); ok {
-			if _, shadowed := overrides[k]; shadowed {
-				continue
-			}
+		// a.ConfigEnv is always stripped here, not only when it is about to be
+		// replaced by an override: for dir == "" there is no override, and an
+		// inherited value must not survive regardless. Without this, `ap run
+		// <agent>:default` run from inside another profile inherited that
+		// profile's config variable and kept using it — Default's whole point
+		// silently failing in exactly the case it exists for.
+		if k, _, ok := strings.Cut(e, "="); ok && k == a.ConfigEnv {
+			continue
 		}
 		out = append(out, e)
 	}
