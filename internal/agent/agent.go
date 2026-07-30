@@ -179,7 +179,7 @@ func registry() map[string]Agent {
 			State:    []string{"projects"},
 			// Verified. It was in Shared until this release, so the path is known good.
 			Instructions: &Instructions{Name: "CLAUDE.md", Source: filepath.Join(h, ".claude", "CLAUDE.md")},
-			Setup:        "ap run %s plugin install <plugin>   (or build it from a file: ap create --spec <file>)",
+			Setup:        "ap run %s plugin install <plugin>",
 		},
 		"codex": {
 			Name:      "codex",
@@ -233,7 +233,7 @@ func registry() map[string]Agent {
 			// never redirects — redirecting them is exactly what the shim exists to
 			// avoid doing to every other program in the tree. So opencode cannot honour
 			// the one-credential rule: its sessions stay global across profiles. Known
-			// asymmetry, documented in docs/spec.md, not worth a second shim.
+			// asymmetry, documented in the README, not worth a second shim.
 			Shared: nil,
 			// State is nil for the same reason: its sessions are outside the profile
 			// entirely, so a clone cannot carry them.

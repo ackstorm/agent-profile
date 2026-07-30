@@ -20,8 +20,10 @@ const usage = `ap - per-agent profile launcher
 Usage:
   ap agents                            list supported agents
   ap list [agent]                      list profiles
-  ap create [--from <profile>] <agent>:<profile>
+  ap create [--from <profile>] [--copy-instructions] <agent>:<profile>
                                        create a profile, optionally cloning one
+                                       and seeding it with your global
+                                       instructions file
   ap which <agent>:<profile>           print the profile directory
   ap env <agent>:<profile>             print the environment override
   ap run <agent>:<profile> [args...]   run the agent with that profile
@@ -34,13 +36,14 @@ There is no active profile: every command names one explicitly.
 agent verbatim, which is what lets you write "ap run claude:plan --effort xhigh"
 without ap trying to interpret --effort.
 
-"ap create" has nothing to pass through, so --from works on either side of the
-reference, and after it reads better because the agent is already stated:
-"ap create claude:review --from plan" clones claude:plan.
+"ap create" has nothing to pass through, so --from and --copy-instructions work
+on either side of the reference, and after it reads better because the agent is
+already stated: "ap create claude:review --from plan" clones claude:plan.
 
 Examples:
   ap create claude:plan
   ap create claude:review --from plan
+  ap create claude:work --copy-instructions
   ap run claude:plan plugin install caveman@caveman
   ap run claude:plan
   ap run claude:plan --effort xhigh
@@ -210,7 +213,8 @@ func ref(args []string, cmd string) (agent.Agent, string, error) {
 func cmdCreate(args []string) error {
 	fs := flagSet("create")
 	from := fs.String("from", "", "clone an existing profile of the same agent")
-	stop, r, err := parseAroundRef(fs, args, "create [--from <profile>] <agent>:<profile>")
+	copyMD := fs.Bool("copy-instructions", false, "copy your global instructions file (CLAUDE.md, AGENTS.md) into the profile")
+	stop, r, err := parseAroundRef(fs, args, "create [--from <profile>] [--copy-instructions] <agent>:<profile>")
 	if stop {
 		return err
 	}
@@ -237,6 +241,13 @@ func cmdCreate(args []string) error {
 		}
 		srcDir = profile.Dir(a, *from)
 	}
+	// Same rule as --from: an unusable --copy-instructions must fail before the
+	// profile exists, not after.
+	if *copyMD {
+		if err := checkCopyInstructions(a); err != nil {
+			return err
+		}
+	}
 
 	dir, err := profile.Create(a, name)
 	if err != nil {
@@ -256,6 +267,34 @@ func cmdCreate(args []string) error {
 		fmt.Printf("cloned from %s:%s\n", a.Name, *from)
 	}
 
+	if err := linkAndReport(a, dir); err != nil {
+		return err
+	}
+	if err := shim(a, dir); err != nil {
+		return err
+	}
+
+	if *copyMD {
+		if err := copyInstructions(a, dir); err != nil {
+			return err
+		}
+		fmt.Printf("copied %s from %s\n", a.Instructions.Name, a.Instructions.Source)
+	}
+
+	// A clone arrives configured; a fresh profile arrives empty, and what to do
+	// about that is different for every agent. The old line here said
+	// "plugin install", which is claude's answer and wrong for the other three.
+	if srcDir == "" {
+		if hint := setupHint(a, name); hint != "" {
+			fmt.Println(hint)
+		}
+	}
+	return nil
+}
+
+// linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
+// purely to keep cmdCreate under the project's cyclomatic-complexity gate.
+func linkAndReport(a agent.Agent, dir string) error {
 	linked, skipped, unshared, err := profile.Link(a, dir)
 	if err != nil {
 		return err
@@ -274,13 +313,57 @@ func cmdCreate(args []string) error {
 		// Say it out loud: this is state the profile used to inherit and now owns.
 		fmt.Printf("no longer shared (now this profile's own): %s\n", strings.Join(unshared, " "))
 	}
-	if err := shim(a, dir); err != nil {
-		return err
+	return nil
+}
+
+// checkCopyInstructions validates that --copy-instructions is usable for a,
+// without copying anything yet — the same "fail before creating" rule as --from.
+func checkCopyInstructions(a agent.Agent) error {
+	if a.Instructions == nil {
+		return fmt.Errorf("--copy-instructions: no global instructions file is known for %s "+
+			"(only claude is verified; see internal/agent)", a.Name)
 	}
-	if srcDir == "" {
-		fmt.Printf("populate it: ap run %s:%s plugin install <plugin>\n", a.Name, name)
+	if _, err := os.Stat(a.Instructions.Source); err != nil {
+		return fmt.Errorf("--copy-instructions: %w", err)
 	}
 	return nil
+}
+
+// copyInstructions seeds the profile with your global instructions file.
+//
+// A copy, not a link: the profile owns it, and the reason to want it in a profile at
+// all is usually to then change it there. Through an os.Root confined to the profile,
+// same as everything else that writes into one.
+func copyInstructions(a agent.Agent, dir string) error {
+	b, err := os.ReadFile(a.Instructions.Source)
+	if err != nil {
+		return fmt.Errorf("--copy-instructions: %w", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	f, err := root.OpenFile(a.Instructions.Name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// setupHint is the line `ap create` ends on for a profile that starts empty. A
+// profile inherits nothing but the credential, so the next step is real work and
+// it is different for each agent — the text lives in the registry, beside the agent
+// it describes.
+func setupHint(a agent.Agent, name string) string {
+	if a.Setup == "" {
+		return ""
+	}
+	return "configure it: " + fmt.Sprintf(a.Setup, a.Name+":"+name)
 }
 
 func cmdWhich(args []string) error {

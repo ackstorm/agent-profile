@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/internal/profile"
 )
 
 // dispatch is where user input becomes a filesystem path, and it had no tests at
@@ -185,5 +188,64 @@ func TestDispatchRunRequiresAnExistingProfile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ap create claude:ghost") {
 		t.Errorf("error %q does not tell the user how to fix it", err)
+	}
+}
+
+// The bug being fixed is one line printed for every agent, so that is what the test
+// pins. No stdout capture: the hint is a pure function, and testing the function
+// catches the regression that testing the pipe would.
+func TestSetupHintComesFromTheAgent(t *testing.T) {
+	for _, name := range []string{"claude", "codex", "opencode", "pi"} {
+		a, _ := agent.Lookup(name)
+		got := setupHint(a, "x")
+		if !strings.Contains(got, name+":x") {
+			t.Errorf("%s: hint %q does not name the profile", name, got)
+		}
+	}
+	claude, _ := agent.Lookup("claude")
+	opencode, _ := agent.Lookup("opencode")
+	if setupHint(claude, "x") == setupHint(opencode, "x") {
+		t.Error("claude and opencode print the same hint: it is hardcoded again")
+	}
+}
+
+func TestCopyInstructionsFailsBeforeCreatingAnythingWhenUnknown(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	// codex has no verified instructions file, so the flag must refuse rather than
+	// create a profile and quietly copy nothing.
+	err := dispatch([]string{"create", "codex:nomd", "--copy-instructions"})
+	if err == nil || !strings.Contains(err.Error(), "codex") {
+		t.Fatalf("want an error naming the agent, got %v", err)
+	}
+	a, _ := agent.Lookup("codex")
+	if profile.Exists(a, "nomd") {
+		t.Error("a profile was created despite the flag being unusable")
+	}
+}
+
+func TestCopyInstructionsWritesARealFileNotALink(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if _, err := os.Stat(a.Instructions.Source); err != nil {
+		// Not a pass: this asserts nothing about --copy-instructions when it skips.
+		// It only runs on a machine (or container) that has ~/.claude/CLAUDE.md;
+		// the devtools image does not, so it skips there on every CI run too.
+		t.Skipf("skipping: %s does not exist on this machine, so --copy-instructions has nothing to copy", a.Instructions.Source)
+	}
+	if err := dispatch([]string{"create", "claude:withmd", "--copy-instructions"}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(profile.Dir(a, "withmd"), a.Instructions.Name)
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("instructions were linked, not copied: editing them would hit the real file")
+	}
+	want, _ := os.ReadFile(a.Instructions.Source)
+	got, _ := os.ReadFile(p)
+	if string(got) != string(want) {
+		t.Error("the copy does not match the source")
 	}
 }
