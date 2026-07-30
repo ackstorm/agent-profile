@@ -191,6 +191,28 @@ func TestDispatchRunRequiresAnExistingProfile(t *testing.T) {
 	}
 }
 
+// The generic missing-profile message tells the user to run `ap create
+// <agent>:default`, which is unconditionally refused - a dead end. On a
+// machine where the agent's real config does not exist yet, the message must
+// say that instead, naming the path, rather than pointing at a command that
+// can never succeed.
+func TestDispatchRunOnMissingDefaultNamesTheRealPathNotACreateCommand(t *testing.T) {
+	home := t.TempDir() // no .claude under here
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"run", "claude:default"})
+	if err == nil {
+		t.Fatal("run on a nonexistent real config = nil error, want error")
+	}
+	if strings.Contains(err.Error(), "ap create claude:default") {
+		t.Errorf("error %q points at a command that is always refused", err)
+	}
+	want := filepath.Join(home, ".claude")
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the real config path %q", err, want)
+	}
+}
+
 // The bug being fixed is one line printed for every agent, so that is what the test
 // pins. No stdout capture: the hint is a pure function, and testing the function
 // catches the regression that testing the pipe would.
@@ -220,6 +242,206 @@ func TestCopyInstructionsFailsBeforeCreatingAnythingWhenUnknown(t *testing.T) {
 	a, _ := agent.Lookup("codex")
 	if profile.Exists(a, "nomd") {
 		t.Error("a profile was created despite the flag being unusable")
+	}
+}
+
+// The whole feature in one test. Dir(a, "default") is the user's real config, so a
+// delete that resolved it would remove the actual configuration of the agent. Nothing
+// that writes may accept the name.
+func TestDefaultIsRejectedByEverythingThatWrites(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:default"},
+		{"delete", "claude:default"},
+	} {
+		if err := dispatch(args); err == nil {
+			t.Errorf("ap %v was accepted and must not be", args)
+		}
+	}
+}
+
+func TestDeleteDefaultLeavesTheRealConfigAlone(t *testing.T) {
+	a, _ := agent.Lookup("claude")
+	before, err := os.Stat(a.Config)
+	if err != nil {
+		t.Skip("no real claude config on this machine")
+	}
+	if err := dispatch([]string{"delete", "claude:default"}); err == nil {
+		t.Fatal("ap delete claude:default must fail")
+	}
+	after, err := os.Stat(a.Config)
+	if err != nil {
+		t.Fatalf("the real config directory is gone: %v", err)
+	}
+	if before.ModTime() != after.ModTime() {
+		t.Error("the real config directory was modified")
+	}
+}
+
+// --from default must be accepted as a source, never rejected the same way the
+// create/delete destination case is. A rejection here would mean the --from
+// validation started reusing the plain ValidName check again instead of the
+// Default-aware one.
+// Points HOME at a fixture, not the developer's live ~/.claude: without this,
+// go test cloned whatever the person running it happened to have in their
+// real config. Asserts real content was cloned, not just "no error naming
+// the word reserved" - which would also have passed if --from default had
+// silently cloned nothing at all.
+func TestDispatchCreateFromDefaultIsNeverRejectedAsInvalid(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"model":"opus"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+
+	if err := dispatch([]string{"create", "claude:fromdefault", "--from", "default"}); err != nil {
+		t.Fatalf("--from default = %v, want nil", err)
+	}
+	a, _ := agent.Lookup("claude")
+	got, err := os.ReadFile(filepath.Join(profile.Dir(a, "fromdefault"), "settings.json"))
+	if err != nil {
+		t.Fatalf("settings.json was not cloned: %v", err)
+	}
+	if string(got) != `{"model":"opus"}` {
+		t.Errorf("settings.json = %q, want the fixture content", got)
+	}
+}
+
+func TestLinkWritesAnExecutableWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:linked"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"link", "claude:linked"}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(bin, "claude:linked")
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Error("wrapper is not executable")
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), "exec ap run claude:linked") {
+		t.Errorf("wrapper does not exec the profile: %q", b)
+	}
+}
+
+func TestLinkRefusesAProfileThatDoesNotExist(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"link", "claude:ghost"}); err == nil {
+		t.Error("want an error for a missing profile")
+	}
+}
+
+// There is nothing to link: `ap run codex:default` is already the real config.
+// Named for what actually fires: ref(args, "link") routes through ParseRef,
+// which refuses Default before cmdLink's own "nothing to link" check is ever
+// reached. That check is kept anyway as a belt-and-braces backstop - see its
+// comment in cmdLink - but there is no way to exercise it through dispatch,
+// so this test cannot and does not claim to.
+func TestLinkRefusesDefaultViaParseRef(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"link", "claude:default"}); err == nil {
+		t.Error("want an error for claude:default")
+	}
+}
+
+// Overwriting something ap did not write would be a good way to lose a real binary.
+func TestLinkRefusesToOverwriteAForeignFile(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := os.WriteFile(filepath.Join(bin, "claude:linked"), []byte("#!/bin/sh\necho mine\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"create", "claude:linked"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"link", "claude:linked"}); err == nil {
+		t.Error("want a refusal rather than clobbering a file ap did not write")
+	}
+}
+
+func TestUnlinkRemovesOnlyOurWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	foreign := filepath.Join(bin, "claude:foreign")
+	if err := os.WriteFile(foreign, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"unlink", "claude:foreign"}); err == nil {
+		t.Error("unlink must refuse a file ap did not write")
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Error("unlink removed a foreign file")
+	}
+}
+
+// Unlinking a profile with no wrapper is not an error: most profiles are never
+// linked at all.
+func TestUnlinkOfANeverLinkedProfileIsNotAnError(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"unlink", "claude:neverlinked"}); err != nil {
+		t.Errorf("unlink of a never-linked profile = %v, want nil", err)
+	}
+}
+
+// A missing link dir (nothing under it, unlike the case above where the dir
+// exists but is empty) means nothing was ever linked, on any machine that has
+// never run `ap link` at all - most of them. Regression: os.OpenRoot on a
+// nonexistent dir returned an error that neither unlink nor delete's automatic
+// wrapper cleanup treated as "nothing to remove".
+func TestUnlinkToleratesAMissingLinkDir(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"unlink", "claude:neverlinked"}); err != nil {
+		t.Errorf("unlink with a missing link dir = %v, want nil", err)
+	}
+}
+
+// The sharper case: delete must not report failure - or leave the profile
+// deleted while claiming otherwise - just because the link dir was never
+// created.
+func TestDeleteToleratesAMissingLinkDir(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:nolinkdir"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"delete", "claude:nolinkdir"}); err != nil {
+		t.Errorf("delete with a missing link dir = %v, want nil", err)
+	}
+	if profile.Exists(a, "nolinkdir") {
+		t.Error("delete reported success but the profile still exists")
+	}
+}
+
+// A deleted profile must not leave a wrapper that fails confusingly.
+func TestDeleteRemovesTheWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{{"create", "claude:temp"}, {"link", "claude:temp"}, {"delete", "claude:temp"}} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:temp")); !os.IsNotExist(err) {
+		t.Error("the wrapper outlived its profile")
 	}
 }
 

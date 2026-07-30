@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -28,6 +29,9 @@ Usage:
   ap env <agent>:<profile>             print the environment override
   ap run <agent>:<profile> [args...]   run the agent with that profile
   ap delete <agent>:<profile>          delete a profile
+  ap link <agent>:<profile>            write a wrapper script so the profile
+                                       is a command you can type by name
+  ap unlink <agent>:<profile>          remove that wrapper
   ap version                           print version, commit and build date
 
 There is no active profile: every command names one explicitly.
@@ -48,6 +52,9 @@ Examples:
   ap run claude:plan
   ap run claude:plan --effort xhigh
   ap run opencode:review --model anthropic/claude-sonnet-4-5
+  ap link claude:plan && claude:plan   # now runnable directly, once its
+                                       # directory (~/.local/bin by default)
+                                       # is on PATH
 `
 
 func main() {
@@ -77,6 +84,10 @@ func dispatch(args []string) error {
 		return cmdRun(args[1:])
 	case "delete", "rm":
 		return cmdDelete(args[1:])
+	case "link":
+		return cmdLink(args[1:])
+	case "unlink":
+		return cmdUnlink(args[1:])
 	case "version", "--version", "-v":
 		return cmdVersion(args[1:])
 	case "help", "-h", "--help":
@@ -183,31 +194,35 @@ func cmdList(args []string) error {
 	default:
 		return fmt.Errorf("usage: ap list [agent]")
 	}
-	var any bool
+	// List always includes Default, so there is no "no profiles yet" case left
+	// to report: every agent has at least its real config to show.
 	for _, name := range names {
 		a, _ := agent.Lookup(name)
 		profiles, err := profile.List(a)
 		if err != nil {
 			return err
 		}
-		if len(profiles) == 0 {
-			continue
-		}
-		any = true
 		fmt.Printf("%s: %s\n", name, strings.Join(profiles, " "))
-	}
-	if !any {
-		fmt.Println("no profiles yet - create one with: ap create claude:plan")
 	}
 	return nil
 }
 
-// ref parses the single positional argument shared by most commands.
+// ref parses the single positional argument shared by the writing commands
+// (create, delete). ParseRef rejects Default.
 func ref(args []string, cmd string) (agent.Agent, string, error) {
 	if len(args) != 1 {
 		return agent.Agent{}, "", fmt.Errorf("usage: ap %s <agent>:<profile>", cmd)
 	}
 	return profile.ParseRef(args[0])
+}
+
+// refAllowDefault is ref but also accepts Default, for the read-only commands
+// that may resolve to the agent's real config directory: which, env, run.
+func refAllowDefault(args []string, cmd string) (agent.Agent, string, error) {
+	if len(args) != 1 {
+		return agent.Agent{}, "", fmt.Errorf("usage: ap %s <agent>:<profile>", cmd)
+	}
+	return profile.ParseRefAllowDefault(args[0])
 }
 
 func cmdCreate(args []string) error {
@@ -230,7 +245,10 @@ func cmdCreate(args []string) error {
 		// Validate before building a path from it. Without this, --from is a
 		// traversal: profile.Dir joins and cleans, so "--from ../../../.claude"
 		// resolves outside the profile root and Clone copies the real home.
-		if err := profile.ValidName(*from); err != nil {
+		// ParseRefAllowDefault, not ValidName directly, because --from is one of
+		// the four read-only paths that may name Default: `--from default`
+		// clones the agent's real config.
+		if _, _, err := profile.ParseRefAllowDefault(a.Name + ":" + *from); err != nil {
 			return fmt.Errorf("--from: %w", err)
 		}
 		if *from == name {
@@ -367,7 +385,7 @@ func setupHint(a agent.Agent, name string) string {
 }
 
 func cmdWhich(args []string) error {
-	a, name, err := ref(args, "which")
+	a, name, err := refAllowDefault(args, "which")
 	if err != nil {
 		return err
 	}
@@ -376,12 +394,18 @@ func cmdWhich(args []string) error {
 }
 
 func cmdEnv(args []string) error {
-	a, name, err := ref(args, "env")
+	a, name, err := refAllowDefault(args, "env")
 	if err != nil {
 		return err
 	}
-	// Empty base, so only the overrides print.
-	for _, e := range run.Env(a, profile.Dir(a, name), nil) {
+	// Default sets no override: Env treats an empty dir as "none", which is
+	// what makes `ap env <agent>:default` print nothing rather than the real
+	// config directory it would otherwise be pointless to assign to itself.
+	dir := profile.Dir(a, name)
+	if name == profile.Default {
+		dir = ""
+	}
+	for _, e := range run.Env(a, dir, nil) {
 		fmt.Println(e)
 	}
 	return nil
@@ -394,14 +418,29 @@ func cmdRun(args []string) error {
 	// No flag parsing at all: everything after the reference belongs to the agent,
 	// verbatim. See the flag-order note in usage.
 	rest := args
-	a, name, err := profile.ParseRef(rest[0])
+	a, name, err := profile.ParseRefAllowDefault(rest[0])
 	if err != nil {
 		return err
 	}
 	if !profile.Exists(a, name) {
+		if name == profile.Default {
+			// "ap create claude:default" is unconditionally refused - that advice
+			// would be a dead end. Name the actual path instead: on this machine
+			// the agent has never been run outside ap, or its config lives
+			// somewhere this registry row does not expect.
+			return fmt.Errorf("%s's real config directory does not exist: %s", a.Name, profile.Dir(a, name))
+		}
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}
+
+	// Default is the agent's real config, reached exactly as it already is:
+	// nothing is created, nothing is linked, no shim is built, and Exec gets no
+	// override at all (an empty dir), not even one that happens to equal it.
+	if name == profile.Default {
+		return run.Exec(a, "", rest[1:])
+	}
+
 	dir := profile.Dir(a, name)
 
 	// Re-assert the shared links on every run: agents rewrite their credential
@@ -444,5 +483,148 @@ func cmdDelete(args []string) error {
 		return err
 	}
 	fmt.Printf("deleted %s:%s\n", a.Name, name)
+	// A deleted profile must not leave behind a wrapper that fails confusingly
+	// when someone types its name. Not an error if there never was one.
+	if err := removeWrapperIfOurs(a.Name + ":" + name); err != nil {
+		return err
+	}
+	return nil
+}
+
+// wrapperHeader opens every file `ap link` writes, and nothing else ever
+// writes it — the same principle as the module's other ownership markers: it
+// lives inside the artefact itself, so it cannot drift out of sync with it.
+// `link` and `unlink`, and the automatic cleanup in `delete`, all use it to
+// tell their own file from something else that happens to share its name.
+const wrapperHeader = "#!/bin/sh\n# written by ap link. Safe to delete.\n"
+
+// wrapperScript is the wrapper `ap link` writes for ref (an "<agent>:<profile>"
+// string). A script, not a symlink with argv[0] dispatch: it names `ap` by
+// PATH lookup rather than the currently running binary's own path, so it
+// survives ap being upgraded or moved elsewhere on PATH, and unlike a symlink
+// it can be read with `cat`.
+func wrapperScript(ref string) string {
+	return fmt.Sprintf("%sexec ap run %s \"$@\"\n", wrapperHeader, ref)
+}
+
+// linkDir is where `ap link` writes wrapper scripts. Always ~/.local/bin
+// regardless of where the ap binary itself was installed — install.sh warns
+// about that directory unconditionally for exactly this reason — except in
+// tests, which need to point it elsewhere.
+func linkDir() (string, error) {
+	if d := os.Getenv("AP_LINK_DIR"); d != "" {
+		return d, nil
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(h, ".local", "bin"), nil
+}
+
+func cmdLink(args []string) error {
+	a, name, err := ref(args, "link")
+	if err != nil {
+		return err
+	}
+	// Belt as well as braces, the same reason Delete re-checks Default
+	// independently of ParseRef: ref already routes through ParseRef, which
+	// refuses Default for every writing command, so there is no path through
+	// dispatch that reaches this branch today - TestLinkRefusesDefaultViaParseRef
+	// pins the ParseRef rejection, which is what actually fires. Kept anyway,
+	// so a future change to ref or to link's own routing does not silently
+	// start writing a wrapper for "nothing" (ap run codex:default is already
+	// the real config).
+	if name == profile.Default {
+		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, profile.Default)
+	}
+	if !profile.Exists(a, name) {
+		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
+			a.Name, name, a.Name, name)
+	}
+	dir, err := linkDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// Through an os.Root confined to dir, same as everything else that writes
+	// into a directory named partly by user input — see internal/profile.Link
+	// and copyInstructions above. refStr can never itself contain a path
+	// separator (ValidName already guarantees that), but the confinement is
+	// what makes that a property of the code rather than of the caller.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	refStr := a.Name + ":" + name
+	p := filepath.Join(dir, refStr)
+	// Overwriting something ap did not write would be a good way to lose a
+	// real binary — refuse unless the file is either absent or already one of
+	// ours.
+	if b, err := root.ReadFile(refStr); err == nil {
+		if !strings.HasPrefix(string(b), wrapperHeader) {
+			return fmt.Errorf("refusing to overwrite %s: it was not written by ap link", p)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := root.WriteFile(refStr, []byte(wrapperScript(refStr)), 0o755); err != nil {
+		return err
+	}
+	fmt.Printf("linked %s -> %s\n", p, refStr)
+	return nil
+}
+
+func cmdUnlink(args []string) error {
+	a, name, err := ref(args, "unlink")
+	if err != nil {
+		return err
+	}
+	return removeWrapperIfOurs(a.Name + ":" + name)
+}
+
+// removeWrapperIfOurs removes the wrapper at ref's path in linkDir, if any.
+// Absent is not an error: most profiles are never linked. Present but not
+// carrying wrapperHeader is refused, the same as cmdLink refuses to overwrite
+// it — either way, something ap did not write is left untouched.
+func removeWrapperIfOurs(ref string) error {
+	dir, err := linkDir()
+	if err != nil {
+		return err
+	}
+	// Same os.Root confinement as cmdLink's write. A missing link dir means
+	// nothing was ever linked - there is no wrapper to remove, the same as a
+	// missing wrapper file below, not an error. Without this, ap delete and ap
+	// unlink failed on any machine that had never run `ap link` at all: the
+	// profile was already gone by the time this ran, so the command both broke
+	// and reported it as a failure.
+	root, err := os.OpenRoot(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	p := filepath.Join(dir, ref)
+	b, err := root.ReadFile(ref)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(string(b), wrapperHeader) {
+		return fmt.Errorf("refusing to remove %s: it was not written by ap link", p)
+	}
+	if err := root.Remove(ref); err != nil {
+		return err
+	}
+	fmt.Printf("unlinked %s\n", p)
 	return nil
 }

@@ -105,7 +105,17 @@ func Link(a agent.Agent, dir string) (linked, skipped, unshared []string, err er
 // into them, so the shared session, credential and trust targets in the real
 // home are untouched. TestDeleteDoesNotFollowSymlinks is what keeps that true —
 // it is the one bug in this program that would be irreversible.
+//
+// Default is refused here directly, not only via ParseRef upstream: Dir(a,
+// Default) is the agent's real config directory, and this is the one call in
+// the whole program that would remove it outright. The guard must not depend
+// on a validator having been called correctly somewhere else, the same reason
+// Link and Discard go through an os.Root instead of trusting their caller.
 func Delete(a agent.Agent, name string) error {
+	if name == Default {
+		return fmt.Errorf("refusing to delete %s:%s: it is your real config, not a profile ap made",
+			a.Name, Default)
+	}
 	dir := Dir(a, name)
 	// Lstat, not Stat: a dangling symlink would otherwise report "does not exist"
 	// while staying on disk forever.

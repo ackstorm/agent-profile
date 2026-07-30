@@ -23,8 +23,26 @@ func Root() string {
 	return filepath.Join(h, ".local", "share", "agent-profile", "profiles")
 }
 
-// Dir is the directory for one agent+profile pair.
+// Default names the agent's real, machine-wide configuration — the one it uses
+// when ap is not involved. It is a sentinel, not a directory: nothing is ever
+// created for it, Link never runs against it, no shim is built.
+//
+// It exists so `ap run codex:default` is a way to reach your normal setup
+// through the same command as everything else, and so
+// `ap create codex:plan --from default` can start a profile from the
+// configuration you already have.
+//
+// Read-only, always. Dir resolves it to the real config directory, which is
+// exactly why nothing that writes may accept it: `ap delete codex:default`
+// would otherwise remove the configuration of the agent itself.
+const Default = "default"
+
+// Dir is the directory for one agent+profile pair, or, for Default, the
+// agent's real config directory.
 func Dir(a agent.Agent, name string) string {
+	if name == Default {
+		return a.Config
+	}
 	return filepath.Join(Root(), a.Name, name)
 }
 
@@ -43,6 +61,10 @@ func ValidName(s string) error {
 	if s == "" {
 		return fmt.Errorf("profile name must not be empty")
 	}
+	if s == Default {
+		return fmt.Errorf("profile name %q is reserved for the agent's real config; "+
+			"see ap run/which/env/--from, which accept it read-only", s)
+	}
 	if strings.HasPrefix(s, ".") {
 		return fmt.Errorf("invalid profile name %q: must not start with '.'", s)
 	}
@@ -59,8 +81,22 @@ func ValidName(s string) error {
 	return nil
 }
 
-// ParseRef splits an "<agent>:<profile>" reference.
+// ParseRef splits an "<agent>:<profile>" reference. Rejects Default via
+// ValidName, so every writing command that routes through it — create,
+// delete — refuses the sentinel.
 func ParseRef(ref string) (agent.Agent, string, error) {
+	return parseRef(ref, false)
+}
+
+// ParseRefAllowDefault is ParseRef but additionally accepts Default for the
+// profile name. Reserved for the four read-only paths that may resolve to the
+// agent's real config directory: `run`, `which`, `env`, and the --from
+// validation in `ap create`. Every writing path must keep using ParseRef.
+func ParseRefAllowDefault(ref string) (agent.Agent, string, error) {
+	return parseRef(ref, true)
+}
+
+func parseRef(ref string, allowDefault bool) (agent.Agent, string, error) {
 	parts := strings.Split(ref, ":")
 	if len(parts) != 2 {
 		return agent.Agent{}, "", fmt.Errorf("bad reference %q: want <agent>:<profile>, e.g. claude:plan", ref)
@@ -68,6 +104,9 @@ func ParseRef(ref string) (agent.Agent, string, error) {
 	a, ok := agent.Lookup(parts[0])
 	if !ok {
 		return agent.Agent{}, "", fmt.Errorf("unknown agent %q: supported are %s", parts[0], strings.Join(agent.Names(), ", "))
+	}
+	if allowDefault && parts[1] == Default {
+		return a, Default, nil
 	}
 	if err := ValidName(parts[1]); err != nil {
 		return agent.Agent{}, "", err
@@ -87,14 +126,12 @@ func Create(a agent.Agent, name string) (string, error) {
 	return dir, nil
 }
 
-// List returns the profile names for an agent. A missing directory is empty,
-// not an error.
+// List returns the profile names for an agent, Default always first. A
+// missing directory means no created profiles, not an error — Default is
+// still there, since it names the real config rather than anything ap made.
 func List(a agent.Agent) ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(Root(), a.Name))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	var out []string
@@ -113,5 +150,5 @@ func List(a agent.Agent) ([]string, error) {
 		}
 	}
 	sort.Strings(out)
-	return out, nil
+	return append([]string{Default}, out...), nil
 }

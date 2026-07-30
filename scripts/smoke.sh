@@ -147,6 +147,95 @@ else
   skip opencode
 fi
 
+# --- default: <agent>:default is the real config dir, undeletable, and
+#     --from default clones configuration only, none of the runtime ----------
+for ag in $("$AP" agents | awk '{print $1}'); do
+  command -v "$ag" >/dev/null 2>&1 || { skip "$ag"; continue; }
+  # marker is one file CloneAllow actually names for this agent, checked only
+  # when present in the real config - proof that --from default clones
+  # something, not just that it leaves runtime behind. runtime is real state
+  # CloneAllow never names, including opencode's node_modules (62 MB on the
+  # reference machine): an empty list here would make the leak check below
+  # vacuous, always passing whether or not the exclusion actually works.
+  case "$ag" in
+    claude) real="$HOME/.claude"; runtime="projects tmp telemetry plugins/cache"; marker="settings.json" ;;
+    codex) real="$HOME/.codex"; runtime="sessions history.jsonl plugins/cache"; marker="config.toml" ;;
+    pi) real="$HOME/.pi/agent"; runtime="sessions"; marker="settings.json" ;;
+    opencode) real="$real_config/opencode"; runtime="node_modules"; marker="opencode.json" ;;
+    *)
+      bad "$ag" "smoke.sh does not know this agent's real config dir - add a case above"
+      continue
+      ;;
+  esac
+
+  got=$("$AP" which "$ag:default" 2>/dev/null)
+  if [ "$got" = "$real" ]; then
+    pass "$ag" "default resolves to the real config dir"
+  else
+    bad "$ag" "default resolves to $got, want $real"
+  fi
+
+  if "$AP" delete "$ag:default" >/dev/null 2>&1; then
+    bad "$ag" "ap delete $ag:default SUCCEEDED - it must always refuse"
+  else
+    pass "$ag" "ap delete $ag:default refused, as it must"
+  fi
+
+  if [ ! -d "$real" ]; then
+    skip "$ag"
+    continue
+  fi
+  "$AP" delete "$ag:apsmokedefault" >/dev/null 2>&1
+  if "$AP" create "$ag:apsmokedefault" --from default >/dev/null 2>&1; then
+    clonedir=$("$AP" which "$ag:apsmokedefault")
+
+    if [ -e "$real/$marker" ]; then
+      if [ -e "$clonedir/$marker" ]; then
+        pass "$ag" "--from default cloned $marker"
+      else
+        bad "$ag" "--from default did NOT clone $marker, though it exists in the real config"
+      fi
+    fi
+
+    leaked=""
+    for r in $runtime; do
+      [ -e "$clonedir/$r" ] && leaked="$leaked $r"
+    done
+    if [ -n "$leaked" ]; then
+      bad "$ag" "--from default cloned runtime state:$leaked"
+    else
+      pass "$ag" "--from default cloned configuration only"
+    fi
+  else
+    bad "$ag" "ap create --from default failed"
+  fi
+  "$AP" delete "$ag:apsmokedefault" >/dev/null 2>&1
+done
+
+# --- link: the wrapper is executable and actually reaches the profile --------
+if command -v claude >/dev/null 2>&1; then
+  linkdir=$(mktemp -d)
+  "$AP" delete claude:apsmokelink >/dev/null 2>&1
+  "$AP" create claude:apsmokelink >/dev/null 2>&1
+  if AP_LINK_DIR="$linkdir" "$AP" link claude:apsmokelink >/dev/null 2>&1; then
+    w="$linkdir/claude:apsmokelink"
+    apdir=$(cd "$(dirname "$AP")" && pwd)
+    if [ -x "$w" ] && grep -q 'exec ap run claude:apsmokelink' "$w" &&
+      timeout 60 env PATH="$apdir:$PATH" "$w" --version >/dev/null 2>&1; then
+      pass link "wrapper is executable and reaches the profile"
+    else
+      bad link "wrapper did not run claude through the profile"
+    fi
+  else
+    bad link "ap link failed"
+  fi
+  AP_LINK_DIR="$linkdir" "$AP" unlink claude:apsmokelink >/dev/null 2>&1
+  "$AP" delete claude:apsmokelink >/dev/null 2>&1
+  rm -rf "$linkdir"
+else
+  skip claude
+fi
+
 # --- every variable set must point inside the profile -----------------------
 # This replaced a blanket "no XDG_* at all". opencode has no private config
 # variable, so isolating it means setting XDG_CONFIG_HOME; what is guaranteed now

@@ -103,7 +103,8 @@ func TestCloneResolvesSymlinkedSource(t *testing.T) {
 	}
 
 	dst := t.TempDir()
-	if err := Clone(agent.Agent{Name: "fake"}, link, dst); err != nil {
+	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json"}}
+	if err := Clone(a, link, dst); err != nil {
 		t.Fatalf("Clone from a symlinked source: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dst, "settings.json"))
@@ -261,8 +262,8 @@ func TestListIncludesSymlinkedProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != "golden" || got[1] != "real" {
-		t.Errorf("List = %v, want [golden real]", got)
+	if len(got) != 3 || got[0] != Default || got[1] != "golden" || got[2] != "real" {
+		t.Errorf("List = %v, want [%s golden real]", got, Default)
 	}
 }
 

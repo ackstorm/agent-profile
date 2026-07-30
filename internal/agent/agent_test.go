@@ -1,11 +1,82 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestEveryAgentKnowsItsRealConfigDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	h, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	want := map[string]string{
+		"claude":   filepath.Join(h, ".claude"),
+		"codex":    filepath.Join(h, ".codex"),
+		"pi":       filepath.Join(h, ".pi", "agent"),
+		"opencode": filepath.Join(h, ".config", "opencode"),
+	}
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if a.Config != want[name] {
+			t.Errorf("%s Config = %q, want %q", name, a.Config, want[name])
+		}
+	}
+}
+
+// opencode reads XDG_CONFIG_HOME when set (see ConfigBase), so its Config must
+// too, or ap create --from default and ap run opencode:default would disagree
+// with where opencode actually looks — verified as a three-way split: Config
+// hardcoded ~/.config/opencode, profile.ConfigBase() already honoured
+// XDG_CONFIG_HOME, and scripts/smoke.sh independently did too.
+func TestOpencodeConfigHonoursXDGConfigHome(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
+	a, _ := Lookup("opencode")
+	want := filepath.Join("/custom/xdg", "opencode")
+	if a.Config != want {
+		t.Errorf("opencode Config = %q, want %q", a.Config, want)
+	}
+}
+
+// Config must agree with what Shared already claims about the real home, or the two
+// would describe different machines.
+func TestConfigAgreesWithSharedSources(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		for _, s := range a.Shared {
+			if !strings.HasPrefix(s.From, a.Config+string(os.PathSeparator)) {
+				t.Errorf("%s: shared %q lives at %q, outside Config %q", name, s.Rel, s.From, a.Config)
+			}
+		}
+	}
+}
+
+func TestEveryAgentDeclaresWhatConfigMeans(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if len(a.CloneAllow) == 0 {
+			t.Errorf("%s declares no CloneAllow: --from would copy nothing", name)
+		}
+	}
+}
+
+// The allowlist must not name the credential: Link recreates it, and copying it
+// would put a real file where the symlink belongs.
+func TestCloneAllowNeverNamesASharedPath(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		for _, s := range a.Shared {
+			if slices.Contains(a.CloneAllow, s.Rel) {
+				t.Errorf("%s: %q is both CloneAllow and Shared", name, s.Rel)
+			}
+		}
+	}
+}
 
 func TestStateIsNeverAlsoShared(t *testing.T) {
 	for _, name := range Names() {
