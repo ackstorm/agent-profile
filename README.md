@@ -33,9 +33,11 @@ inside an `exec` profile that never installed the tools it used.
 ap create claude:plan                               # new, empty profile
 ap run claude:plan plugin install caveman@caveman   # populate it
 ap run claude:plan                                  # work in it
+claude:plan                                         # same thing, typed directly
 ap create claude:review --from plan                 # clone it
 ap create claude:work --copy-instructions           # seed it with your CLAUDE.md
-ap link claude:plan && claude:plan                  # now a command you can type
+ap env claude:plan npx skills add <src> --skill <s> -g -a claude-code
+ap env codex:plan env | grep CODEX                  # what a command inherits
 ap list
 ```
 
@@ -51,15 +53,79 @@ exactly that reason — see "`default`" below.
 |---|---|
 | `ap agents` | supported agents, their variable and their mode |
 | `ap list [agent]` | your profiles — always includes `default` |
-| `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
+| `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
 | `ap which <agent>:<profile>` | the profile directory, for editing by hand |
 | `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
+| `ap env <agent>:<profile> <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory |
 | `ap run <agent>:<profile> [args...]` | run it; args pass through verbatim |
-| `ap delete <agent>:<profile>` | remove the profile — including its own session history; see "What every profile shares" below |
-| `ap link <agent>:<profile>` | write a wrapper script so the profile is a command you can type |
-| `ap unlink <agent>:<profile>` | remove that wrapper |
+| `ap delete <agent>:<profile>` | remove the profile and its wrapper — including its own session history; see "What every profile shares" below |
+| `ap unlink <agent>:<profile>` | remove the wrapper, keep the profile |
+| `ap link <agent>:<profile>` | write the wrapper back |
 
 Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent>/<profile>/`.
+
+### Installing into a profile with something that is not the agent
+
+Plugins go in through the agent (`ap run claude:plan plugin install ...`), but
+skills and most third-party installers are separate tools. They find their
+target by reading the same variable `ap` sets, so `ap env` with a command is all
+they need:
+
+```bash
+ap env claude:plan npx skills add vercel-labs/agent-skills \
+  --skill web-design-guidelines -g -a claude-code
+```
+
+The source is not limited to `org/repo` on GitHub — a git URL works, so a
+private or self-hosted collection installs the same way:
+
+```bash
+ap env claude:finops npx skills add git@github.com:aws/agent-toolkit-for-aws.git \
+  --skill aws-billing-and-cost-management --agent claude-code --yes --global
+```
+
+Verified against [vercel-labs/skills](https://github.com/vercel-labs/skills),
+whose `src/agents.ts` resolves claude's home as `CLAUDE_CONFIG_DIR || ~/.claude`
+and installs global skills into `<that>/skills`. `-g` is not optional: without
+it the skill lands in `./.claude/skills` in the current directory, which is
+project scope and has nothing to do with the profile.
+
+The same installer then reports where it put it:
+
+```console
+$ ap env claude:plan npx skills list -g
+web-design-guidelines  ~/.local/share/agent-profile/profiles/claude/plan/skills/web-design-guidelines
+  Agents: Claude Code  Source: vercel-labs/agent-skills
+```
+
+This is `env(1)`'s second form and it behaves like it — the variable is set for
+that one command and nothing outlives it. `ap env <agent>:<profile>` on its own
+still just prints. Everything after the reference belongs to the command, so
+its own flags arrive untouched.
+
+Which makes `env` itself the shortest way to see what a command would inherit:
+
+```console
+$ ap env codex:plan env | grep CODEX
+CODEX_HOME=/home/user/.local/share/agent-profile/profiles/codex/plan
+
+$ ap env opencode:plan env | grep XDG_CONFIG_HOME
+XDG_CONFIG_HOME=/home/user/.local/share/agent-profile/profiles/opencode/plan/xdg
+
+$ ap env claude:default env | grep -c CLAUDE_CONFIG_DIR
+0
+```
+
+Three things in one view: codex gets its own private variable; opencode gets the
+shim directory rather than the profile itself, which is what keeps `git` and
+`npm` out of it (see "The opencode asymmetry"); and `default` sets nothing at
+all, because your real config is already where the agent looks.
+
+Piping works the same way, since `ap` execs rather than wrapping:
+
+```bash
+npx skills use vercel-labs/agent-skills@web-design-guidelines | claude:plan
+```
 
 ### `default` — your real config, read-only
 
@@ -77,15 +143,23 @@ configuration you already have (`ap create codex:work --from default`).
 and `ap link claude:default` all refuse — the last because there is nothing to
 link, `ap run codex:default` already reaches the real thing directly.
 
-### `ap link` — a profile you can type
+### A profile is a command you can type
 
-`ap link claude:plan` writes a small wrapper to `~/.local/bin/claude:plan`
+`ap create claude:plan` writes a small wrapper to `~/.local/bin/claude:plan`
 (`exec ap run claude:plan "$@"`), so once that directory is on your `PATH`,
 `claude:plan --effort xhigh` works the same as `ap run claude:plan --effort
-xhigh`. `ap unlink claude:plan` removes it. Both refuse to touch a file `ap`
-did not write — the wrapper carries a marker line for exactly that check — and
-`ap delete` removes a profile's wrapper automatically so a deleted profile
-never leaves behind a command that fails confusingly.
+xhigh`. `ap delete` removes it again, so a deleted profile never leaves behind
+a command that fails confusingly.
+
+It is part of `create` rather than a second step because a profile you cannot
+type is a profile you do not use. `ap unlink claude:plan` opts out and keeps the
+profile; `ap link claude:plan` writes it back, which is also what profiles
+created before this behaviour existed need.
+
+Nothing here touches a file `ap` did not write — the wrapper carries a marker
+line for exactly that check. If the name is already taken by something else,
+`create` says `not linked: ...` and carries on: the profile is fine and `ap run`
+reaches it.
 
 The wrapper always goes to `~/.local/bin`, regardless of where the `ap` binary
 itself is installed, and it names `ap` by `PATH` lookup rather than its own
@@ -205,8 +279,13 @@ Costs, stated plainly:
 3. **`ap delete` removes that profile's session transcripts.** If you want a
    profile's history, copy it out first.
 
-Login and onboarding survive on the credential alone — no other file is needed
-to be logged in.
+Login survives on the credential alone. Onboarding does not: a profile holding
+nothing but the credential is logged in, but claude still opens on its theme
+picker, because the flag that gets past it lives in `.claude.json` and a new
+profile has none. So `ap create` copies that one flag —
+`hasCompletedOnboarding`, and nothing else in that file — from your real config
+into the new profile, once, at create. Everything else in there is session
+state, per-project trust and prompt history, and stays where it is.
 
 **The opencode asymmetry.** opencode's sessions, auth and account state all live
 under `XDG_DATA_HOME`, which `ap` deliberately never redirects — redirecting it is
@@ -277,7 +356,7 @@ curl -fsSL .../install.sh | PREFIX=/usr/local/bin VERSION=v0.1.0 bash
 ```
 
 `install.sh` warns if `PREFIX` ends up off your `PATH` — and, **regardless of
-`PREFIX`**, if `~/.local/bin` is too, since `ap link` always writes its
+`PREFIX`**, if `~/.local/bin` is too, since `ap create` always writes its
 wrappers there: installing `ap` itself to `/usr/local/bin` does not change
 where `claude:plan` ends up. Each warning names the exact line to add to your
 shell profile.

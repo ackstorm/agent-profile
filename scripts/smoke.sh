@@ -212,25 +212,161 @@ for ag in $("$AP" agents | awk '{print $1}'); do
   "$AP" delete "$ag:apsmokedefault" >/dev/null 2>&1
 done
 
-# --- link: the wrapper is executable and actually reaches the profile --------
+# --- what a clone carries: a plugin and its skill yes, an MCP server no ------
+# Every agent call below runs from an EMPTY directory, never $HOME and never the
+# repo. Claude reads <cwd>/.claude/settings.json as PROJECT settings, so running
+# from $HOME makes the real ~/.claude/settings.json load as project config: the
+# profile then appears to inherit plugins it never declared, and marketplaces
+# clone into it out of nowhere. That false positive is very convincing. Keep the
+# neutral cwd.
+if command -v claude >/dev/null 2>&1; then
+  neutral=$(mktemp -d)
+  mkrepo=forrestchang/andrej-karpathy-skills # a plugin whose payload IS a skill,
+  mk=karpathy-skills                         # so one install proves both
+  plug=andrej-karpathy-skills
+  skill=karpathy-guidelines
+
+  for p in claude:apsmokeplug claude:apsmokeclone; do "$AP" delete "$p" >/dev/null 2>&1; done
+  "$AP" create claude:apsmokeplug >/dev/null 2>&1
+  od=$("$AP" which claude:apsmokeplug)
+
+  (cd "$neutral" && timeout 180 "$AP" run claude:apsmokeplug plugin marketplace add "$mkrepo") >/dev/null 2>&1
+  (cd "$neutral" && timeout 180 "$AP" run claude:apsmokeplug plugin install "$plug@$mk") >/dev/null 2>&1
+
+  # Scope must be "user", i.e. the profile's own settings.json. A "project"
+  # scope here means the cwd leaked in and every assertion below is worthless.
+  if (cd "$neutral" && timeout 120 "$AP" run claude:apsmokeplug plugin list 2>&1) |
+    grep -A2 -F "$plug@$mk" | grep -q "Scope: user"; then
+    pass plugin "installed into the profile at user scope"
+  else
+    bad plugin "$plug@$mk not installed at user scope - did the cwd leak in?"
+  fi
+
+  if [ -n "$(find "$od/plugins" -name SKILL.md -path "*$skill*" -print -quit 2>/dev/null)" ]; then
+    pass plugin "the plugin's skill is on disk in the profile"
+  else
+    bad plugin "no $skill SKILL.md under $od/plugins"
+  fi
+
+  # An MCP server at user scope lands in the profile's .claude.json.
+  mcp_ok=0
+  if command -v npx >/dev/null 2>&1; then
+    (cd "$neutral" && timeout 60 "$AP" run claude:apsmokeplug mcp add apsmokemcp --scope user \
+      -- npx -y @modelcontextprotocol/server-filesystem /tmp) >/dev/null 2>&1
+    if (cd "$neutral" && timeout 180 "$AP" run claude:apsmokeplug mcp list 2>&1) | grep -q apsmokemcp; then
+      pass mcp "the profile's own MCP server is configured and reachable"
+      mcp_ok=1
+    else
+      bad mcp "apsmokemcp not listed - MCP at user scope did not reach the profile"
+    fi
+  else
+    skip mcp
+  fi
+
+  # --- and now the clone ---
+  if "$AP" create claude:apsmokeclone --from apsmokeplug >/dev/null 2>&1; then
+    cd2=$("$AP" which claude:apsmokeclone)
+
+    if grep -q "$plug@$mk" "$cd2/settings.json" 2>/dev/null; then
+      pass clone "the plugin declaration was cloned"
+    else
+      bad clone "settings.json in the clone does not declare $plug@$mk"
+    fi
+
+    # The declaration alone installs nothing: the cache is state, so it is never
+    # cloned. Claude reconciles it as background work at session start - the
+    # marketplace clones on the first cold start, the plugin installs on the
+    # second; `plugin list` alone never triggers either. Bounded retry, not an
+    # open-ended poll: give it up to 3 starts and fail with a clear message.
+    reconciled=0
+    for attempt in 1 2 3; do
+      (cd "$neutral" && timeout 300 "$AP" run claude:apsmokeclone -p "say ok") >/dev/null 2>&1
+      if (cd "$neutral" && timeout 120 "$AP" run claude:apsmokeclone plugin list 2>&1) | grep -q -F "$plug@$mk"; then
+        reconciled=1
+        break
+      fi
+    done
+    if [ "$reconciled" = 1 ]; then
+      pass clone "session start(s) materialised the declared plugin ($attempt attempt(s))"
+    else
+      bad clone "the plugin is still not installed after 3 session starts"
+    fi
+    if [ -n "$(find "$cd2/plugins" -name SKILL.md -path "*$skill*" -print -quit 2>/dev/null)" ]; then
+      pass clone "the plugin's skill came with it"
+    else
+      bad clone "no $skill SKILL.md in the clone after reconciliation"
+    fi
+
+    # Documented limitation, asserted so it cannot change silently: MCP servers
+    # live in .claude.json, which is history, trust state and counters as much as
+    # config, so the clone allowlist does not name it. If this ever starts
+    # passing, the allowlist changed and this expectation is the thing to update.
+    if [ "$mcp_ok" = 1 ]; then
+      if (cd "$neutral" && timeout 180 "$AP" run claude:apsmokeclone mcp list 2>&1) | grep -q apsmokemcp; then
+        bad clone "the MCP server WAS cloned - .claude.json is in the allowlist now, update this check"
+      else
+        pass clone "MCP servers are not cloned, as documented (they live in .claude.json)"
+      fi
+    fi
+  else
+    bad clone "ap create --from apsmokeplug failed"
+  fi
+
+  for p in claude:apsmokeplug claude:apsmokeclone; do "$AP" delete "$p" >/dev/null 2>&1; done
+  rm -rf "$neutral"
+else
+  skip plugin
+fi
+
+# --- first run: create seeds the onboarding flag, and only that key ----------
+# Without it a new profile opens on claude's theme picker even though the shared
+# credential has it logged in. Checked on the file rather than by driving the
+# wizard: the wizard needs a pty and 25s, this needs neither.
+if command -v claude >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
+  "$AP" delete claude:apsmokeseed >/dev/null 2>&1
+  "$AP" create claude:apsmokeseed >/dev/null 2>&1
+  seeded="$("$AP" which claude:apsmokeseed)/.claude.json"
+  if grep -q '"hasCompletedOnboarding"' "$seeded" 2>/dev/null; then
+    pass firstrun "the onboarding flag was seeded"
+  else
+    bad firstrun "a new profile would open on the theme picker"
+  fi
+  # The rest of that file is prompt history, per-project trust and machine
+  # identity. Seeding it wholesale would put all of it in every profile.
+  if grep -q '"projects"\|"userID"\|"oauthAccount"' "$seeded" 2>/dev/null; then
+    bad firstrun "the seed carried more than the first-run flags"
+  else
+    pass firstrun "and nothing else from ~/.claude.json"
+  fi
+  "$AP" delete claude:apsmokeseed >/dev/null 2>&1
+else
+  skip firstrun
+fi
+
+# --- link: create writes a wrapper that is executable and reaches the profile
+# `ap create` links; no `ap link` step here on purpose, because that is the
+# behaviour under test.
 if command -v claude >/dev/null 2>&1; then
   linkdir=$(mktemp -d)
-  "$AP" delete claude:apsmokelink >/dev/null 2>&1
-  "$AP" create claude:apsmokelink >/dev/null 2>&1
-  if AP_LINK_DIR="$linkdir" "$AP" link claude:apsmokelink >/dev/null 2>&1; then
+  AP_LINK_DIR="$linkdir" "$AP" delete claude:apsmokelink >/dev/null 2>&1
+  if AP_LINK_DIR="$linkdir" "$AP" create claude:apsmokelink >/dev/null 2>&1; then
     w="$linkdir/claude:apsmokelink"
     apdir=$(cd "$(dirname "$AP")" && pwd)
     if [ -x "$w" ] && grep -q 'exec ap run claude:apsmokelink' "$w" &&
       timeout 60 env PATH="$apdir:$PATH" "$w" --version >/dev/null 2>&1; then
-      pass link "wrapper is executable and reaches the profile"
+      pass link "ap create wrote a wrapper that reaches the profile"
     else
       bad link "wrapper did not run claude through the profile"
     fi
   else
-    bad link "ap link failed"
+    bad link "ap create failed"
   fi
-  AP_LINK_DIR="$linkdir" "$AP" unlink claude:apsmokelink >/dev/null 2>&1
-  "$AP" delete claude:apsmokelink >/dev/null 2>&1
+  AP_LINK_DIR="$linkdir" "$AP" delete claude:apsmokelink >/dev/null 2>&1
+  if [ -e "$linkdir/claude:apsmokelink" ]; then
+    bad link "the wrapper outlived ap delete"
+  else
+    pass link "ap delete removed the wrapper"
+  fi
   rm -rf "$linkdir"
 else
   skip claude

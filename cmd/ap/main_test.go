@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,24 @@ import (
 // dispatch is where user input becomes a filesystem path, and it had no tests at
 // all — which is how --from shipped without validation. These exercise the
 // argument handling only; anything that would exec a real agent is out of scope.
+
+// TestMain keeps the suite out of the real ~/.local/bin. `ap create` now writes
+// a wrapper, so every test that creates a profile would otherwise litter the
+// developer's own PATH directory with commands named after test fixtures. Tests
+// that care about the wrapper still set AP_LINK_DIR themselves; this is only the
+// floor for the ones that do not.
+func TestMain(m *testing.M) {
+	d, err := os.MkdirTemp("", "ap-link-dir")
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("AP_LINK_DIR", d); err != nil {
+		panic(err)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(d)
+	os.Exit(code)
+}
 
 func TestDispatchUnknownCommand(t *testing.T) {
 	if err := dispatch([]string{"frobnicate"}); err == nil {
@@ -166,6 +185,34 @@ func TestDispatchCreateRejectsExtraArgumentsAroundTheRef(t *testing.T) {
 // run must NOT get the treatment create just got. Everything after the reference
 // belongs to the agent, so an unknown flag there is the agent's business, not a
 // parse error from ap. If someone "makes run consistent with create", this fails.
+// `ap env <ref> <command>` is env(1)'s second form, so it inherits run's rule:
+// everything after the reference belongs to the command. Without this, the
+// installers this form exists for - `ap env claude:plan npx skills add ... -g`
+// - would have their own flags eaten.
+func TestDispatchEnvDoesNotParseFlagsAfterTheRef(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"env", "claude:ghost", "npx", "--notapflag"})
+	if err == nil {
+		t.Fatal("env with a command on a missing profile = nil error, want error")
+	}
+	if strings.Contains(err.Error(), "notapflag") {
+		t.Errorf("ap parsed a flag that belongs to the command: %v", err)
+	}
+	if !strings.Contains(err.Error(), "claude:ghost") {
+		t.Errorf("error %q is not the missing-profile error", err)
+	}
+}
+
+// The first form must keep working, and must stay read-only: printing the
+// variable is what `ap env <ref>` has always meant, and it answers for a
+// profile without touching it.
+func TestEnvWithNoCommandStillPrints(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"env", "claude:neverbuilt"}); err != nil {
+		t.Errorf("ap env on a profile that does not exist = %v, want nil", err)
+	}
+}
+
 func TestDispatchRunDoesNotParseFlagsAfterTheRef(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	err := dispatch([]string{"run", "claude:ghost", "--notapflag"})
@@ -308,6 +355,123 @@ func TestDispatchCreateFromDefaultIsNeverRejectedAsInvalid(t *testing.T) {
 	}
 	if string(got) != `{"model":"opus"}` {
 		t.Errorf("settings.json = %q, want the fixture content", got)
+	}
+}
+
+// Sharing the credential makes a profile logged in, not started: measured on
+// claude v2.1.220, a profile holding nothing but the credential link opens on
+// the theme picker. The flag that gates it lives in ~/.claude.json, which a
+// profile does not have, so create seeds it.
+func TestCreateSeedsTheFirstRunFlags(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	real := `{"hasCompletedOnboarding":true,"userID":"secret","projects":{"/tmp":{"history":["a prompt"]}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(real), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"create", "claude:seeded"}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	b, err := os.ReadFile(filepath.Join(profile.Dir(a, "seeded"), ".claude.json"))
+	if err != nil {
+		t.Fatalf("create seeded nothing: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("the seed is not valid JSON: %v", err)
+	}
+	if got["hasCompletedOnboarding"] != true {
+		t.Errorf("hasCompletedOnboarding = %v, want true", got["hasCompletedOnboarding"])
+	}
+	// The rest of that file is session state and machine identity. Copying it
+	// wholesale would put the user's prompt history into every profile.
+	if len(got) != 1 {
+		t.Errorf("seeded more than the first-run keys: %v", got)
+	}
+}
+
+// The seed is a floor for a profile that has no such file, never a rewrite of
+// one that does. Nothing reaches this through dispatch today - .claude.json is
+// not in CloneAllow - so it is tested where it lives, rather than through a
+// clone that would pass whether the guard existed or not.
+func TestSeedFirstRunNeverRewritesAnExistingFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"hasCompletedOnboarding":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	mine := []byte(`{"hasCompletedOnboarding":false,"mine":1}`)
+	if err := os.WriteFile(filepath.Join(dir, ".claude.json"), mine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	keys, err := seedFirstRun(a, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("reported writing %v over a file that already existed", keys)
+	}
+	got, _ := os.ReadFile(filepath.Join(dir, ".claude.json"))
+	if string(got) != string(mine) {
+		t.Errorf(".claude.json = %s, want it untouched", got)
+	}
+}
+
+// A machine where the agent has never run outside a profile has no flags to
+// copy. The wizard is then the correct behaviour, and create must not fail.
+func TestCreateWithoutARealFirstRunFileStillWorks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:noflags"}); err != nil {
+		t.Errorf("create = %v, want nil", err)
+	}
+}
+
+// The wrapper is not a second step. `ap create claude:plan` has to be enough
+// for `claude:plan` to be a command, because a profile nobody can type is a
+// profile nobody uses - which is exactly what the separate `ap link` produced.
+func TestCreateWritesTheWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:autolinked"}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(bin, "claude:autolinked")
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatalf("create left no wrapper: %v", err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Error("wrapper is not executable")
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), "exec ap run claude:autolinked") {
+		t.Errorf("wrapper does not exec the profile: %q", b)
+	}
+}
+
+// Create links, but not at the price of a real binary that happens to share the
+// name: the foreign file survives and create still succeeds, because the
+// profile itself is fine and reachable through `ap run`.
+func TestCreateDoesNotClobberAForeignFile(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	p := filepath.Join(bin, "claude:foreign")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\necho mine\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"create", "claude:foreign"}); err != nil {
+		t.Fatalf("create = %v, want nil: an unlinkable name must not fail the create", err)
+	}
+	b, _ := os.ReadFile(p)
+	if string(b) != "#!/bin/sh\necho mine\n" {
+		t.Errorf("create overwrote a file ap did not write: %q", b)
 	}
 }
 

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,23 +23,28 @@ Usage:
   ap agents                            list supported agents
   ap list [agent]                      list profiles
   ap create [--from <profile>] [--copy-instructions] <agent>:<profile>
-                                       create a profile, optionally cloning one
-                                       and seeding it with your global
-                                       instructions file
+                                       create a profile and a wrapper so it is
+                                       a command you can type, optionally
+                                       cloning one and seeding it with your
+                                       global instructions file
   ap which <agent>:<profile>           print the profile directory
-  ap env <agent>:<profile>             print the environment override
+  ap env <agent>:<profile> [cmd...]    print the environment override, or set
+                                       it and run cmd — env(1), for tools that
+                                       write into the agent's config directory
   ap run <agent>:<profile> [args...]   run the agent with that profile
-  ap delete <agent>:<profile>          delete a profile
-  ap link <agent>:<profile>            write a wrapper script so the profile
-                                       is a command you can type by name
-  ap unlink <agent>:<profile>          remove that wrapper
+  ap delete <agent>:<profile>          delete a profile and its wrapper
+  ap unlink <agent>:<profile>          remove the wrapper, keep the profile
+  ap link <agent>:<profile>            write it back (create already does this;
+                                       link is for profiles made before it did,
+                                       or after an unlink)
   ap version                           print version, commit and build date
 
 There is no active profile: every command names one explicitly.
 
 "ap run" parses no flags of its own. Everything after the reference goes to the
 agent verbatim, which is what lets you write "ap run claude:plan --effort xhigh"
-without ap trying to interpret --effort.
+without ap trying to interpret --effort. "ap env" with a command behaves the
+same way, for the same reason.
 
 "ap create" has nothing to pass through, so --from and --copy-instructions work
 on either side of the reference, and after it reads better because the agent is
@@ -52,7 +58,9 @@ Examples:
   ap run claude:plan
   ap run claude:plan --effort xhigh
   ap run opencode:review --model anthropic/claude-sonnet-4-5
-  ap link claude:plan && claude:plan   # now runnable directly, once its
+  ap env claude:plan npx skills add vercel-labs/agent-skills \
+      --skill web-design-guidelines -g -a claude-code
+  claude:plan                          # the wrapper ap create wrote, once its
                                        # directory (~/.local/bin by default)
                                        # is on PATH
 `
@@ -292,6 +300,8 @@ func cmdCreate(args []string) error {
 		return err
 	}
 
+	seedAndLink(a, name, dir)
+
 	if *copyMD {
 		if err := copyInstructions(a, dir); err != nil {
 			return err
@@ -308,6 +318,26 @@ func cmdCreate(args []string) error {
 		}
 	}
 	return nil
+}
+
+// seedAndLink is the last two things `ap create` does: get the profile past the
+// agent's first-run wizard, and make it a command you can type.
+//
+// Neither returns an error, on purpose. The profile exists and works through
+// `ap run` by this point, so a failure here is worth saying out loud and worth
+// nothing more — an unusable wrapper name or a first-run file that could not be
+// read must not turn a created profile into a failed command.
+func seedAndLink(a agent.Agent, name, dir string) {
+	if keys, err := seedFirstRun(a, dir); err != nil {
+		fmt.Printf("first-run flags not seeded: %v\n", err)
+	} else if len(keys) > 0 {
+		fmt.Printf("seeded from your real config: %s in %s\n", strings.Join(keys, " "), a.FirstRun.Name)
+	}
+	if p, err := writeWrapper(a, name); err != nil {
+		fmt.Printf("not linked: %v\n", err)
+	} else {
+		fmt.Printf("linked %s - type %s:%s once its directory is on PATH\n", p, a.Name, name)
+	}
 }
 
 // linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
@@ -373,6 +403,68 @@ func copyInstructions(a agent.Agent, dir string) error {
 	return f.Close()
 }
 
+// seedFirstRun copies the agent's first-run flags into a new profile, and
+// returns the keys it wrote.
+//
+// Sharing the credential makes a profile logged in, but not started: claude
+// still opens on its theme picker, because that is gated on a key in a file the
+// profile does not have. Copying the flag, and nothing else in that file, is
+// what makes a new profile land where a logged-in agent lands.
+//
+// Nothing here is an error the caller should stop on — see the call site. A
+// missing source file is the ordinary case on a machine where the agent has
+// never run outside a profile, and there the wizard is the correct behaviour.
+func seedFirstRun(a agent.Agent, dir string) ([]string, error) {
+	if a.FirstRun == nil {
+		return nil, nil
+	}
+	b, err := os.ReadFile(a.FirstRun.Source)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(b, &all); err != nil {
+		return nil, fmt.Errorf("%s: %w", a.FirstRun.Source, err)
+	}
+	seed := make(map[string]json.RawMessage, len(a.FirstRun.Keys))
+	var wrote []string
+	for _, k := range a.FirstRun.Keys {
+		if v, ok := all[k]; ok {
+			seed[k] = v
+			wrote = append(wrote, k)
+		}
+	}
+	if len(wrote) == 0 {
+		return nil, nil
+	}
+	out, err := json.MarshalIndent(seed, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	// O_EXCL: a clone may already have brought this file, and what the source
+	// profile recorded beats a fresh seed. Never a rewrite of a file that exists.
+	f, err := root.OpenFile(a.FirstRun.Name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Write(append(out, '\n')); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return wrote, f.Close()
+}
+
 // setupHint is the line `ap create` ends on for a profile that starts empty. A
 // profile inherits nothing but the credential, so the next step is real work and
 // it is different for each agent — the text lives in the registry, beside the agent
@@ -393,10 +485,35 @@ func cmdWhich(args []string) error {
 	return nil
 }
 
+// cmdEnv is env(1): with no command it prints the variable, with one it sets it
+// and execs.
+//
+// The second form is how anything that is not the agent gets to write into a
+// profile — `ap env claude:plan npx skills add ...`, because that installer
+// finds its target by reading CLAUDE_CONFIG_DIR, the same variable ap sets. A
+// separate `ap exec` would have been the same code under a second name; env(1)
+// already established that a variable-setter takes an optional command, and one
+// fewer command is one fewer thing to document.
+//
+// Flags are not parsed after the reference, for the same reason as `ap run`:
+// everything there belongs to the command being run.
 func cmdEnv(args []string) error {
-	a, name, err := refAllowDefault(args, "env")
+	if len(args) == 0 {
+		return fmt.Errorf("usage: ap env <agent>:<profile> [command [args...]]")
+	}
+	a, name, err := profile.ParseRefAllowDefault(args[0])
 	if err != nil {
 		return err
+	}
+	if len(args) > 1 {
+		// Same preparation as a run, because the command is about to write into
+		// the profile: a stale shim would send it at a config root the agent has
+		// since stopped using.
+		dir, err := prepare(a, name)
+		if err != nil {
+			return err
+		}
+		return run.ExecBin(a, dir, args[1], args[2:])
 	}
 	// Default sets no override: Env treats an empty dir as "none", which is
 	// what makes `ap env <agent>:default` print nothing rather than the real
@@ -417,20 +534,31 @@ func cmdRun(args []string) error {
 	}
 	// No flag parsing at all: everything after the reference belongs to the agent,
 	// verbatim. See the flag-order note in usage.
-	rest := args
-	a, name, err := profile.ParseRefAllowDefault(rest[0])
+	a, name, err := profile.ParseRefAllowDefault(args[0])
 	if err != nil {
 		return err
 	}
+	dir, err := prepare(a, name)
+	if err != nil {
+		return err
+	}
+	return run.Exec(a, dir, args[1:])
+}
+
+// prepare is everything that happens between naming a profile and exec'ing into
+// it, shared by `ap run` and by `ap env <ref> <command>`. It returns the
+// directory the config variable should point at — empty for Default, which sets
+// no override at all.
+func prepare(a agent.Agent, name string) (string, error) {
 	if !profile.Exists(a, name) {
 		if name == profile.Default {
 			// "ap create claude:default" is unconditionally refused - that advice
 			// would be a dead end. Name the actual path instead: on this machine
 			// the agent has never been run outside ap, or its config lives
 			// somewhere this registry row does not expect.
-			return fmt.Errorf("%s's real config directory does not exist: %s", a.Name, profile.Dir(a, name))
+			return "", fmt.Errorf("%s's real config directory does not exist: %s", a.Name, profile.Dir(a, name))
 		}
-		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
+		return "", fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}
 
@@ -438,7 +566,7 @@ func cmdRun(args []string) error {
 	// nothing is created, nothing is linked, no shim is built, and Exec gets no
 	// override at all (an empty dir), not even one that happens to equal it.
 	if name == profile.Default {
-		return run.Exec(a, "", rest[1:])
+		return "", nil
 	}
 
 	dir := profile.Dir(a, name)
@@ -447,14 +575,14 @@ func cmdRun(args []string) error {
 	// files, and a temp-file-plus-rename would leave a real file where our
 	// symlink was, silently unsharing auth. See internal/profile.Link.
 	if _, _, _, err := profile.Link(a, dir); err != nil {
-		return err
+		return "", err
 	}
 	// Re-assert the config shim too: ~/.config gains entries over time, and a
 	// profile created last month must not hide a tool installed yesterday.
 	if err := shim(a, dir); err != nil {
-		return err
+		return "", err
 	}
-	return run.Exec(a, dir, rest[1:])
+	return dir, nil
 }
 
 // shim builds or refreshes the config shim and reports anything a program wrote
@@ -491,14 +619,16 @@ func cmdDelete(args []string) error {
 	return nil
 }
 
-// wrapperHeader opens every file `ap link` writes, and nothing else ever
-// writes it — the same principle as the module's other ownership markers: it
-// lives inside the artefact itself, so it cannot drift out of sync with it.
-// `link` and `unlink`, and the automatic cleanup in `delete`, all use it to
-// tell their own file from something else that happens to share its name.
+// wrapperHeader opens every wrapper ap writes, and nothing else ever writes it
+// — the same principle as the module's other ownership markers: it lives inside
+// the artefact itself, so it cannot drift out of sync with it. `create` and
+// `link`, and the removal in `unlink` and `delete`, all use it to tell their own
+// file from something else that happens to share its name. The exact bytes are
+// load-bearing across versions: change them and every wrapper already on disk
+// stops being recognised as ours.
 const wrapperHeader = "#!/bin/sh\n# written by ap link. Safe to delete.\n"
 
-// wrapperScript is the wrapper `ap link` writes for ref (an "<agent>:<profile>"
+// wrapperScript is the wrapper ap writes for ref (an "<agent>:<profile>"
 // string). A script, not a symlink with argv[0] dispatch: it names `ap` by
 // PATH lookup rather than the currently running binary's own path, so it
 // survives ap being upgraded or moved elsewhere on PATH, and unlike a symlink
@@ -507,7 +637,7 @@ func wrapperScript(ref string) string {
 	return fmt.Sprintf("%sexec ap run %s \"$@\"\n", wrapperHeader, ref)
 }
 
-// linkDir is where `ap link` writes wrapper scripts. Always ~/.local/bin
+// linkDir is where ap writes wrapper scripts. Always ~/.local/bin
 // regardless of where the ap binary itself was installed — install.sh warns
 // about that directory unconditionally for exactly this reason — except in
 // tests, which need to point it elsewhere.
@@ -542,12 +672,25 @@ func cmdLink(args []string) error {
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}
-	dir, err := linkDir()
+	p, err := writeWrapper(a, name)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("linked %s -> %s:%s\n", p, a.Name, name)
+	return nil
+}
+
+// writeWrapper writes the wrapper for a:name into linkDir and returns its path.
+// Shared by `ap link` and by `ap create`, which links every profile it creates —
+// the two must agree about the marker and about refusing a foreign file, so
+// there is one implementation and not two.
+func writeWrapper(a agent.Agent, name string) (string, error) {
+	dir, err := linkDir()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return "", err
 	}
 	// Through an os.Root confined to dir, same as everything else that writes
 	// into a directory named partly by user input — see internal/profile.Link
@@ -556,7 +699,7 @@ func cmdLink(args []string) error {
 	// what makes that a property of the code rather than of the caller.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = root.Close() }()
 
@@ -567,16 +710,15 @@ func cmdLink(args []string) error {
 	// ours.
 	if b, err := root.ReadFile(refStr); err == nil {
 		if !strings.HasPrefix(string(b), wrapperHeader) {
-			return fmt.Errorf("refusing to overwrite %s: it was not written by ap link", p)
+			return "", fmt.Errorf("refusing to overwrite %s: it was not written by ap", p)
 		}
 	} else if !os.IsNotExist(err) {
-		return err
+		return "", err
 	}
 	if err := root.WriteFile(refStr, []byte(wrapperScript(refStr)), 0o755); err != nil {
-		return err
+		return "", err
 	}
-	fmt.Printf("linked %s -> %s\n", p, refStr)
-	return nil
+	return p, nil
 }
 
 func cmdUnlink(args []string) error {
@@ -620,7 +762,7 @@ func removeWrapperIfOurs(ref string) error {
 		return err
 	}
 	if !strings.HasPrefix(string(b), wrapperHeader) {
-		return fmt.Errorf("refusing to remove %s: it was not written by ap link", p)
+		return fmt.Errorf("refusing to remove %s: it was not written by ap", p)
 	}
 	if err := root.Remove(ref); err != nil {
 		return err

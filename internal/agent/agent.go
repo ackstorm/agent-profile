@@ -64,6 +64,32 @@ type Instructions struct {
 	Source string
 }
 
+// FirstRun is the handful of keys a fresh profile must start with so the agent
+// does not put its first-run wizard in front of a profile that is already
+// logged in.
+//
+// Measured, claude v2.1.220: a config directory holding nothing but the shared
+// credential runs the theme picker on every new profile. `claude -p` does not —
+// which is why the credential-only design looked complete when it was verified
+// that way. A `.claude.json` carrying `hasCompletedOnboarding` alone is enough;
+// `settings.json`, empty or carrying a theme, changes nothing.
+//
+// Like Instructions and unlike Share, this is copied once, at create, into a
+// file the profile does not have yet — the agent owns it from then on, and
+// nothing re-asserts it. That is what separates it from the per-key filtering of
+// a live shared file, which would fight the agent on every write.
+//
+// nil means "not verified for this agent", the same bar as Instructions.
+type FirstRun struct {
+	// Name is the file inside the profile.
+	Name string
+	// Source is the machine-wide file the keys are read from.
+	Source string
+	// Keys are the only keys copied. Keep this to first-run flags: everything
+	// else in these files is either session state or belongs to the profile.
+	Keys []string
+}
+
 // Shim describes an agent that has no config-directory variable of its own, so
 // isolating it means setting a variable other programs also read.
 //
@@ -125,6 +151,9 @@ type Agent struct {
 	// guessed path is worse than none: the flag would silently copy nothing, or copy
 	// to a name the agent never opens.
 	Instructions *Instructions
+	// FirstRun names the keys `ap create` seeds a new profile with so the agent
+	// does not re-run its first-run wizard. See FirstRun's doc comment.
+	FirstRun *FirstRun
 	// Setup is printed after `ap create`, because a profile now starts genuinely
 	// empty and the next step is different for every agent. One %s verb, given the
 	// <agent>:<profile> reference. Each command was taken from that binary's own
@@ -234,7 +263,15 @@ func registry() map[string]Agent {
 			CloneAllow: []string{"settings.json", "CLAUDE.md", "skills", "commands", "hooks", "agents"},
 			// Verified. It was in Shared until this release, so the path is known good.
 			Instructions: &Instructions{Name: "CLAUDE.md", Source: filepath.Join(h, ".claude", "CLAUDE.md")},
-			Setup:        "ap run %s plugin install <plugin>",
+			// Note the paths: claude reads ~/.claude.json outside a profile, but
+			// writes <CLAUDE_CONFIG_DIR>/.claude.json inside one. Measured: without
+			// hasCompletedOnboarding every new profile opens on the theme picker.
+			FirstRun: &FirstRun{
+				Name:   ".claude.json",
+				Source: filepath.Join(h, ".claude.json"),
+				Keys:   []string{"hasCompletedOnboarding"},
+			},
+			Setup: "ap run %s plugin install <plugin>",
 		},
 		"codex": {
 			Name:      "codex",
