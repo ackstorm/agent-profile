@@ -19,15 +19,11 @@ import (
 //
 // This must be evaluated against the environment ap inherited, before ap sets
 // anything, or the shim would end up pointing at itself.
+//
+// Delegates to agent.ConfigBase, which is also what opencode's registry entry
+// derives its Config from — one definition, not two that can drift apart.
 func ConfigBase() string {
-	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
-		return d
-	}
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(h, ".config")
+	return agent.ConfigBase()
 }
 
 // Shim builds the directory that a.ConfigEnv points at for a shimmed agent, and

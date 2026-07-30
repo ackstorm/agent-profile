@@ -176,6 +176,30 @@ func home() string {
 	return h
 }
 
+// ConfigBase is the directory freedesktop-config-following programs resolve
+// their config root against, read exactly the way they read it: XDG_CONFIG_HOME
+// when set, otherwise ~/.config.
+//
+// The one definition, used by opencode's Config below and by
+// profile.ConfigBase — which delegates here rather than keeping its own copy,
+// since agent has no dependency on profile and can be the single source
+// without an import cycle. Before this was one function, opencode's Config
+// hardcoded ~/.config/opencode while profile.ConfigBase() (and
+// scripts/smoke.sh, independently, in shell) already honoured
+// XDG_CONFIG_HOME — a three-way disagreement that made `ap create --from
+// default` and `ap run opencode:default` silently target the wrong directory
+// on any machine that sets XDG_CONFIG_HOME.
+func ConfigBase() string {
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		return d
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(h, ".config")
+}
+
 func registry() map[string]Agent {
 	h := home()
 	// Every agent shares exactly one thing: its credential. A profile is a separate
@@ -268,7 +292,7 @@ func registry() map[string]Agent {
 		"opencode": {
 			Name:   "opencode",
 			Bin:    "opencode",
-			Config: filepath.Join(h, ".config", "opencode"),
+			Config: filepath.Join(ConfigBase(), "opencode"),
 			// opencode has no private config-dir variable. OPENCODE_CONFIG_DIR only
 			// APPENDS to its search path, and OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT
 			// append too. Its config root is computed as
