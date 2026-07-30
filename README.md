@@ -99,10 +99,10 @@ Which makes `env` itself the shortest way to see what a command would inherit:
 
 ```console
 $ ap env codex:plan env | grep CODEX
-CODEX_HOME=/home/jcm/.local/share/agent-profile/profiles/codex/plan
+CODEX_HOME=/home/user/.local/share/agent-profile/profiles/codex/plan
 
 $ ap env opencode:plan env | grep XDG_CONFIG_HOME
-XDG_CONFIG_HOME=/home/jcm/.local/share/agent-profile/profiles/opencode/plan/xdg
+XDG_CONFIG_HOME=/home/user/.local/share/agent-profile/profiles/opencode/plan/xdg
 
 $ ap env claude:default env | grep -c CLAUDE_CONFIG_DIR
 0
