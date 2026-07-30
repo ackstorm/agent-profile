@@ -144,17 +144,43 @@ Two couplings that no compiler checks:
 `make shellcheck` gates it and runs inside `verify`. Keep it POSIX-ish bash with
 no dependency beyond curl, tar and sha256sum/shasum.
 
-## `.claude.json` is shared state, so expect surprises from it
+## `.claude.json` is where the surprises live
 
-It is linked for `hasTrustDialogAccepted`, but Claude Code keeps far more in it,
-and all of it becomes common to every profile. Before treating "the profile
-behaves oddly" as an ap bug, check whether the behaviour is driven by a key in
-that file. Real example: `defaultToAgentsView` makes a profile open in the agents
-view, where a short message answers "Too short — describe the task" — which reads
-like a broken profile and is just an inherited UI preference.
+Claude Code keeps far more in it than its name suggests: onboarding flags,
+per-project trust, user-scope MCP servers, UI preferences, cached feature flags,
+prompt history. Before treating "the profile behaves oddly" as an ap bug, check
+whether the behaviour is driven by a key in that file. Real example:
+`defaultToAgentsView` makes a profile open in the agents view, where a short
+message answers "Too short — describe the task" — which reads like a broken
+profile and is just an inherited UI preference.
 
-Do not add per-key filtering. Rewriting a file the agent owns would fight it on
-every write, and the symlink is what keeps trust and login working.
+It was shared, by symlink, until `57f545f`. It is not any more, because
+user-scope MCP servers live in it and sharing it made a per-profile MCP server
+impossible. Do not link it back.
+
+Do not sync it per key either. Rewriting a file the agent owns would fight it on
+every write. `Agent.FirstRun` is not that and must not grow into it: it copies
+an allowlist of keys **once, at create, into a file the profile does not have
+yet**, `O_EXCL` so it can never rewrite one, and never looks at it again. It
+exists because sharing the credential makes a profile logged in but not
+started — measured on claude v2.1.220, a credential-only profile opens on the
+theme picker, and `hasCompletedOnboarding` alone is what gets past it.
+`settings.json`, empty or carrying a theme, changes nothing.
+
+Two things that measurement also settles, so do not re-derive them:
+
+- `claude -p` never shows the wizard, which is why a credential-only profile
+  looked complete when it was verified that way. Verify interactive behaviour
+  interactively — `CLAUDE_CONFIG_DIR=<dir> timeout 25 script -qec claude /dev/null`
+  under a pty, then strip the escape sequences before grepping, because they land
+  mid-word and a naive `grep "text style"` finds nothing.
+- Outside a profile claude reads `~/.claude.json`; inside one it reads
+  `$CLAUDE_CONFIG_DIR/.claude.json`. Different directories, same base name.
+
+`hasTrustDialogAccepted` is deliberately **not** seeded. It lives under
+`projects.<path>` alongside that project's prompt history, so there is no way to
+carry it without carrying history, and one trust prompt per profile per project
+is the honest answer for a separate environment anyway.
 
 Do not add profile-level overrides for these keys either. `defaultToAgentsView`
 was measured: Claude Code reads it only from `.claude.json`, so the same key in a

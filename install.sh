@@ -110,7 +110,7 @@ echo "install.sh: installed ${PREFIX}/${BIN}"
 "${PREFIX}/${BIN}" version
 
 warn_path "$PREFIX"
-# Always, whatever PREFIX was: `ap link` writes its wrappers here regardless, so
+# Always, whatever PREFIX was: `ap create` writes its wrappers here regardless, so
 # installing ap to /usr/local/bin still leaves you unable to run `claude:plan`.
 link_dir="${HOME}/.local/bin"
 [ "$link_dir" = "$PREFIX" ] || warn_path "$link_dir"
