@@ -35,26 +35,62 @@ ap run claude:plan plugin install caveman@caveman   # populate it
 ap run claude:plan                                  # work in it
 ap create claude:review --from plan                 # clone it
 ap create claude:work --copy-instructions           # seed it with your CLAUDE.md
+ap link claude:plan && claude:plan                  # now a command you can type
 ap list
 ```
 
 There is **no active profile**. Every command names one. A bare `claude` in any
 shell still uses your normal `~/.claude` — that boundary is the point: you can
 never install something into a profile you only thought you were in.
+`<agent>:default` is the one deliberate exception, and it stays read-only for
+exactly that reason — see "`default`" below.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `ap agents` | supported agents, their variable and their mode |
-| `ap list [agent]` | your profiles |
-| `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create, optionally cloning and seeding it with your global instructions file |
+| `ap list [agent]` | your profiles — always includes `default` |
+| `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
 | `ap which <agent>:<profile>` | the profile directory, for editing by hand |
 | `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap run <agent>:<profile> [args...]` | run it; args pass through verbatim |
 | `ap delete <agent>:<profile>` | remove the profile — including its own session history; see "What every profile shares" below |
+| `ap link <agent>:<profile>` | write a wrapper script so the profile is a command you can type |
+| `ap unlink <agent>:<profile>` | remove that wrapper |
 
 Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent>/<profile>/`.
+
+### `default` — your real config, read-only
+
+`<agent>:default` is not a profile `ap` made; it names whatever config the agent
+already uses when `ap` is not involved (`~/.claude`, `~/.codex`, `~/.pi/agent`,
+`~/.config/opencode`). Nothing is created for it, nothing is linked, no shim is
+built — `ap run codex:default` sets no config variable at all, so codex behaves
+exactly as if you had typed `codex` yourself.
+
+It exists for two things: reaching your normal setup through the same command as
+every profile (`ap run codex:default mcp`), and starting a new profile from the
+configuration you already have (`ap create codex:work --from default`).
+
+**Read-only, always.** `ap create claude:default`, `ap delete claude:default`,
+and `ap link claude:default` all refuse — the last because there is nothing to
+link, `ap run codex:default` already reaches the real thing directly.
+
+### `ap link` — a profile you can type
+
+`ap link claude:plan` writes a small wrapper to `~/.local/bin/claude:plan`
+(`exec ap run claude:plan "$@"`), so once that directory is on your `PATH`,
+`claude:plan --effort xhigh` works the same as `ap run claude:plan --effort
+xhigh`. `ap unlink claude:plan` removes it. Both refuse to touch a file `ap`
+did not write — the wrapper carries a marker line for exactly that check — and
+`ap delete` removes a profile's wrapper automatically so a deleted profile
+never leaves behind a command that fails confusingly.
+
+The wrapper always goes to `~/.local/bin`, regardless of where the `ap` binary
+itself is installed, and it names `ap` by `PATH` lookup rather than its own
+location — see "Install" for why that directory gets a `PATH` warning
+unconditionally.
 
 ### Flag order matters for `run`
 
@@ -192,12 +228,28 @@ returns; that is the point of copying rather than linking.
 
 ### Cloning
 
-`--from <profile>` copies a profile of the same agent, skipping symlinks and
-anything at a shared or history path (`Shared` and `State` in
-`internal/agent/agent.go`). There is no `--from-base`: copying out of `~/.claude`
-would need a per-agent list of what to take from a directory that grows with
-every release, and a stale list copies caches silently. Set the first profile up
-by hand — a curated minimal set is the point — then clone it. For a one-off,
+`--from <profile>` copies **configuration only** — an explicit allowlist per
+agent (`CloneAllow` in `internal/agent/agent.go`: for claude, `settings.json`,
+`CLAUDE.md`, `skills`, `commands`, `hooks`, `agents`; similar short lists for
+codex, pi and opencode). Everything else — accumulated runtime, caches, session
+history, the config shim — is left behind simply by never being named.
+
+An allowlist rather than a list of exclusions, and the difference matters. A
+real config directory is mostly accumulated runtime — 1.9 GB of it on the
+machine this was measured on, between transcripts, plugin content and tool
+caches — and that set grows with every upstream release of the agent. An
+exclusion list would start copying each new cache directory silently the day
+it appears; an allowlist instead simply does not clone a new config file until
+someone adds it, which is visible and fixable rather than a slow leak.
+
+Hardcoded in the registry for now, and headed for a per-machine config file —
+the known gap in the meantime is a hook script, statusline or plugin config
+living somewhere the list does not name, which is silently not cloned rather
+than copied on a guess.
+
+`--from default` clones straight out of the agent's real config using the same
+allowlist — see "`default`" above. Set the first profile up by hand — a curated
+minimal set is the point — then clone it from there. For a one-off,
 `cp ~/.claude/settings.json $(ap which claude:plan)/`.
 
 Two things a clone carries over without being fixed, because `ap` places files
@@ -222,6 +274,12 @@ release's `checksums.txt` before writing anything**, and installs to
 ```bash
 curl -fsSL .../install.sh | PREFIX=/usr/local/bin VERSION=v0.1.0 bash
 ```
+
+`install.sh` warns if `PREFIX` ends up off your `PATH` — and, **regardless of
+`PREFIX`**, if `~/.local/bin` is too, since `ap link` always writes its
+wrappers there: installing `ap` itself to `/usr/local/bin` does not change
+where `claude:plan` ends up. Each warning names the exact line to add to your
+shell profile.
 
 Piping a script into a shell deserves a look first — `install.sh` is at the root
 of this repository, it is a hundred lines, and `make shellcheck` gates it.
@@ -332,4 +390,6 @@ a dead end, not a to-do: stop there rather than reaching for a wrapper.
   so at compile time.
 - **`ap use` / `ap shell` / an active profile.** A "current profile" that a bare
   `claude` would ignore is hidden state that lies to you.
-- **`--from-base`.** See Cloning above.
+- **A separate `--from-base` flag.** `--from default` covers the same ground
+  through the existing flag — see Cloning above — so a second one would be
+  redundant, not missing.
