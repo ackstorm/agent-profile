@@ -76,6 +76,14 @@ ap env claude:plan npx skills add vercel-labs/agent-skills \
   --skill web-design-guidelines -g -a claude-code
 ```
 
+The source is not limited to `org/repo` on GitHub — a git URL works, so a
+private or self-hosted collection installs the same way:
+
+```bash
+ap env claude:finops npx skills add git@github.com:aws/agent-toolkit-for-aws.git \
+  --skill aws-billing-and-cost-management --agent claude-code --yes --global
+```
+
 Verified against [vercel-labs/skills](https://github.com/vercel-labs/skills),
 whose `src/agents.ts` resolves claude's home as `CLAUDE_CONFIG_DIR || ~/.claude`
 and installs global skills into `<that>/skills`. `-g` is not optional: without
