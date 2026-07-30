@@ -282,11 +282,32 @@ func TestDeleteDefaultLeavesTheRealConfigAlone(t *testing.T) {
 // create/delete destination case is. A rejection here would mean the --from
 // validation started reusing the plain ValidName check again instead of the
 // Default-aware one.
+// Points HOME at a fixture, not the developer's live ~/.claude: without this,
+// go test cloned whatever the person running it happened to have in their
+// real config. Asserts real content was cloned, not just "no error naming
+// the word reserved" - which would also have passed if --from default had
+// silently cloned nothing at all.
 func TestDispatchCreateFromDefaultIsNeverRejectedAsInvalid(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"model":"opus"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	err := dispatch([]string{"create", "claude:fromdefault", "--from", "default"})
-	if err != nil && strings.Contains(err.Error(), "reserved") {
-		t.Errorf("--from default was rejected as an invalid name: %v", err)
+
+	if err := dispatch([]string{"create", "claude:fromdefault", "--from", "default"}); err != nil {
+		t.Fatalf("--from default = %v, want nil", err)
+	}
+	a, _ := agent.Lookup("claude")
+	got, err := os.ReadFile(filepath.Join(profile.Dir(a, "fromdefault"), "settings.json"))
+	if err != nil {
+		t.Fatalf("settings.json was not cloned: %v", err)
+	}
+	if string(got) != `{"model":"opus"}` {
+		t.Errorf("settings.json = %q, want the fixture content", got)
 	}
 }
 
@@ -323,7 +344,12 @@ func TestLinkRefusesAProfileThatDoesNotExist(t *testing.T) {
 }
 
 // There is nothing to link: `ap run codex:default` is already the real config.
-func TestLinkRefusesDefault(t *testing.T) {
+// Named for what actually fires: ref(args, "link") routes through ParseRef,
+// which refuses Default before cmdLink's own "nothing to link" check is ever
+// reached. That check is kept anyway as a belt-and-braces backstop - see its
+// comment in cmdLink - but there is no way to exercise it through dispatch,
+// so this test cannot and does not claim to.
+func TestLinkRefusesDefaultViaParseRef(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	if err := dispatch([]string{"link", "claude:default"}); err == nil {

@@ -4,11 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
-	"github.com/ackstorm/agent-profile/internal/run"
 )
 
 func agentOrFail(t *testing.T, name string) agent.Agent {
@@ -171,19 +169,6 @@ func TestListAlwaysIncludesDefault(t *testing.T) {
 	}
 	if !slices.Contains(out, Default) {
 		t.Errorf("List = %v, want it to include %q", out, Default)
-	}
-}
-
-// `ap run codex:default` execs with no config variable set at all — nothing is
-// created, nothing is linked, no shim is built. The empty dir is what cmd/ap
-// passes run.Env for Default, in place of a.Config, precisely so this holds.
-func TestRunDefaultSetsNoConfigVariable(t *testing.T) {
-	a := agentOrFail(t, "claude")
-	env := run.Env(a, "", nil)
-	for _, e := range env {
-		if strings.HasPrefix(e, a.ConfigEnv+"=") {
-			t.Errorf("default must set no config variable, got %q", e)
-		}
 	}
 }
 

@@ -527,6 +527,14 @@ func cmdLink(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Belt as well as braces, the same reason Delete re-checks Default
+	// independently of ParseRef: ref already routes through ParseRef, which
+	// refuses Default for every writing command, so there is no path through
+	// dispatch that reaches this branch today - TestLinkRefusesDefaultViaParseRef
+	// pins the ParseRef rejection, which is what actually fires. Kept anyway,
+	// so a future change to ref or to link's own routing does not silently
+	// start writing a wrapper for "nothing" (ap run codex:default is already
+	// the real config).
 	if name == profile.Default {
 		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, profile.Default)
 	}

@@ -100,6 +100,21 @@ func TestEnvNeverRedirectsDataStateOrCache(t *testing.T) {
 	}
 }
 
+// `ap run codex:default` execs with no config variable set at all — nothing is
+// created, nothing is linked, no shim is built. The empty dir is what cmd/ap
+// passes here for Default, in place of a.Config, precisely so this holds.
+// Moved here from internal/profile, which imported run.Env only to call it -
+// this is where the behaviour actually lives.
+func TestRunDefaultSetsNoConfigVariable(t *testing.T) {
+	a, _ := agent.Lookup("claude")
+	env := Env(a, "", nil)
+	for _, e := range env {
+		if strings.HasPrefix(e, a.ConfigEnv+"=") {
+			t.Errorf("default must set no config variable, got %q", e)
+		}
+	}
+}
+
 // dir == "" (the Default shape) must not just decline to set an override - it
 // must actively strip an inherited value for the agent's config variable.
 // Without this, `CLAUDE_CONFIG_DIR=<parent profile> ap run claude:default`

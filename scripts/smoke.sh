@@ -151,11 +151,17 @@ fi
 #     --from default clones configuration only, none of the runtime ----------
 for ag in $("$AP" agents | awk '{print $1}'); do
   command -v "$ag" >/dev/null 2>&1 || { skip "$ag"; continue; }
+  # marker is one file CloneAllow actually names for this agent, checked only
+  # when present in the real config - proof that --from default clones
+  # something, not just that it leaves runtime behind. runtime is real state
+  # CloneAllow never names, including opencode's node_modules (62 MB on the
+  # reference machine): an empty list here would make the leak check below
+  # vacuous, always passing whether or not the exclusion actually works.
   case "$ag" in
-    claude) real="$HOME/.claude"; runtime="projects tmp telemetry plugins/cache" ;;
-    codex) real="$HOME/.codex"; runtime="sessions history.jsonl plugins/cache" ;;
-    pi) real="$HOME/.pi/agent"; runtime="sessions" ;;
-    opencode) real="$real_config/opencode"; runtime="" ;;
+    claude) real="$HOME/.claude"; runtime="projects tmp telemetry plugins/cache"; marker="settings.json" ;;
+    codex) real="$HOME/.codex"; runtime="sessions history.jsonl plugins/cache"; marker="config.toml" ;;
+    pi) real="$HOME/.pi/agent"; runtime="sessions"; marker="settings.json" ;;
+    opencode) real="$real_config/opencode"; runtime="node_modules"; marker="opencode.json" ;;
     *)
       bad "$ag" "smoke.sh does not know this agent's real config dir - add a case above"
       continue
@@ -182,6 +188,15 @@ for ag in $("$AP" agents | awk '{print $1}'); do
   "$AP" delete "$ag:apsmokedefault" >/dev/null 2>&1
   if "$AP" create "$ag:apsmokedefault" --from default >/dev/null 2>&1; then
     clonedir=$("$AP" which "$ag:apsmokedefault")
+
+    if [ -e "$real/$marker" ]; then
+      if [ -e "$clonedir/$marker" ]; then
+        pass "$ag" "--from default cloned $marker"
+      else
+        bad "$ag" "--from default did NOT clone $marker, though it exists in the real config"
+      fi
+    fi
+
     leaked=""
     for r in $runtime; do
       [ -e "$clonedir/$r" ] && leaked="$leaked $r"
