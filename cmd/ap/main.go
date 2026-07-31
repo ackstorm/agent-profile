@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -32,7 +33,8 @@ Usage:
                                        it and run cmd — env(1), for tools that
                                        write into the agent's config directory
   ap run <agent>:<profile> [args...]   run the agent with that profile
-  ap delete <agent>:<profile>          delete a profile and its wrapper
+  ap delete [--yes] <agent>:<profile>  delete a profile and its wrapper, asking
+                                       first unless --yes says not to
   ap unlink <agent>:<profile>          remove the wrapper, keep the profile
   ap link <agent>:<profile>            write it back (create already does this;
                                        link is for profiles made before it did,
@@ -157,6 +159,83 @@ func parseAroundRef(fs *flag.FlagSet, args []string, cmd string) (stop bool, ref
 	return false, ref, nil
 }
 
+// --- what a writing command reports -----------------------------------------
+//
+// `ap which` and `ap env` print one bare line each, because their output is
+// consumed: $(ap which ...) and env(1). Everything below is for reading instead,
+// and follows two rules. A headline says what happened, and the details go in an
+// aligned block underneath, so the one interesting fact is never buried in a
+// wall of equal-weight lines. Anything that went wrong leaves that block
+// entirely and goes to stderr, because a warning indented into a calm column
+// reads as good news.
+
+const tick = "✔"
+
+// receipt collects both as the command works, and prints them once at the end.
+// Collected rather than printed as it goes because an error halfway through must
+// not leave "created claude:plan" on screen for a profile that was then rolled
+// back — which is exactly what the previous printf-as-you-go version did when
+// Clone failed and Discard removed the directory.
+type receipt struct {
+	rows  [][2]string
+	warns []string
+}
+
+func (r *receipt) add(label, value string) {
+	r.rows = append(r.rows, [2]string{label, value})
+}
+
+// warn records something worth saying out loud that is nonetheless not an
+// error: the profile exists and works, and the command carries on.
+func (r *receipt) warn(format string, a ...any) {
+	r.warns = append(r.warns, fmt.Sprintf(format, a...))
+}
+
+func (r *receipt) print(headline string) {
+	fmt.Printf("%s %s\n", tick, headline)
+	for _, row := range r.rows {
+		fmt.Printf("  %-8s %s\n", row[0], row[1])
+	}
+	for _, w := range r.warns {
+		fmt.Fprintf(os.Stderr, "ap: warning: %s\n", w)
+	}
+}
+
+// tilde shortens a path under the user's home, for display only. Never for
+// `ap which` or `ap env`: in a shell substitution "~" is a literal directory
+// name and the path would resolve nowhere.
+func tilde(p string) string {
+	h, err := os.UserHomeDir()
+	if err != nil || h == "" || !strings.HasPrefix(p, h+string(filepath.Separator)) {
+		return p
+	}
+	return "~" + p[len(h):]
+}
+
+// onPath reports whether dir is one of the PATH entries. `ap create` used to
+// tell everyone that the wrapper needs its directory on PATH; that is noise for
+// the people who already have it, and being told what everybody is told is how
+// the people who actually need it learn to skip the line.
+func onPath(dir string) bool {
+	dir = filepath.Clean(dir)
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if p != "" && filepath.Clean(p) == dir {
+			return true
+		}
+	}
+	return false
+}
+
+// notThere is the error for a reference that names no profile. Listing what the
+// agent does have turns a typo into a one-line fix instead of a second command.
+func notThere(a agent.Agent, name string) error {
+	have, err := profile.List(a)
+	if err != nil || len(have) == 0 {
+		return fmt.Errorf("no profile %s:%s", a.Name, name)
+	}
+	return fmt.Errorf("no profile %s:%s — %s has: %s", a.Name, name, a.Name, strings.Join(have, " "))
+}
+
 // Filled in at link time by goreleaser (see .goreleaser.yml) and by
 // `make build`. A source build reports "dev", which is the honest answer: a
 // binary someone compiled themselves has no release version.
@@ -210,7 +289,9 @@ func cmdList(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s: %s\n", name, strings.Join(profiles, " "))
+		// Padded to the longest agent name, so the profile columns line up and a
+		// four-agent listing can be read down instead of across.
+		fmt.Printf("%-10s %s\n", name+":", strings.Join(profiles, " "))
 	}
 	return nil
 }
@@ -279,7 +360,8 @@ func cmdCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("created %s:%s at %s\n", a.Name, name, dir)
+	rc := &receipt{}
+	rc.add("dir", tilde(dir))
 
 	if srcDir != "" {
 		if err := profile.Clone(a, srcDir, dir); err != nil {
@@ -290,31 +372,33 @@ func cmdCreate(args []string) error {
 			profile.Discard(a, name)
 			return err
 		}
-		fmt.Printf("cloned from %s:%s\n", a.Name, *from)
+		rc.add("cloned", fmt.Sprintf("%s:%s", a.Name, *from))
 	}
 
-	if err := linkAndReport(a, dir); err != nil {
+	if err := linkAndReport(a, dir, rc); err != nil {
 		return err
 	}
 	if err := shim(a, dir); err != nil {
 		return err
 	}
 
-	seedAndLink(a, name, dir)
+	seedAndLink(a, name, dir, rc)
 
 	if *copyMD {
 		if err := copyInstructions(a, dir); err != nil {
 			return err
 		}
-		fmt.Printf("copied %s from %s\n", a.Instructions.Name, a.Instructions.Source)
+		rc.add("copied", fmt.Sprintf("%s from %s", a.Instructions.Name, a.Instructions.Source))
 	}
+
+	rc.print(fmt.Sprintf("created %q", a.Name+":"+name))
 
 	// A clone arrives configured; a fresh profile arrives empty, and what to do
 	// about that is different for every agent. The old line here said
 	// "plugin install", which is claude's answer and wrong for the other three.
 	if srcDir == "" {
 		if hint := setupHint(a, name); hint != "" {
-			fmt.Println(hint)
+			fmt.Printf("\nnext: %s\n", hint)
 		}
 	}
 	return nil
@@ -327,39 +411,50 @@ func cmdCreate(args []string) error {
 // `ap run` by this point, so a failure here is worth saying out loud and worth
 // nothing more — an unusable wrapper name or a first-run file that could not be
 // read must not turn a created profile into a failed command.
-func seedAndLink(a agent.Agent, name, dir string) {
+func seedAndLink(a agent.Agent, name, dir string, rc *receipt) {
 	if keys, err := seedFirstRun(a, dir); err != nil {
-		fmt.Printf("first-run flags not seeded: %v\n", err)
+		rc.warn("first-run flags not seeded: %v", err)
 	} else if len(keys) > 0 {
-		fmt.Printf("seeded from your real config: %s in %s\n", strings.Join(keys, " "), a.FirstRun.Name)
+		rc.add("seeded", fmt.Sprintf("%q", keys))
 	}
-	if p, err := writeWrapper(a, name); err != nil {
-		fmt.Printf("not linked: %v\n", err)
-	} else {
-		fmt.Printf("linked %s - type %s:%s once its directory is on PATH\n", p, a.Name, name)
+	p, err := writeWrapper(a, name)
+	if err != nil {
+		rc.warn("not linked: %v", err)
+		return
+	}
+	rc.add("command", a.Name+":"+name)
+	// Only the people it applies to. Told to everyone, this line was noise; told
+	// to nobody, a wrapper that silently does not run is the confusing case
+	// linking was supposed to remove.
+	if d := filepath.Dir(p); !onPath(d) {
+		rc.warn("%s is not on your PATH, so typing `%s:%s` will not work\n"+
+			"    add it to PATH, or use: ap run %s:%s",
+			tilde(d), a.Name, name, a.Name, name)
 	}
 }
 
 // linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
 // purely to keep cmdCreate under the project's cyclomatic-complexity gate.
-func linkAndReport(a agent.Agent, dir string) error {
+func linkAndReport(a agent.Agent, dir string, rc *receipt) error {
 	linked, skipped, unshared, err := profile.Link(a, dir)
 	if err != nil {
 		return err
 	}
 	if len(linked) > 0 {
-		fmt.Printf("shared with your real config: %s\n", strings.Join(linked, " "))
+		rc.add("shares", fmt.Sprintf("%q", linked))
 	}
 	if len(skipped) > 0 {
-		// Say it out loud. Silence here used to mean the user believed their login
-		// was shared when it was not, and only found out much later when a run
-		// dead-ended on "refusing to replace real file".
-		fmt.Printf("NOT shared yet: %s - run %s once outside a profile first, then re-run `ap create`\n",
-			strings.Join(skipped, " "), a.Bin)
+		// A warning, not a row. Silence here used to mean the user believed their
+		// login was shared when it was not, and only found out much later when a
+		// run dead-ended on "refusing to replace real file"; a row in the calm
+		// column would be barely louder than silence.
+		rc.warn("NOT shared: %q\n"+
+			"    run %s once outside a profile first, then re-run `ap create`",
+			skipped, a.Bin)
 	}
 	if len(unshared) > 0 {
-		// Say it out loud: this is state the profile used to inherit and now owns.
-		fmt.Printf("no longer shared (now this profile's own): %s\n", strings.Join(unshared, " "))
+		// State the profile used to inherit and now owns.
+		rc.add("unshared", fmt.Sprintf("%q — now this profile's own", unshared))
 	}
 	return nil
 }
@@ -473,7 +568,9 @@ func setupHint(a agent.Agent, name string) string {
 	if a.Setup == "" {
 		return ""
 	}
-	return "configure it: " + fmt.Sprintf(a.Setup, a.Name+":"+name)
+	// The lead-in belongs to the caller ("next: "), not here, so the two cannot
+	// drift into "next: configure it: ...".
+	return fmt.Sprintf(a.Setup, a.Name+":"+name)
 }
 
 func cmdWhich(args []string) error {
@@ -603,19 +700,45 @@ func shim(a agent.Agent, dir string) error {
 }
 
 func cmdDelete(args []string) error {
-	a, name, err := ref(args, "delete")
+	fs := flagSet("delete")
+	yes := fs.Bool("yes", false, "delete without asking")
+	fs.BoolVar(yes, "y", false, "shorthand for --yes")
+	// parseAroundRef, like create: delete passes nothing to the agent, so a flag
+	// after the reference is unambiguous. `run` must never do this.
+	stop, r, err := parseAroundRef(fs, args, "delete [--yes] <agent>:<profile>")
+	if stop {
+		return err
+	}
+	a, name, err := profile.ParseRef(r)
 	if err != nil {
 		return err
+	}
+	// Before the prompt, not after: a typo must not be answered "y".
+	if !profile.Exists(a, name) {
+		return notThere(a, name)
+	}
+	dir := profile.Dir(a, name)
+	if !*yes {
+		if err := confirm(dir); err != nil {
+			return err
+		}
 	}
 	if err := profile.Delete(a, name); err != nil {
 		return err
 	}
-	fmt.Printf("deleted %s:%s\n", a.Name, name)
+	rc := &receipt{}
+	rc.add("removed", tilde(dir))
 	// A deleted profile must not leave behind a wrapper that fails confusingly
-	// when someone types its name. Not an error if there never was one.
-	if err := removeWrapperIfOurs(a.Name + ":" + name); err != nil {
+	// when someone types its name. Not an error if there never was one — and the
+	// row is omitted rather than claiming an unlink that did not happen.
+	p, err := removeWrapperIfOurs(a.Name + ":" + name)
+	if err != nil {
 		return err
 	}
+	if p != "" {
+		rc.add("command", fmt.Sprintf("%s:%s unlinked", a.Name, name))
+	}
+	rc.print(fmt.Sprintf("deleted %q", a.Name+":"+name))
 	return nil
 }
 
@@ -721,22 +844,55 @@ func writeWrapper(a agent.Agent, name string) (string, error) {
 	return p, nil
 }
 
+// confirm asks before the one irreversible thing this program does. The default
+// is no: a profile holds its own session transcripts, and an absent-minded Enter
+// must not erase them.
+//
+// EOF is not consent either, which is what makes this safe in a script: with no
+// terminal there is nobody to answer, so the answer has to be stated up front
+// with --yes. Reading the answer rather than testing for a tty also means
+// `echo y | ap delete ...` works, and /dev/null does not.
+func confirm(dir string) error {
+	fmt.Fprintf(os.Stderr, "? remove %s [y/N] ", tilde(dir))
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		fmt.Fprintln(os.Stderr)
+		return errors.New("delete needs a terminal to confirm; pass --yes")
+	}
+	if s := strings.ToLower(strings.TrimSpace(line)); s == "y" || s == "yes" {
+		return nil
+	}
+	return errors.New("cancelled — nothing removed")
+}
+
 func cmdUnlink(args []string) error {
 	a, name, err := ref(args, "unlink")
 	if err != nil {
 		return err
 	}
-	return removeWrapperIfOurs(a.Name + ":" + name)
+	p, err := removeWrapperIfOurs(a.Name + ":" + name)
+	if err != nil {
+		return err
+	}
+	if p == "" {
+		fmt.Printf("%s:%s was not linked\n", a.Name, name)
+		return nil
+	}
+	fmt.Printf("unlinked %s — the profile is untouched; ap run %s:%s still works\n", tilde(p), a.Name, name)
+	return nil
 }
 
-// removeWrapperIfOurs removes the wrapper at ref's path in linkDir, if any.
+// removeWrapperIfOurs removes the wrapper at ref's path in linkDir, if any, and
+// returns the path it removed — empty when there was nothing to remove, so a
+// caller can report an unlink only when one happened.
+//
 // Absent is not an error: most profiles are never linked. Present but not
 // carrying wrapperHeader is refused, the same as cmdLink refuses to overwrite
 // it — either way, something ap did not write is left untouched.
-func removeWrapperIfOurs(ref string) error {
+func removeWrapperIfOurs(ref string) (string, error) {
 	dir, err := linkDir()
 	if err != nil {
-		return err
+		return "", err
 	}
 	// Same os.Root confinement as cmdLink's write. A missing link dir means
 	// nothing was ever linked - there is no wrapper to remove, the same as a
@@ -746,27 +902,26 @@ func removeWrapperIfOurs(ref string) error {
 	// and reported it as a failure.
 	root, err := os.OpenRoot(dir)
 	if os.IsNotExist(err) {
-		return nil
+		return "", nil
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = root.Close() }()
 
 	p := filepath.Join(dir, ref)
 	b, err := root.ReadFile(ref)
 	if os.IsNotExist(err) {
-		return nil
+		return "", nil
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !strings.HasPrefix(string(b), wrapperHeader) {
-		return fmt.Errorf("refusing to remove %s: it was not written by ap", p)
+		return "", fmt.Errorf("refusing to remove %s: it was not written by ap", p)
 	}
 	if err := root.Remove(ref); err != nil {
-		return err
+		return "", err
 	}
-	fmt.Printf("unlinked %s\n", p)
-	return nil
+	return p, nil
 }
