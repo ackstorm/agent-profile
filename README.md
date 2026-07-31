@@ -59,7 +59,7 @@ exactly that reason — see "`default`" below.
 | `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile> <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory |
 | `ap run <agent>:<profile> [args...]` | run it; args pass through verbatim |
-| `ap delete <agent>:<profile>` | remove the profile and its wrapper — including its own session history; see "What every profile shares" below |
+| `ap delete [--yes] <agent>:<profile>` | remove the profile and its wrapper — including its own session history; see "What every profile shares" below. Asks first, and `--yes` is how a script answers |
 | `ap unlink <agent>:<profile>` | remove the wrapper, keep the profile |
 | `ap link <agent>:<profile>` | write the wrapper back |
 
@@ -290,7 +290,9 @@ Costs, stated plainly:
    `hasTrustDialogAccepted` lives — is not shared either.
 2. **Plugin content is downloaded once per profile**, not once per machine.
 3. **`ap delete` removes that profile's session transcripts.** If you want a
-   profile's history, copy it out first.
+   profile's history, copy it out first. It names the directory and asks before
+   removing anything, and the default answer is no; `--yes` skips the question,
+   which is also the only way it works with no terminal to ask.
 
 Login survives on the credential alone. Onboarding does not: a profile holding
 nothing but the credential is logged in, but claude still opens on its theme
@@ -353,6 +355,26 @@ which resolves to whichever profile is running. And a cloned codex profile can
 end up with `config.toml` saying a plugin is enabled while `codex plugin list`
 reports it as not installed, because codex does not reconcile that declaration
 against its own cache on its own — fix it with `codex plugin add <plugin>@<marketplace>`.
+
+**Claude has the same gap, in one specific stage.** A clone's `settings.json`
+carries both `enabledPlugins` and `extraKnownMarketplaces`, but claude reads
+marketplaces from `plugins/known_marketplaces.json`, which is state and is
+therefore not cloned — it records an absolute `installLocation` inside the source
+profile, so carrying it would point a clone at another profile's directory.
+Converting the declaration into a registration is background work at session
+start, and measured on claude v2.1.220 it is reliable only for the official
+marketplace: a third-party one took 3 session starts once, 5 the next, and had
+not happened after 4 starts on two consecutive runs, with the session log saying
+`Skipping orphaned enabledPlugins entry <plugin>@<marketplace>: marketplace not
+registered`.
+
+Only that one stage is unreliable. Register the marketplace by hand and the rest
+follows in a single start:
+
+```bash
+ap run claude:review plugin marketplace add owner/repo   # the stage that stalls
+ap run claude:review -p ok                               # installs, deterministically
+```
 
 ## Install
 
