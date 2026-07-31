@@ -196,3 +196,94 @@ func TestVariantArgsNamesTheVariantsThatExist(t *testing.T) {
 		t.Errorf("error %q does not name the variants that exist", err)
 	}
 }
+
+// A variant becomes visible complete or not at all. WriteVariant used to create
+// the entry and then write it, so an interrupted run left a truncated argument
+// list that reads back WITHOUT error — a variant whose first line is
+// --dangerously-skip-permissions and whose rest was lost still execs, and
+// WriteVariant then refuses to replace it because it "already exists".
+//
+// The temporary file is the mechanism, so this asserts what it must never do:
+// appear in the listing, survive a successful write, or block the next one.
+func TestWriteVariantLeavesNoVisibleTemporary(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a := agentOrFail(t, "claude")
+
+	// A leftover from a crash between write and link must not block a retry, and
+	// must never be listed as a variant of its own.
+	dir := filepath.Join(VariantsRoot(), a.Name, "review")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".opus.tmp"), []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Variants(a, "review"); err != nil || len(got) != 0 {
+		t.Errorf("a leftover temporary is listed as a variant: %v (%v)", got, err)
+	}
+	if err := WriteVariant(a, "review", "opus", []string{"-p"}); err != nil {
+		t.Fatalf("a leftover temporary blocked a write: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "opus" {
+			t.Errorf("write left %q behind; only the variant itself may remain", e.Name())
+		}
+	}
+	got, err := VariantArgs(a, "review", "opus")
+	if err != nil || !slices.Equal(got, []string{"-p"}) {
+		t.Errorf("VariantArgs = %q (%v), want [-p]", got, err)
+	}
+}
+
+// The only recursive removal this feature adds, and the one case that
+// distinguishes its guard from doing nothing.
+//
+// A symlink at the LEAF is not that case: os.RemoveAll already Lstats, so it
+// unlinks the link rather than recursing, with or without os.Root. The first
+// version of this test asserted exactly that and passed with the guard removed
+// — which is the vacuous test CLAUDE.md warns is worse than none.
+//
+// What os.Root actually buys is a symlinked ANCESTOR, the same reason Link uses
+// it: with `variants/<agent>` pointing somewhere else, a plain
+// os.RemoveAll(VariantsRoot()/<agent>/<profile>) traverses the link and deletes
+// out there. Replace root.RemoveAll with os.RemoveAll and this fails.
+func TestDeleteVariantsDoesNotEscapeThroughASymlinkedAncestor(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a := agentOrFail(t, "claude")
+
+	// Somewhere outside the store, holding what a traversal would reach.
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "review")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(victim, "important.jsonl")
+	if err := os.WriteFile(canary, []byte("do not lose me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The agent level — an ancestor of the path DeleteVariants builds — is a
+	// symlink pointing at it.
+	if err := os.MkdirAll(VariantsRoot(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(VariantsRoot(), a.Name)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The error is not the point and is not asserted: refusing is correct, and so
+	// is removing nothing. Reaching through the link is not.
+	_ = DeleteVariants(a, "review")
+
+	if _, err := os.Stat(canary); err != nil {
+		t.Fatalf("DELETEVARIANTS ESCAPED THROUGH A SYMLINKED ANCESTOR AND ATE REAL DATA: %v", err)
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("the directory outside the store was removed: %v", err)
+	}
+}

@@ -452,23 +452,36 @@ fi
 # that ends by deleting it would take the fixture out from under both - and
 # `ap create` on it would fail first anyway, because it already exists.
 if command -v claude >/dev/null 2>&1; then
-  setup "$AP" delete --yes claude:apsmokevar
-  if setup "$AP" create claude:apsmokevar && setup "$AP" variant claude:apsmokevar:apv -- -p --model haiku; then
+  vlink=$(mktemp -d)
+  vstore="${XDG_DATA_HOME:-$HOME/.local/share}/agent-profile/variants/claude/apsmokevar"
+  setup env AP_LINK_DIR="$vlink" "$AP" delete --yes claude:apsmokevar
+  if setup env AP_LINK_DIR="$vlink" "$AP" create claude:apsmokevar &&
+    setup env AP_LINK_DIR="$vlink" "$AP" variant claude:apsmokevar:apv -- -p --model haiku; then
     if timeout 180 "$AP" run claude:apsmokevar:apv "reply with ok" >/dev/null 2>&1; then
       pass variant "stored arguments reached the agent"
     else
       bad variant "ap run <a>:<p>:<v> did not complete - are the stored args reaching claude?"
     fi
     # The cascade, end to end: deleting the profile takes the variant with it.
-    setup "$AP" delete --yes claude:apsmokevar
-    if "$AP" list claude | grep -q "apsmokevar:apv"; then
-      bad variant "the variant outlived its profile"
+    #
+    # Stat the store and the wrapper, never `ap list | grep`. `ap list` shows
+    # variants of profiles that EXIST, so once the profile is gone it prints
+    # nothing about the variant whether or not the cascade ran - the grep this
+    # replaced went green with the store entry and the wrapper both still on
+    # disk, which is the vacuous check CLAUDE.md says is worse than none.
+    setup env AP_LINK_DIR="$vlink" "$AP" delete --yes claude:apsmokevar
+    if [ -e "$vstore" ]; then
+      bad variant "the variant args outlived their profile at $vstore"
+    elif [ -e "$vlink/claude:apsmokevar:apv" ]; then
+      bad variant "the variant's wrapper outlived its profile"
     else
-      pass variant "deleting the profile removed the variant"
+      pass variant "deleting the profile removed the variant and its wrapper"
     fi
   else
     bad variant "could not set up the variant fixture"
+    setup env AP_LINK_DIR="$vlink" "$AP" delete --yes claude:apsmokevar
   fi
+  rm -rf "$vlink"
 else
   skip variant
 fi

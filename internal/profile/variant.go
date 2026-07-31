@@ -69,20 +69,43 @@ func WriteVariant(a agent.Agent, name, v string, args []string) error {
 			return err
 		}
 	}
+	// Written to a temporary name and linked into place, never written at the
+	// final name directly.
+	//
+	// A create-then-write would publish the entry before its contents exist, so
+	// an interrupted `ap variant` (a kill, ENOSPC) leaves a TRUNCATED argument
+	// list that reads back without error — and a variant whose first line is
+	// --dangerously-skip-permissions and whose remaining lines were lost still
+	// execs. Link is what makes the entry appear complete or not at all, and it
+	// keeps the O_EXCL refusal atomic: it fails with EEXIST rather than
+	// clobbering, which a Rename would not.
+	//
+	// The temporary name is dot-prefixed so Variants skips it: a leftover from a
+	// crash between write and link is invisible rather than a variant nobody
+	// can explain.
 	rel := filepath.Join(a.Name, name, v)
-	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("variant %s:%s:%s already exists; change it with: ap delete %s:%s:%s && ap variant %s:%s:%s -- <args...>",
-			a.Name, name, v, a.Name, name, v, a.Name, name, v)
-	}
+	tmp := filepath.Join(a.Name, name, "."+v+".tmp")
+	_ = root.Remove(tmp) // a leftover from an earlier crash must not block this one
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
 	if _, err := f.WriteString(strings.Join(args, "\n") + "\n"); err != nil {
 		_ = f.Close()
+		_ = root.Remove(tmp)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	err = root.Link(tmp, rel)
+	_ = root.Remove(tmp)
+	if errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("variant %s:%s:%s already exists; change it with: ap delete %s:%s:%s && ap variant %s:%s:%s -- <args...>",
+			a.Name, name, v, a.Name, name, v, a.Name, name, v)
+	}
+	return err
 }
 
 // VariantArgs returns the arguments recorded for a:name:v.

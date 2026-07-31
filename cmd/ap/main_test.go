@@ -1283,3 +1283,86 @@ func TestListTopLevelStaysParseableByScriptsSmoke(t *testing.T) {
 		t.Errorf("smoke.sh's filter over `ap list` yields %v, want exactly the agents %v", got, agent.Names())
 	}
 }
+
+// --- what survives a failure partway through --------------------------------
+
+// The irreversible thing has already happened by the time the wrappers are
+// removed, so a wrapper ap refuses to touch must not abandon the rest of the
+// cascade or swallow the receipt. It used to do both: `ap delete` printed only
+// "refusing to remove ...", never mentioned the profile it had just erased, and
+// left the later variants' wrappers pointing at a store it had already emptied.
+func TestDeleteReportsTheProfileEvenWhenAWrapperIsRefused(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:aaa", "--", "-p"},
+		{"variant", "claude:review:zzz", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	// Something ap did not write, sitting where the first variant's wrapper was.
+	foreign := filepath.Join(bin, "claude:review:aaa")
+	if err := os.WriteFile(foreign, []byte("#!/bin/sh\necho not ours\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stdoutOf(t, func() error { return dispatch([]string{"delete", "--yes", "claude:review"}) })
+	if !strings.Contains(out, `deleted "claude:review"`) {
+		t.Errorf("the receipt never said what was deleted:\n%s", out)
+	}
+	// The refusal must not have stopped the variant after it.
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:zzz")); !os.IsNotExist(err) {
+		t.Error("the cascade stopped at the refused wrapper; a later variant kept its wrapper")
+	}
+	// And the foreign file is still not ours to remove.
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("ap removed a file it did not write: %v", err)
+	}
+	a, _ := agent.Lookup("claude")
+	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
+		t.Errorf("the store outlived the profile: %v", got)
+	}
+}
+
+// One unreadable entry must not take the listing down with it. It used to
+// return the error, so `ap list` printed the claude line and then aborted with
+// exit 1 — codex, pi and opencode never appeared. That also silently defeated
+// scripts/smoke.sh's agents(), which parses this output: it yielded one agent
+// instead of four, and the two blocks driven by it tested nothing while
+// reporting nothing wrong.
+func TestListReportsAnUnreadableVariantWithoutAbandoningTheRest(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:good", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	// A zero-byte entry: what an interrupted write used to be able to leave.
+	empty := filepath.Join(profile.VariantsRoot(), a.Name, "review", "broken")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stdoutOf(t, func() error { return dispatch([]string{"list"}) })
+	if !strings.Contains(out, "review:broken") {
+		t.Errorf("the unreadable entry is not reported at all:\n%s", out)
+	}
+	if !strings.Contains(out, "review:good") {
+		t.Errorf("a readable variant was lost:\n%s", out)
+	}
+	// Every agent still gets its line, which is what smoke.sh's agents() reads.
+	for _, name := range agent.Names() {
+		if !strings.Contains(out, name+":") {
+			t.Errorf("agent %q vanished from the listing:\n%s", name, out)
+		}
+	}
+}

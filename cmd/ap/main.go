@@ -31,10 +31,15 @@ Usage:
                                        name a set of launch arguments over an
                                        existing profile — same configuration,
                                        a different way to start it
-  ap which <agent>:<profile>           print the profile directory
-  ap env <agent>:<profile> [cmd...]    print the environment override, or set
+  ap which <agent>:<profile>[:<variant>]
+                                       print the profile directory — a variant
+                                       has none of its own, so it answers for
+                                       the parent
+  ap env <agent>:<profile>[:<variant>] [cmd...]
+                                       print the environment override, or set
                                        it and run cmd — env(1), for tools that
-                                       write into the agent's config directory
+                                       write into the agent's config directory.
+                                       cmd never receives a variant's arguments
   ap run <agent>:<profile>[:<variant>] [args...]
                                        run the agent with that profile; a
                                        variant's arguments come first, then
@@ -308,11 +313,14 @@ func cmdList(args []string) error {
 //
 // Indented, always — see the contract in cmdList above.
 //
-// The arguments are printed unquoted, and the line is informational rather than
-// something to paste: `--model=claude-opus-5[1m]` in zsh is `no matches found`.
-// Quoting it for display would reintroduce a shell-quoting function, and its
-// hostile-argument test, for a line nothing execs. The pasteable thing here is
-// the reference — `claude:review:opus` — which is the point of naming it.
+// Nothing on this line is pasteable, and that is the trade for nesting. The
+// name is printed as `<profile>:<variant>` because the agent is already on the
+// line above — repeating it on every row would undo the nesting this format
+// exists for — so the reference to type is that name with the agent prefixed.
+// The arguments are printed unquoted too: `--model=claude-opus-5[1m]` in zsh is
+// `no matches found`. Quoting them for display would reintroduce a
+// shell-quoting function, and its hostile-argument test, for a line nothing
+// execs.
 //
 // The arguments are the point, not decoration. A command whose name silently
 // disables every permission prompt is a real hazard, and ap exists precisely so
@@ -328,9 +336,17 @@ func listVariants(a agent.Agent, profiles []string) error {
 			return err
 		}
 		for _, v := range variants {
+			// An entry that cannot be read is reported on its own line, not
+			// returned. Returning aborted the whole listing after it had already
+			// printed part of it — one unreadable file under claude and codex, pi
+			// and opencode never appeared at all. That also silently defeated
+			// scripts/smoke.sh's agents(), which reads this output: it yielded one
+			// agent instead of four, and two blocks then tested nothing while
+			// still reporting nothing wrong.
 			args, err := profile.VariantArgs(a, p, v)
 			if err != nil {
-				return err
+				fmt.Printf("%-10s   %-13s (unreadable: %v)\n", "", p+":"+v, err)
+				continue
 			}
 			// Indented past the agent column, then a fixed column for the name, so
 			// the arguments line up between variants of different profiles.
@@ -340,9 +356,12 @@ func listVariants(a agent.Agent, profiles []string) error {
 	return nil
 }
 
-// vref parses the single positional argument shared by the writing commands
-// that accept a variant (delete, link, unlink). ParseVariantRef rejects
-// Default. The variant is "" for a two-segment reference.
+// vref parses the single positional argument taken by link and unlink.
+// ParseVariantRef rejects Default. The variant is "" for a two-segment
+// reference.
+//
+// Not delete: that one takes a flag as well, so it parses with parseAroundRef
+// and calls ParseVariantRef itself.
 func vref(args []string, cmd string) (agent.Agent, string, string, error) {
 	if len(args) != 1 {
 		return agent.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
@@ -351,9 +370,12 @@ func vref(args []string, cmd string) (agent.Agent, string, string, error) {
 	return a, name, v, err
 }
 
-// vrefAllowDefault is vref but also accepts Default, for the read-only commands
-// that may resolve to the agent's real config directory: which, env. The
-// variant is parsed and then ignored by both, on purpose: a variant has no
+// vrefAllowDefault is vref but also accepts Default, for `which` — the one
+// read-only command that takes nothing but a reference and may resolve to the
+// agent's real config directory. `env` has the same rule but takes a trailing
+// command, so it calls ParseVariantRefAllowDefault itself.
+//
+// The variant is parsed and then ignored, on purpose: a variant has no
 // configuration of its own, and answering with anything but the parent's
 // directory would invent a second one that nothing writes to.
 func vrefAllowDefault(args []string, cmd string) (agent.Agent, string, string, error) {
@@ -901,9 +923,7 @@ func cmdDelete(args []string) error {
 	if p != "" {
 		rc.add("command", fmt.Sprintf("%s:%s unlinked", a.Name, name))
 	}
-	if err := deleteTheVariantsToo(a, name, variants, rc); err != nil {
-		return err
-	}
+	deleteTheVariantsToo(a, name, variants, rc)
 	rc.print(fmt.Sprintf("deleted %q", a.Name+":"+name))
 	return nil
 }
@@ -911,19 +931,25 @@ func cmdDelete(args []string) error {
 // deleteTheVariantsToo removes the store entries and the wrappers that named
 // the profile just deleted. Split out of cmdDelete purely to keep it under the
 // project's cyclomatic-complexity gate.
-func deleteTheVariantsToo(a agent.Agent, name string, variants []string, rc *receipt) error {
+//
+// Never an error, and it never stops early, for the same reason seedAndLink is
+// not an error: the irreversible thing has already happened by the time this
+// runs. It used to return on the first wrapper it was refused — a foreign file
+// sitting at one variant's wrapper path — which abandoned every later variant
+// AND swallowed the receipt, so `ap delete` reported a refusal and never
+// mentioned the profile it had just erased.
+func deleteTheVariantsToo(a agent.Agent, name string, variants []string, rc *receipt) {
 	if err := profile.DeleteVariants(a, name); err != nil {
-		return err
+		rc.warn("variant arguments not removed: %v", err)
 	}
 	for _, v := range variants {
 		if _, err := removeWrapperIfOurs(a.Name + ":" + name + ":" + v); err != nil {
-			return err
+			rc.warn("%s", err)
 		}
 	}
 	if len(variants) > 0 {
 		rc.add("variants", strings.Join(variants, " "))
 	}
-	return nil
 }
 
 // deleteVariant removes one variant and its wrapper, and asks nothing first.
@@ -939,9 +965,11 @@ func deleteVariant(a agent.Agent, name, v string) error {
 	}
 	rc := &receipt{}
 	rc.add("removed", "variant args (the profile is untouched)")
+	// Warned, not returned: the store entry is already gone, so reporting only
+	// the wrapper refusal would leave the user believing nothing happened.
 	p, err := removeWrapperIfOurs(ref)
 	if err != nil {
-		return err
+		rc.warn("%s", err)
 	}
 	if p != "" {
 		rc.add("command", ref+" unlinked")

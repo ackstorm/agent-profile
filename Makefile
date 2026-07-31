@@ -213,7 +213,7 @@ _cover: _test
 	go tool cover -func coverage.out | tail -20
 
 .PHONY: fuzz
-fuzz: ## Fuzz the path-validation surface for 60s (the traversal-bug lesson).
+fuzz: ## Fuzz the two path-validation surfaces, 30s each (the traversal-bug lesson).
 	$(call in_container,_fuzz)
 _fuzz:
 	go test -run '^$$' -fuzz FuzzValidName -fuzztime 30s ./internal/profile/

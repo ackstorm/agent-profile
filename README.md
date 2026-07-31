@@ -57,9 +57,9 @@ exactly that reason — see "`default`" below.
 | `ap list [agent]` | your profiles — always includes `default`, and every supported agent |
 | `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
 | `ap variant <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it |
-| `ap which <agent>:<profile>` | the profile directory, for editing by hand |
-| `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
-| `ap env <agent>:<profile> <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory |
+| `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
+| `ap env <agent>:<profile>[:<variant>]` | exactly which variable would be set (for reading, not for `eval`) |
+| `ap env <agent>:<profile>[:<variant>] <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory. `cmd` never receives a variant's arguments: those are the agent's flags |
 | `ap run <agent>:<profile>[:<variant>] [args...]` | run it; a variant's arguments come first, then yours, both passed through verbatim |
 | `ap delete [--yes] <agent>:<profile>[:<variant>]` | remove the profile, its variants and their wrappers — including its own session history; see "What every profile shares" below. Asks first, and `--yes` is how a script answers. A variant on its own is removed without asking: it is two lines of text |
 | `ap unlink <agent>:<profile>[:<variant>]` | remove the wrapper, keep the profile or variant |
@@ -223,9 +223,11 @@ claude:    default review finops plan
              review:ci     --dangerously-skip-permissions --model=claude-opus-5[1m] -p
 ```
 
-Those argument lines are for reading, not for pasting — they are printed
-unquoted, and `--model=claude-opus-5[1m]` in zsh is `no matches found`. The
-thing to type is the name: `claude:review:opus`.
+Those lines are for reading, not for pasting. The name is shown as
+`review:opus` because the agent is already on the line above, so the reference
+to type is that name with the agent prefixed — `claude:review:opus`. The
+arguments are printed unquoted too, and `--model=claude-opus-5[1m]` in zsh is
+`no matches found`.
 
 **Why not a shell alias?** Two reasons. An alias does not appear in `ap list`,
 and a name that carries `--dangerously-skip-permissions` needs to be
