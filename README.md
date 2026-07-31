@@ -55,7 +55,7 @@ exactly that reason — see "`default`" below.
 | Command | What it does |
 |---|---|
 | `ap list [agent]` | your profiles — always includes `default`, and every supported agent |
-| `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
+| `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
 | `ap env <agent>:<profile>[:<variant>]` | exactly which variable would be set (for reading, not for `eval`) |
@@ -290,8 +290,9 @@ interpret `--effort`.
 `ap run` parses no flags of its own at all, so there is nothing to collide with:
 `ap run opencode:review --pure` passes opencode's own `--pure` to opencode.
 
-`ap create` is different, because it has nothing to pass through: `--from` and
-`--copy-instructions` both work on either side of the reference.
+`ap create` is different, because it has nothing to pass through: `--from`,
+`--only-settings` and `--copy-instructions` all work on either side of the
+reference.
 
 ```bash
 ap create claude:review --from plan        # clones claude:plan
@@ -476,6 +477,35 @@ follows in a single start:
 ap run claude:review plugin marketplace add owner/repo   # the stage that stalls
 ap run claude:review -p ok                               # installs, deterministically
 ```
+
+### `--only-settings` — a few keys, not a config
+
+A fresh profile is empty on purpose, and that is right for skills, commands,
+hooks, agents and MCP servers. It is wrong for the two or three settings that
+make a terminal feel like yours. `--only-settings` narrows a clone to the named
+keys of the agent's settings file and skips every other file:
+
+```bash
+ap create claude:new --from default --only-settings statusLine --only-settings theme
+ap create codex:new  --from default --only-settings tui
+ap create claude:new --from otro    --only-settings mcpServers.linear
+```
+
+The flag repeats, needs `--from`, and composes with `--copy-instructions`, which
+is a different flag over a different file.
+
+Naming a parent takes its children — `tui` brings `[tui]` and `[tui.*]`,
+`mcpServers` brings every server. A key that is not in the source is a warning
+naming it, not a failure. Paths split on `.`, so a key holding a literal dot
+cannot be named; it is reported as not found.
+
+JSON files (claude, pi, opencode) are decoded and re-encoded with two-space
+indent. `codex`'s `config.toml` is never parsed — whole `[table]` blocks are
+copied verbatim, so comments and formatting survive exactly and every byte that
+comes out went in. A `config.toml` containing a multiline string (`"""` or
+`'''`) is refused, because a `[` at the start of a line inside one cannot be
+told from a table header without a TOML parser, and this program has no
+dependencies.
 
 ## Install
 
