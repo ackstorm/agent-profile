@@ -280,6 +280,44 @@ func TestSharedFromIsAbsolute(t *testing.T) {
 	}
 }
 
+// --only-settings slices exactly one file per agent. It is a separate field
+// rather than CloneAllow[0] on purpose: deriving it from the slice would make
+// reordering that list change behaviour, which nobody would see in review. This
+// test is the other half of that — the field and the allowlist must agree.
+func TestEveryAgentDeclaresItsSettingsFile(t *testing.T) {
+	for _, n := range Names() {
+		a, _ := Lookup(n)
+		if a.Settings == "" {
+			t.Errorf("%s declares no Settings file", n)
+			continue
+		}
+		if !slices.Contains(a.CloneAllow, a.Settings) {
+			t.Errorf("%s: Settings %q is not a CloneAllow entry, so --only-settings "+
+				"could reach a path the unfiltered clone cannot", n, a.Settings)
+		}
+		if a.SettingsFormat != JSON && a.SettingsFormat != TOML {
+			t.Errorf("%s: SettingsFormat %d is neither JSON nor TOML", n, a.SettingsFormat)
+		}
+	}
+}
+
+// The Shared/State backstop applies to --only-settings too. An agent whose
+// settings file was also its credential would make the narrowed clone the one
+// way to copy it.
+func TestSettingsIsNeverASharedOrStatePath(t *testing.T) {
+	for _, n := range Names() {
+		a, _ := Lookup(n)
+		for _, s := range a.Shared {
+			if s.Rel == a.Settings {
+				t.Errorf("%s: Settings %q is also Shared", n, a.Settings)
+			}
+		}
+		if slices.Contains(a.State, a.Settings) {
+			t.Errorf("%s: Settings %q is also State", n, a.Settings)
+		}
+	}
+}
+
 func TestNamesIsSorted(t *testing.T) {
 	got := Names()
 	want := []string{"claude", "codex", "opencode", "pi"}

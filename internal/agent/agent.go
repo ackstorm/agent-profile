@@ -33,6 +33,20 @@ func (m Mode) String() string {
 	return "replace"
 }
 
+// Format is how an agent's settings file is written, which is all
+// --only-settings needs to know to slice it.
+type Format int
+
+const (
+	// JSON is decoded and re-encoded: the selected subtrees are copied whole,
+	// with stable key order and two-space indent.
+	JSON Format = iota
+	// TOML is never parsed — there is no TOML decoder in the standard library
+	// and this repository takes no dependencies. Whole blocks are copied
+	// verbatim instead, so every emitted byte is a byte of the source.
+	TOML
+)
+
 // Share is the one piece of state that stays common to every profile: a link at
 // Rel (relative to the profile dir) pointing at From (absolute, in the real home).
 //
@@ -193,6 +207,17 @@ type Agent struct {
 	CloneAllow []string
 	// Shim is non-nil only for an agent whose isolation needs a shared variable.
 	Shim *Shim
+	// Settings is the agent's settings file, relative to its config directory:
+	// the one file `ap create --only-settings` slices. Always also a CloneAllow
+	// entry, so a narrowed clone can never reach a path the unfiltered clone
+	// cannot — TestEveryAgentDeclaresItsSettingsFile is what keeps that true.
+	//
+	// A separate field rather than CloneAllow[0]: deriving it from the slice
+	// would make reordering that list change behaviour, which nobody would see
+	// in review.
+	Settings string
+	// SettingsFormat says how Settings is sliced.
+	SettingsFormat Format
 }
 
 func home() string {
@@ -259,6 +284,13 @@ func registry() map[string]Agent {
 			// the 108 MB of plugin content — claude re-materialises them itself on the
 			// next couple of starts.
 			CloneAllow: []string{"settings.json", "CLAUDE.md", "skills", "commands", "hooks", "agents"},
+			// Measured: a settings.json holding only statusLine and theme starts
+			// cleanly under a pty (claude v2.1.220) — no complaint about the file,
+			// and the status line's own command renders at the bottom of the
+			// screen. `claude -p` was not used for this: it never shows a wizard
+			// or a status line either way, so it would have proven nothing.
+			Settings:       "settings.json",
+			SettingsFormat: JSON,
 			// Verified. It was in Shared until this release, so the path is known good.
 			Instructions: &Instructions{Name: "CLAUDE.md", Source: filepath.Join(h, ".claude", "CLAUDE.md")},
 			// Note the paths: claude reads ~/.claude.json outside a profile, but
@@ -297,6 +329,12 @@ func registry() map[string]Agent {
 			// own — one `codex plugin add <p>@<m>` fixes it, idempotently. See the
 			// clone warning in clone.go that surfaces exactly that command.
 			CloneAllow: []string{"config.toml", "hooks.json", "skills"},
+			// Measured: `codex doctor` (v0.146.0) against a config.toml holding only
+			// [tui] and [tui.model_availability_nux], with no top-level model, still
+			// reports "config loaded" / "config.toml parse ok" and no missing-model
+			// error — codex falls back to its own default model provider.
+			Settings:       "config.toml",
+			SettingsFormat: TOML,
 			// Instructions is nil on purpose. The AGENTS.md convention is documented
 			// upstream for codex, opencode and pi, but no global file exists on the
 			// reference machine, so none of them has been watched reading one. Verify
@@ -319,10 +357,12 @@ func registry() map[string]Agent {
 				// and covers the case where keys are stored here.
 				{Rel: "auth.json", From: filepath.Join(h, ".pi", "agent", "auth.json")},
 			},
-			Unshared:   []string{"sessions"},
-			State:      []string{"sessions"},
-			CloneAllow: []string{"settings.json", "models.json"},
-			Setup:      "ap run %s config",
+			Unshared:       []string{"sessions"},
+			State:          []string{"sessions"},
+			CloneAllow:     []string{"settings.json", "models.json"},
+			Setup:          "ap run %s config",
+			Settings:       "settings.json",
+			SettingsFormat: JSON,
 		},
 		"opencode": {
 			Name:   "opencode",
@@ -340,7 +380,9 @@ func registry() map[string]Agent {
 			Shim:      &Shim{Rel: "xdg", Entry: "opencode"},
 			// Never node_modules — 62 MB on the reference machine, and reinstalled
 			// by opencode itself.
-			CloneAllow: []string{"opencode.json", "agents", "command", "skills"},
+			CloneAllow:     []string{"opencode.json", "agents", "command", "skills"},
+			Settings:       "opencode.json",
+			SettingsFormat: JSON,
 			// Sessions AND auth live under XDG_DATA_HOME and XDG_STATE_HOME, which ap
 			// never redirects — redirecting them is exactly what the shim exists to
 			// avoid doing to every other program in the tree. So opencode cannot honour
