@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,6 @@ func TestDispatchRejectsBadReferences(t *testing.T) {
 		{"delete", "claude:.."},
 		{"create"},
 		{"which", "claude:a", "claude:b"},
-		{"agents", "extra"},
 		{"list", "claude", "codex"},
 		{"list", "notanagent"},
 	} {
@@ -586,7 +586,7 @@ func TestDeleteToleratesAMissingLinkDir(t *testing.T) {
 	if err := dispatch([]string{"create", "claude:nolinkdir"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := dispatch([]string{"delete", "claude:nolinkdir"}); err != nil {
+	if err := dispatch([]string{"delete", "--yes", "claude:nolinkdir"}); err != nil {
 		t.Errorf("delete with a missing link dir = %v, want nil", err)
 	}
 	if profile.Exists(a, "nolinkdir") {
@@ -599,7 +599,7 @@ func TestDeleteRemovesTheWrapper(t *testing.T) {
 	bin := t.TempDir()
 	t.Setenv("AP_LINK_DIR", bin)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	for _, args := range [][]string{{"create", "claude:temp"}, {"link", "claude:temp"}, {"delete", "claude:temp"}} {
+	for _, args := range [][]string{{"create", "claude:temp"}, {"link", "claude:temp"}, {"delete", "--yes", "claude:temp"}} {
 		if err := dispatch(args); err != nil {
 			t.Fatalf("ap %v: %v", args, err)
 		}
@@ -633,5 +633,127 @@ func TestCopyInstructionsWritesARealFileNotALink(t *testing.T) {
 	got, _ := os.ReadFile(p)
 	if string(got) != string(want) {
 		t.Error("the copy does not match the source")
+	}
+}
+
+// --- the confirmation guard --------------------------------------------------
+
+// noStdin points os.Stdin at /dev/null for the duration of a test, which is the
+// "nobody is there to answer" case: a script, a CI runner, a hook.
+func noStdin(t *testing.T) {
+	t.Helper()
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = orig; _ = f.Close() })
+}
+
+// Delete is the only irreversible thing this program does, and a profile holds
+// its own session transcripts. With no answer available it must refuse, and the
+// profile must still be there afterwards - the second half is the point. Revert
+// the confirm call in cmdDelete and this fails on Exists, not on the error.
+func TestDeleteWithoutYesAndWithNoAnswerKeepsTheProfile(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	noStdin(t)
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:keepme"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"delete", "claude:keepme"}); err == nil {
+		t.Error("delete with no way to confirm = nil error, want a refusal")
+	}
+	if !profile.Exists(a, "keepme") {
+		t.Fatal("delete removed the profile without an answer")
+	}
+	// And --yes is the stated way through, on either side of the reference.
+	if err := dispatch([]string{"delete", "claude:keepme", "--yes"}); err != nil {
+		t.Fatalf("delete --yes = %v, want nil", err)
+	}
+	if profile.Exists(a, "keepme") {
+		t.Error("delete --yes left the profile behind")
+	}
+}
+
+// A typo must be answered before the prompt, not by it: asking "remove ...?"
+// about a directory that does not exist teaches the user to type y at anything.
+func TestDeleteOfAMissingProfileNamesTheOnesThatExist(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	noStdin(t)
+	if err := dispatch([]string{"create", "claude:real"}); err != nil {
+		t.Fatal(err)
+	}
+	err := dispatch([]string{"delete", "claude:nope"})
+	if err == nil {
+		t.Fatal("delete of a missing profile = nil error")
+	}
+	if !strings.Contains(err.Error(), "real") {
+		t.Errorf("error does not name the profiles that do exist: %v", err)
+	}
+}
+
+// --- stdout stays consumable -------------------------------------------------
+
+func stdoutOf(t *testing.T, f func() error) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	ferr := f()
+	os.Stdout = orig
+	_ = w.Close()
+	b, _ := io.ReadAll(r)
+	_ = r.Close()
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	return string(b)
+}
+
+// `which` and `env` are the two commands whose output is consumed rather than
+// read - $(ap which ...) and env(1) - so they print one bare line and nothing
+// else. No tick, no "~", no aligned block: a tilde in a shell substitution is a
+// literal directory name that resolves nowhere, and any decoration at all breaks
+// the substitution outright. This is the test that stops the receipt formatting
+// from spreading to them.
+func TestWhichAndEnvPrintOneBareConsumableLine(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:bare"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := profile.Dir(a, "bare")
+
+	if got := stdoutOf(t, func() error { return dispatch([]string{"which", "claude:bare"}) }); got != dir+"\n" {
+		t.Errorf("ap which = %q, want exactly %q", got, dir+"\n")
+	}
+	want := a.ConfigEnv + "=" + dir + "\n"
+	if got := stdoutOf(t, func() error { return dispatch([]string{"env", "claude:bare"}) }); got != want {
+		t.Errorf("ap env = %q, want exactly %q", got, want)
+	}
+}
+
+func TestOnPathMatchesEntriesExactly(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/home/x/.local/bin/:/opt/bin")
+	for _, tc := range []struct {
+		dir  string
+		want bool
+	}{
+		{"/home/x/.local/bin", true}, // the trailing slash in PATH must not matter
+		{"/usr/bin", true},
+		{"/home/x/.local", false}, // a prefix is not a match
+		{"/home/x/.local/bin/extra", false},
+	} {
+		if got := onPath(tc.dir); got != tc.want {
+			t.Errorf("onPath(%q) = %v, want %v", tc.dir, got, tc.want)
+		}
 	}
 }

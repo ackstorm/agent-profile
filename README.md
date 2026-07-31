@@ -31,6 +31,7 @@ inside an `exec` profile that never installed the tools it used.
 
 ```bash
 ap create claude:plan                               # new, empty profile
+ap run claude:plan plugin marketplace add owner/repo # a marketplace of its own
 ap run claude:plan plugin install caveman@caveman   # populate it
 ap run claude:plan                                  # work in it
 claude:plan                                         # same thing, typed directly
@@ -51,14 +52,13 @@ exactly that reason — see "`default`" below.
 
 | Command | What it does |
 |---|---|
-| `ap agents` | supported agents, their variable and their mode |
-| `ap list [agent]` | your profiles — always includes `default` |
+| `ap list [agent]` | your profiles — always includes `default`, and every supported agent |
 | `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
 | `ap which <agent>:<profile>` | the profile directory, for editing by hand |
 | `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile> <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory |
 | `ap run <agent>:<profile> [args...]` | run it; args pass through verbatim |
-| `ap delete <agent>:<profile>` | remove the profile and its wrapper — including its own session history; see "What every profile shares" below |
+| `ap delete [--yes] <agent>:<profile>` | remove the profile and its wrapper — including its own session history; see "What every profile shares" below. Asks first, and `--yes` is how a script answers |
 | `ap unlink <agent>:<profile>` | remove the wrapper, keep the profile |
 | `ap link <agent>:<profile>` | write the wrapper back |
 
@@ -66,10 +66,22 @@ Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent
 
 ### Installing into a profile with something that is not the agent
 
-Plugins go in through the agent (`ap run claude:plan plugin install ...`), but
-skills and most third-party installers are separate tools. They find their
-target by reading the same variable `ap` sets, so `ap env` with a command is all
-they need:
+Plugins go in through the agent itself, marketplace first, and both steps are
+ordinary passthrough — `ap run` hands everything after the reference to the
+agent verbatim:
+
+```bash
+ap run claude:plan plugin marketplace add DietrichGebert/ponytail
+ap run claude:plan plugin install ponytail@ponytail
+```
+
+The marketplace is the profile's, not yours: its clone, the plugin cache and the
+`enabledPlugins` entry all land under `ap which claude:plan`, so the same
+marketplace can be absent from `claude:review` and from a bare `claude`.
+
+Skills and most third-party installers are separate tools, though. They find
+their target by reading the same variable `ap` sets, so `ap env` with a command
+is all they need:
 
 ```bash
 ap env claude:plan npx skills add vercel-labs/agent-skills \
@@ -277,7 +289,9 @@ Costs, stated plainly:
    `hasTrustDialogAccepted` lives — is not shared either.
 2. **Plugin content is downloaded once per profile**, not once per machine.
 3. **`ap delete` removes that profile's session transcripts.** If you want a
-   profile's history, copy it out first.
+   profile's history, copy it out first. It names the directory and asks before
+   removing anything, and the default answer is no; `--yes` skips the question,
+   which is also the only way it works with no terminal to ask.
 
 Login survives on the credential alone. Onboarding does not: a profile holding
 nothing but the credential is logged in, but claude still opens on its theme
@@ -293,11 +307,11 @@ exactly what the config shim exists to avoid doing to every other program in the
 process tree (see above). So opencode gets auth and account sharing **for free**,
 with no code for it, but its *sessions* stay global across profiles too, which
 the one-credential rule would rather they were not. Known, not worth a second
-shim. `ap agents` carries the short form in its `Note` column.
+shim.
 
 A direct consequence: **a new profile starts completely empty**, and populating
 it is real work, different per agent. `ap create` prints the next step for a
-fresh (non-cloned) profile — `ap agents` shows the exact command for each.
+fresh (non-cloned) profile, which is different for each of the four.
 
 **`--copy-instructions`** seeds a fresh profile with your global instructions
 file (`CLAUDE.md` for claude — the only agent with a verified one today; the flag
@@ -340,6 +354,26 @@ which resolves to whichever profile is running. And a cloned codex profile can
 end up with `config.toml` saying a plugin is enabled while `codex plugin list`
 reports it as not installed, because codex does not reconcile that declaration
 against its own cache on its own — fix it with `codex plugin add <plugin>@<marketplace>`.
+
+**Claude has the same gap, in one specific stage.** A clone's `settings.json`
+carries both `enabledPlugins` and `extraKnownMarketplaces`, but claude reads
+marketplaces from `plugins/known_marketplaces.json`, which is state and is
+therefore not cloned — it records an absolute `installLocation` inside the source
+profile, so carrying it would point a clone at another profile's directory.
+Converting the declaration into a registration is background work at session
+start, and measured on claude v2.1.220 it is reliable only for the official
+marketplace: a third-party one took 3 session starts once, 5 the next, and had
+not happened after 4 starts on two consecutive runs, with the session log saying
+`Skipping orphaned enabledPlugins entry <plugin>@<marketplace>: marketplace not
+registered`.
+
+Only that one stage is unreliable. Register the marketplace by hand and the rest
+follows in a single start:
+
+```bash
+ap run claude:review plugin marketplace add owner/repo   # the stage that stalls
+ap run claude:review -p ok                               # installs, deterministically
+```
 
 ## Install
 

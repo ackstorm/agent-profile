@@ -101,6 +101,21 @@ check whether the *check* is lying first — two of them originally were:
   middle, so grepping a full path never matches.
 - `opencode debug config` emits ~730 KB but exits without waiting for the pipe to
   drain, losing everything past 64 KiB. Capture to a file, never a pipe.
+- `AP=${AP:-./ap}` was relative, and the plugin block runs its agent calls from a
+  neutral empty directory, so `./ap` resolved to nothing there and the commands
+  never ran. Six checks failed, each blaming what it was testing — one of them
+  literally asked "did the cwd leak in?", which was the opposite of the truth.
+  `AP` is absolute now, and setup commands go through `setup()`, which silences
+  output but **checks the exit status**. Silencing both is what made a failure to
+  run indistinguishable from a failure to pass.
+
+A third failure mode, worse than a lying check: a check that is honest but not
+deterministic. `clone` asserted that a cloned plugin declaration materialises at
+session start; that is claude's asynchronous background work, and it took 3 starts
+once and 5 the next before not happening at all. It is a `warn` now, not a `bad` —
+see the comment there for the measurement. Before adding a check, ask what it
+would take to make it go red when nothing is wrong; a smoke run that is red for
+reasons nobody controls teaches people to ignore red.
 
 ## Guards get mutation-tested, not just green tests
 
