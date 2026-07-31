@@ -1,14 +1,68 @@
 #!/usr/bin/env bash
-# Manual end-to-end check: do the real binaries honour what the registry claims?
+# End-to-end check: do the real binaries honour what the registry claims?
 #
-# Not part of `go test`: needs the agents installed and logged in. Every wait is
-# bounded by `timeout` with an explicit failure path.
+# Runs inside Dockerfile.smoke, which has claude, codex, opencode and pi
+# installed from npm, unpinned on purpose. It used to run on the host and needed
+# all four installed and logged in there, which made the release gate something
+# only one machine could run, and made it write to the real home to do it.
 #
-# Usage: ./scripts/smoke.sh        (expects ./ap built, or set AP=/path/to/ap)
+# Nothing of yours is mounted but the repo. HOME is a directory inside the image
+# that this script fills itself, so the "shared state survives a delete"
+# assertions have something real to lose — an empty home makes them vacuous, and
+# vacuous is what this whole file exists to avoid.
+#
+# Credentials: none, measured rather than assumed.
+#
+#   * Nothing here needs a model call except the clone block, which was already a
+#     warn because claude materialises plugins asynchronously. Set
+#     ANTHROPIC_API_KEY to include it; without one it says so and moves on. It is
+#     the only thing any key would buy, and it buys a warn.
+#   * codex's "authenticated through the shared auth.json" looked like it needed
+#     a login, and briefly did. It does not: `codex login status` reads that file
+#     and masks what it finds, without calling anything to validate it, so a
+#     synthesised auth.json answers the question — which is whether the profile
+#     reaches the file through ap's symlink, not whether the token would work.
+#     (`printenv OPENAI_API_KEY | codex login --with-api-key` also works, and is
+#     what this used to do. `--api-key` was removed upstream, which is the kind
+#     of drift this script exists to catch.)
+#   * claude's equivalent check has no such answer and is off: a seeded fake
+#     cannot tell "the link is broken" from "the token is not valid", and with
+#     ANTHROPIC_API_KEY set claude never reads the credential at all, so the
+#     check would pass with the link severed. It prints a skip saying so.
+#
+# Every wait is bounded by `timeout` with an explicit failure path.
+#
+# Usage: ./scripts/smoke.sh      (or `make smoke`, which builds what it needs)
 set -u
 
-AP=${AP:-./ap}
-[ -x "$AP" ] || { echo "no ap binary at $AP - run: make build" >&2; exit 1; }
+# Re-enter the smoke image. One variable is forwarded and it is optional: bare
+# `-e VAR` passes it only when it is actually set, so an absent key stays absent
+# instead of arriving as an empty string that claude would read as a
+# present-but-invalid one. The repo is the only mount.
+if [ "${AP_IN_SMOKE:-0}" != "1" ]; then
+    root=$(cd "$(dirname "$0")/.." && pwd)
+    image=${AP_SMOKE_IMAGE:-agent-profile-smoke:latest}
+    docker image inspect "$image" >/dev/null 2>&1 || {
+        echo "smoke: building $image (first run)" >&2
+        docker build -q -t "$image" -f "$root/Dockerfile.smoke" "$root" >/dev/null || exit 1
+    }
+    [ -x "$root/.gocache/smoke/ap" ] || {
+        echo "no linux ap binary at .gocache/smoke/ap - run: make smoke" >&2
+        exit 1
+    }
+    exec docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -v "$root:/workspace" \
+        -e AP_IN_SMOKE=1 \
+        -e HOME=/home/smoke/run \
+        -e ANTHROPIC_API_KEY \
+        -w /workspace \
+        "$image" ./scripts/smoke.sh "$@"
+fi
+
+# Built for linux by `make smoke`, because the host binary may not be one.
+AP=${AP:-/workspace/.gocache/smoke/ap}
+[ -x "$AP" ] || { echo "no ap binary at $AP - run: make smoke" >&2; exit 1; }
 # Absolute, once, here. The plugin block runs its agent calls from a neutral
 # empty directory (see the comment above it), and a relative ./ap resolves
 # against *that* directory, where there is no binary: the command never runs, the
@@ -35,14 +89,77 @@ real_config=${XDG_CONFIG_HOME:-$HOME/.config}
 fail=0
 pass() { printf '  \033[32mOK\033[0m   %-9s %s\n' "$1" "$2"; }
 bad()  { printf '  \033[31mFAIL\033[0m %-9s %s\n' "$1" "$2"; fail=1; }
-skip() { printf '  --   %-9s %s\n' "$1" "not installed"; }
+skip() { printf '  --   %-9s %s\n' "$1" "${2:-not installed}"; }
 # warn is for an observation about someone else's asynchronous behaviour: worth
 # printing, never worth failing a release on. Only one check uses it, and its
 # comment says why. Reach for bad() unless you can show the thing being observed
 # is not deterministic.
 warn() { printf '  \033[33mWARN\033[0m %-9s %s\n' "$1" "$2"; }
 
+# --- a home that has been used ----------------------------------------------
+# Fresh every run, inside the image. Two things depend on it holding real
+# content: the sharing assertions need something to share, and the final
+# "delete touched nothing" assertion needs something that could be lost. Against
+# an empty home both are green no matter what the code does.
+mkdir -p "$HOME"/.claude/projects "$HOME"/.codex/sessions "$HOME"/.pi/agent/sessions \
+    "$HOME"/.config/opencode "$HOME"/.config/git "$HOME"/.config/nvim
+printf '{"hasCompletedOnboarding":true}' >"$HOME/.claude.json"
+printf '{"theme":"dark"}' >"$HOME/.claude/settings.json"
+printf '{}' >"$HOME/.pi/agent/auth.json"
+# Real keys, not just the section header: the shim's passthrough check compares
+# how many settings git sees through the shim against how many it sees outside,
+# and refuses to pass when both are zero. A bare "[user]" makes both zero, which
+# is a check that cannot fail dressed up as one that passed.
+printf '[user]\n\tname = smoke\n\temail = smoke@example.invalid\n[init]\n\tdefaultBranch = main\n' \
+    >"$HOME/.config/git/config"
+printf 'vim.opt.number = true\n' >"$HOME/.config/nvim/init.lua"
+for p in alpha beta gamma; do
+    mkdir -p "$HOME/.claude/projects/-smoke-$p"
+    printf '{"session":"%s"}' "$p" >"$HOME/.claude/projects/-smoke-$p/transcript.jsonl"
+done
+printf '{"session":"one"}' >"$HOME/.codex/sessions/one.jsonl"
+
+# claude's credential, synthesised. The shape came from reading back the FIELD
+# NAMES of a real one - never a value - the same way codex's did.
+#
+# This looked unusable at first, on the reasoning that "not logged in" cannot
+# tell a broken link from a bad token. Measured, claude says two different
+# things, and the difference is exactly the one the check needs:
+#
+#   no credential reachable   -> "Not logged in · Please run /login"
+#   credential read, rejected -> "Failed to authenticate: OAuth session expired
+#                                 and could not be refreshed"
+#
+# The second is proof the file was opened, which is the whole assertion: that the
+# profile reaches the credential through the link ap made. Whether the token is
+# valid is Anthropic's business, not ap's - the same line drawn for codex.
+#
+# expiresAt is in the future so the message is about the token being rejected
+# rather than about it being stale before it was ever sent.
+printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-notarealtoken","refreshToken":"sk-ant-ort01-notarealtoken","expiresAt":%s,"refreshTokenExpiresAt":%s,"scopes":["user:inference","user:profile"],"subscriptionType":"max","rateLimitTier":"default"}}' \
+    "$(((  $(date +%s) + 86400 ) * 1000))" "$(((  $(date +%s) + 8640000 ) * 1000))" \
+    >"$HOME/.claude/.credentials.json"
+
+# codex's auth.json, synthesised rather than obtained. Measured: `codex login
+# status` reads this file and masks what it finds - it does not call anything to
+# validate it, so a key-shaped string that is not a key reports
+# "Logged in using an API key" exactly as a real one does.
+#
+# That is enough, because of what the check downstream actually asserts: that a
+# profile reports logged in ONLY by reaching this file through the symlink ap
+# made. Whether the token would work is OpenAI's business, not ap's.
+#
+# So this whole script needs no credential of any kind. It briefly required
+# OPENAI_API_KEY - `printenv OPENAI_API_KEY | codex login --with-api-key`, which
+# also works - and that was a secret demanded for something a literal could do.
+# The shape came from running the real login once and reading back the field
+# names; if codex ever starts validating, this check goes red, which is the
+# correct outcome and the reason smoke exists.
+printf '{\n  "auth_mode": "apikey",\n  "OPENAI_API_KEY": "sk-notarealkey%s"\n}\n' \
+    "$(printf '0%.0s' $(seq 1 40))" >"$HOME/.codex/auth.json"
+
 echo "agent-profile smoke check"
+echo "  agents: claude $(claude --version 2>/dev/null | awk '{print $1}') | codex $(codex --version 2>/dev/null | awk '{print $NF}') | pi $(pi --version 2>/dev/null | head -1) | opencode $(opencode --version 2>/dev/null | head -1)"
 
 # --- claude: a profile-only settings.json must change the resolved model ------
 if command -v claude >/dev/null 2>&1; then
@@ -50,24 +167,47 @@ if command -v claude >/dev/null 2>&1; then
   "$AP" create claude:apsmoke >/dev/null 2>&1
   d=$("$AP" which claude:apsmoke)
   printf '{"model":"haiku"}' > "$d/settings.json"
-  if timeout 180 "$AP" run claude:apsmoke -p --debug-file "$d/dbg.log" "reply with ok" \
-       >/dev/null 2>&1 && grep -q "claude-haiku" "$d/dbg.log"; then
-    pass claude "profile settings.json applied"
-  else
-    bad claude "profile settings.json NOT applied - check CLAUDE_CONFIG_DIR"
-  fi
-  # Credentials are shared, so the profile must not be asking for a login.
-  if grep -qi "not logged in\|please run /login" "$d/dbg.log" 2>/dev/null; then
-    bad claude "profile is not authenticated - .credentials.json link broken"
-  else
-    pass claude "authenticated via the shared credentials link"
-  fi
-  # Only the credential is shared. Anything else that is still a symlink means
-  # the registry and Link disagree, and something is silently common again.
+  # BEFORE the agent runs, and that ordering is load-bearing. Measured: given a
+  # credential it cannot refresh, claude REPLACES the file with a real one of its
+  # own, which is precisely why Link re-asserts the symlink on every `ap run` (see
+  # its doc comment). Asserted after the run, as it was, this goes red because
+  # claude did its job, not because ap failed to do its.
   if [ ! -L "$d/.credentials.json" ]; then
     bad claude ".credentials.json is not a symlink - the profile is not sharing auth"
   else
     pass claude "the credential is shared"
+  fi
+  # The exit status is deliberately NOT part of the next assertion. Measured: with
+  # no credential claude exits 1 with "Not logged in", and the debug log has
+  # already recorded the model it resolved from the profile's settings.json -
+  # resolution happens before authentication. Requiring exit 0, as this used to,
+  # made a block about CLAUDE_CONFIG_DIR depend on a working login.
+  #
+  # stdout and stderr are captured, not discarded: the authentication message
+  # goes THERE and never reaches --debug-file. Grepping the debug log for it, as
+  # this used to, is a check that cannot fail - measured with the credential link
+  # severed, and it stayed green.
+  timeout 180 "$AP" run claude:apsmoke -p --debug-file "$d/dbg.log" "reply with ok" \
+    >"$d/out.log" 2>&1
+  if grep -q "claude-haiku" "$d/dbg.log" 2>/dev/null; then
+    pass claude "profile settings.json applied"
+  else
+    bad claude "profile settings.json NOT applied - check CLAUDE_CONFIG_DIR"
+  fi
+  # REACHED, not accepted. Measured, the two answers differ exactly where it
+  # matters: a profile that cannot get to the credential says "Not logged in ·
+  # Please run /login", and one that read it and had it rejected says "Failed to
+  # authenticate: OAuth session expired". Only the first is a broken link, and
+  # only the first is ap's business - the same line drawn for codex.
+  #
+  # ANTHROPIC_API_KEY makes claude authenticate without opening the credential at
+  # all, so with one set this would pass with the link severed. Skipped there.
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    skip claude "ANTHROPIC_API_KEY bypasses the credential, so this cannot observe it"
+  elif grep -qi "not logged in\|please run /login" "$d/out.log" 2>/dev/null; then
+    bad claude "profile never reached the credential - .credentials.json link broken"
+  else
+    pass claude "the credential was reached through the shared link"
   fi
   stray=""
   for p in .claude.json CLAUDE.md projects plugins/cache; do
@@ -96,7 +236,19 @@ if command -v codex >/dev/null 2>&1; then
   else
     bad codex "codex_home NOT redirected - check CODEX_HOME"
   fi
-  if timeout 120 "$AP" run codex:apsmoke login status 2>&1 | grep -qi "logged in"; then
+  # The one authentication check the image can answer. The seed wrote a real
+  # auth.json into the home (synthetic, see there), and the profile can only
+  # report "logged in" by reaching it through the link ap made.
+  #
+  # ANCHORED. This was `grep -qi "logged in"`, and "Not logged in" contains
+  # "logged in", so it matched both answers: the check passed whether or not the
+  # link existed, on the host too, for as long as it has been here. Found by
+  # reverting the guard - Link mutated to skip codex's Shared entry, profile
+  # therefore empty, and the check stayed green.
+  #
+  # Measured, both branches: "Logged in using an API key - sk-xxx***yyy" and
+  # "Not logged in".
+  if timeout 120 "$AP" run codex:apsmoke login status 2>&1 | grep -qiE '^ *logged in'; then
     pass codex "authenticated via the shared auth.json link"
   else
     bad codex "not logged in - auth.json link broken"
@@ -337,25 +489,39 @@ if command -v claude >/dev/null 2>&1; then
     # absolute installLocation inside the SOURCE profile, so a clone carrying it
     # would point at another profile's directory. It is state, and state is not
     # cloned. Bounded retry, explicit outcome either way, never an open poll.
+    #
+    # The one block in this file that needs a real model call: what is being
+    # observed is work claude does during a session, so a session has to happen.
+    # Without a key it is announced and skipped rather than reported either way.
     reconciled=0
-    for attempt in 1 2 3 4; do
-      (cd "$neutral" && timeout 300 "$AP" run claude:apsmokeclone -p "say ok") >/dev/null 2>&1
-      sleep 20
-      if (cd "$neutral" && timeout 120 "$AP" run claude:apsmokeclone plugin list 2>&1) | grep -q -F "$plug@$mk"; then
-        reconciled=1
-        break
-      fi
-    done
-    if [ "$reconciled" = 1 ]; then
-      pass clone "session start(s) materialised the declared plugin ($attempt attempt(s))"
+    attempt=0
+    if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+      reconciled=skip
+    fi
+    if [ "$reconciled" = skip ]; then
+      skip clone "materialising needs a session, so it needs ANTHROPIC_API_KEY"
     else
-      warn clone "claude had not registered $mk after 4 starts and 80s - declaration is cloned, materialising it is claude's own background work"
+      for attempt in 1 2 3 4; do
+        (cd "$neutral" && timeout 300 "$AP" run claude:apsmokeclone -p "say ok") >/dev/null 2>&1
+        sleep 20
+        if (cd "$neutral" && timeout 120 "$AP" run claude:apsmokeclone plugin list 2>&1) | grep -q -F "$plug@$mk"; then
+          reconciled=1
+          break
+        fi
+      done
+      if [ "$reconciled" = 1 ]; then
+        pass clone "session start(s) materialised the declared plugin ($attempt attempt(s))"
+      else
+        warn clone "claude had not registered $mk after 4 starts and 80s - declaration is cloned, materialising it is claude's own background work"
+      fi
     fi
     # plugins/cache for the same reason as the origin's check above: under
     # plugins/ this passed on the marketplace clone alone, reporting a skill the
     # clone could not actually load. It went green in the same run whose WARN
     # said nothing had reconciled.
-    if [ -n "$(find "$cd2/plugins/cache" -name SKILL.md -path "*$skill*" -print -quit 2>/dev/null)" ]; then
+    if [ "$reconciled" = skip ]; then
+      skip clone "nothing could reconcile, so the skill cannot be looked for"
+    elif [ -n "$(find "$cd2/plugins/cache" -name SKILL.md -path "*$skill*" -print -quit 2>/dev/null)" ]; then
       pass clone "the plugin's skill came with it"
     elif [ "$reconciled" = 1 ]; then
       # Reconciliation DID happen, so the skill missing afterwards is a real
@@ -457,10 +623,22 @@ if command -v claude >/dev/null 2>&1; then
   setup env AP_LINK_DIR="$vlink" "$AP" delete --yes claude:apsmokevar
   if setup env AP_LINK_DIR="$vlink" "$AP" create claude:apsmokevar &&
     setup env AP_LINK_DIR="$vlink" "$AP" variant claude:apsmokevar:apv -- -p --model haiku; then
-    if timeout 180 "$AP" run claude:apsmokevar:apv "reply with ok" >/dev/null 2>&1; then
+    # Exit 124 is `timeout` killing it, and that is the whole observable: with the
+    # stored -p reaching claude it answers or refuses and exits; without it, it
+    # opens an interactive session and sits there until killed. The exit CODE is
+    # not usable - with no credential claude exits 1, which says nothing about
+    # whether the stored arguments arrived. Requiring exit 0, as this used to,
+    # made the check need a working login.
+    #
+    # scripts/sandbox.sh asserts the same thing far more precisely, against a stub
+    # that reports its own argv. This stays because it is the only place the REAL
+    # binary is observed changing behaviour because of what the store held.
+    rc=0
+    timeout 60 "$AP" run claude:apsmokevar:apv "reply with ok" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 124 ]; then
       pass variant "stored arguments reached the agent"
     else
-      bad variant "ap run <a>:<p>:<v> did not complete - are the stored args reaching claude?"
+      bad variant "ap run <a>:<p>:<v> never returned - are the stored args reaching claude?"
     fi
     # The cascade, end to end: deleting the profile takes the variant with it.
     #
@@ -515,11 +693,24 @@ done
 [ $leak -eq 0 ] && pass env "every override points inside the profile; data and state untouched"
 
 # --- delete must not touch shared data --------------------------------------
+# The transcript count alone is no longer enough, and had stopped being enough
+# some time ago: projects/ and sessions/ moved to Unshared, so nothing in a
+# profile points at them any more and counting them cannot go red. What a
+# profile DOES link back to is the credential - for claude it is the only
+# symlink a fresh profile has at all. Measured with Delete mutated to resolve
+# links before removing: every credential below is destroyed and the transcript
+# count does not move.
 before=$(find "$HOME/.claude/projects" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
 for p in claude codex pi opencode; do "$AP" delete --yes "$p:apsmoke" >/dev/null 2>&1; done
 after=$(find "$HOME/.claude/projects" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
-if [ "$before" -eq "$after" ]; then
-  pass delete "shared sessions intact ($after entries)"
+lost=""
+for c in "$HOME/.claude/.credentials.json" "$HOME/.codex/auth.json" "$HOME/.pi/agent/auth.json"; do
+  [ -e "$c" ] || lost="$lost ${c#"$HOME"/}"
+done
+if [ -n "$lost" ]; then
+  bad delete "delete followed a link out of the profile and destroyed:$lost"
+elif [ "$before" -eq "$after" ]; then
+  pass delete "credentials and shared sessions intact ($after entries)"
 else
   bad delete "session count changed $before -> $after"
 fi

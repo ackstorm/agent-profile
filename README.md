@@ -570,16 +570,48 @@ floor, which is a security floor, not a language requirement. See CLAUDE.md.
 ```bash
 make verify   # fmt-check, shellcheck, vet, lint (incl. gosec), test -race, vulncheck
 make secrets  # gitleaks over the full history
-make sandbox  # home-safety checks against a throwaway home, in the container
-make smoke    # drives the four real binaries; needs them installed and logged in
+make sandbox  # home-safety checks against a throwaway home, with stub agents
+make smoke    # the four real agents, in their own image
 make fuzz     # 60s against the path validation
 make hooks    # install a pre-push hook that runs verify
 make shell    # a shell inside the devtools image
 ```
 
-Everything above is containerised except `smoke`, which has to stay on the host:
-it drives the real agent binaries and asserts your real session count is
-unchanged afterwards.
+Everything above is containerised, including `smoke`. It used to need claude,
+codex, opencode and pi installed and logged in on the host, and wrote to the
+real home to do its work — which made the release gate something exactly one
+machine could run. The four agents now live in `Dockerfile.smoke`, unpinned on
+purpose: smoke exists to catch the day one of them changes what it does with the
+variable `ap` hands it, and a pinned agent freezes the thing under observation.
+
+It needs **no credentials**. That was measured, not assumed, and it was not the
+first answer:
+
+| Check | Needs |
+|---|---|
+| profile `settings.json` changes the resolved model | nothing — the debug log records the resolved model before authentication fails |
+| `codex doctor`, `pi list`, `opencode debug paths` | nothing |
+| plugin marketplace add / install / list | network, no model |
+| `codex login status` through the shared `auth.json` | nothing — `login status` reads that file and masks what it finds without validating it, so a synthesised `auth.json` answers the question, which is whether the profile reaches the file through `ap`'s symlink |
+| claude reaching its credential through the shared link | nothing — the two answers differ where it matters: a profile that cannot get to the credential says `Not logged in · Please run /login`, one that read it and had it rejected says `Failed to authenticate`. Only the first is a broken link, and only the first is `ap`'s business |
+| a clone materialising its declared plugin | `ANTHROPIC_API_KEY` — it happens during a session. Skipped without one, and already a `warn` because it is claude's asynchronous work |
+
+So the only key that buys anything buys a `warn`, and CI needs no secret. Both
+synthesised credentials were built from the **field names** of a real one, never
+a value.
+
+Two orderings in there are load-bearing, and both were found by reverting a
+guard rather than by reading the code. The symlink assertion runs *before* the
+agent does: given a credential it cannot refresh, claude replaces the file with
+one of its own, which is exactly why `Link` re-asserts the symlink on every `ap
+run` — asserted afterwards it goes red because claude did its job. And the
+authentication message goes to stdout, never to `--debug-file`, so grepping the
+debug log for it is a check that cannot fail.
+
+The seeded home is load-bearing. Every "shared state survived" assertion is
+vacuous against an empty one, and adding a check means seeding whatever would
+let it fail — a `[user]` git section with no keys under it made the shim's
+passthrough check compare zero settings against zero and call that a pass.
 
 `sandbox` is the half of that which never needed a real agent. It builds a home
 that has been used — configuration, credentials, transcripts, and a `~/.config`

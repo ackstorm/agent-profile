@@ -56,7 +56,10 @@ LDFLAGS := -s -w \
 # scripts/dev.sh does not carry MAKEFLAGS across the docker boundary: without
 # this the inner make would recompute them from the container's point of view.
 AP_IN_DEVTOOLS ?= 0
-FORWARD = VERSION='$(VERSION)' COMMIT='$(COMMIT)' DATE='$(DATE)' GOOS='$(GOOS)' GOARCH='$(GOARCH)'
+# BIN is forwarded for `smoke`, which builds a linux binary into a path of its
+# own rather than clobbering ./ap — on macOS that would leave a ./ap the host
+# cannot execute. Everywhere else it is the default and forwarding it is a no-op.
+FORWARD = VERSION='$(VERSION)' COMMIT='$(COMMIT)' DATE='$(DATE)' GOOS='$(GOOS)' GOARCH='$(GOARCH)' BIN='$(BIN)'
 
 define in_container
 	@if [ "$(AP_IN_DEVTOOLS)" = "1" ]; then \
@@ -86,9 +89,15 @@ doctor: ## Check the host has what it needs and the image has what it claims.
 	@./scripts/dev.sh bash -c 'for t in go gofmt golangci-lint govulncheck goreleaser gitleaks shellcheck git; do \
 	    command -v $$t >/dev/null 2>&1 && echo "OK   (container) $$t" || { echo "FAIL (container) $$t MISSING"; exit 1; }; \
 	  done; echo "OK   (container) $$(go version)"'
-	@for a in claude codex opencode pi; do \
-	    command -v $$a >/dev/null 2>&1 && echo "OK   (host) $$a — make smoke can exercise it" || echo "INFO (host) $$a absent — make smoke will skip or fail on it"; \
-	  done
+	@docker image inspect $(SMOKE_IMAGE) >/dev/null 2>&1 \
+	  && ./scripts/dev.sh true >/dev/null 2>&1 \
+	  && docker run --rm --user "$$(id -u):$$(id -g)" -e HOME=/home/smoke $(SMOKE_IMAGE) sh -c \
+	     'for a in claude codex opencode pi; do command -v $$a >/dev/null 2>&1 \
+	        && echo "OK   (smoke image) $$a $$($$a --version 2>/dev/null | head -1)" \
+	        || echo "FAIL (smoke image) $$a MISSING"; done' \
+	  || echo "INFO $(SMOKE_IMAGE) absent — built on first `make smoke`"
+	@[ -n "$$ANTHROPIC_API_KEY" ] && echo "OK   ANTHROPIC_API_KEY set — smoke's clone block will run" \
+	  || echo "INFO ANTHROPIC_API_KEY unset — smoke's clone block will skip (the only check any key buys)"
 
 .PHONY: shell
 shell: ## Interactive shell inside the devtools container.
@@ -219,9 +228,24 @@ _fuzz:
 	go test -run '^$$' -fuzz FuzzValidName -fuzztime 30s ./internal/profile/
 	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime 30s ./internal/profile/
 
+# The agents run in their own image, not on your machine. That image is where the
+# four real binaries live, so this target needs none of them installed on the
+# host and never writes to your home — which is also what makes it runnable in
+# CI, where the release gate could not reach it before.
+#
+# The binary it drives is built for linux, into a path of its own: ./ap is built
+# for the HOST, and on macOS that binary cannot run in the container at all.
+SMOKE_IMAGE ?= agent-profile-smoke:latest
+SMOKE_ARCH  ?= $(shell uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/arm64/')
+
 .PHONY: smoke
-smoke: build ## Host-only — drive the four real agent binaries. Needs them installed and logged in.
-	./scripts/smoke.sh
+smoke: ## Drive the four real agent binaries inside their own container.
+	@$(MAKE) --no-print-directory build GOOS=linux GOARCH=$(SMOKE_ARCH) BIN=.gocache/smoke/ap
+	AP_SMOKE_IMAGE=$(SMOKE_IMAGE) ./scripts/smoke.sh
+
+.PHONY: smoke-image
+smoke-image: ## Rebuild the smoke image (the four agents, unpinned on purpose).
+	docker build --pull --no-cache -t $(SMOKE_IMAGE) -f Dockerfile.smoke .
 
 # Not wrapped by in_container: the script re-enters the container itself, having
 # first pointed HOME at a home it builds and throws away. Wrapping it would

@@ -37,8 +37,22 @@ jobs:
       - name: test
         run: make test
 
+  # The end-to-end gates, on the tag as well as on the branch. `make release`
+  # already refuses unless CI is green on HEAD, and CI runs these — but that
+  # check reads a run from before the tag existed, and this is the last chance to
+  # stop a publish. Both build their own home in a container and need no
+  # credential, so the only cost is the image pull.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: sandbox
+        run: make sandbox
+      - name: smoke
+        run: make smoke
+
   release:
-    needs: [verify, test-macos]
+    needs: [verify, test-macos, e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write # goreleaser creates the release and uploads archives

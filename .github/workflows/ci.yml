@@ -25,6 +25,27 @@ jobs:
       - name: cross-build release archives
         run: make snapshot
 
+  # The end-to-end gates, both containerised, both against a home they build and
+  # throw away. Neither needs a credential and neither touches anything of the
+  # runner's, which is why they can run here at all — `smoke` used to require the
+  # four agents installed and logged in on a developer's machine, so the release
+  # gate could never see it.
+  #
+  # ubuntu only: macOS runners have no docker. That leaves the registry's claims
+  # about the four agents checked on Linux alone, which is the same coverage a
+  # developer's machine gave before, from a machine nobody has to maintain.
+  #
+  # Not folded into `verify`: this pulls a second image and drives four real
+  # agents over the network, and `verify` is what a pre-push hook runs.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: sandbox (ap's own side, stub agents)
+        run: make sandbox
+      - name: smoke (the four real agents, in their own image)
+        run: make smoke
+
   # Native Go on both supported platforms. macOS runners have no docker, so this
   # job takes the AP_IN_DEVTOOLS escape hatch — which also keeps that path
   # exercised. The symlink and os.Root behaviour this program depends on is the
