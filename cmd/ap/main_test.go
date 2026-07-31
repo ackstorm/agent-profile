@@ -1366,3 +1366,115 @@ func TestListReportsAnUnreadableVariantWithoutAbandoningTheRest(t *testing.T) {
 		}
 	}
 }
+
+// --only-settings needs a source. Inventing an implicit `default` would make a
+// bare `ap create` start copying the real config.
+func TestCreateOnlySettingsRequiresFrom(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"create", "claude:nofrom", "--only-settings", "theme"})
+	if err == nil {
+		t.Fatal("--only-settings without --from was accepted")
+	}
+	if !strings.Contains(err.Error(), "--from") {
+		t.Errorf("error = %v, want it to name --from", err)
+	}
+	a, _ := agent.Lookup("claude")
+	if profile.Exists(a, "nofrom") {
+		t.Error("the profile was created before the flags were validated")
+	}
+}
+
+// The whole feature, end to end: the named keys arrive and the other five
+// CloneAllow entries do not. Asserted by their absence on disk.
+func TestCreateOnlySettingsSkipsEveryOtherCloneAllowEntry(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	real := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(filepath.Join(real, "skills", "s"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"theme":"dark-ansi","statusLine":{"type":"command","command":"bash /x.sh"},"permissions":{"allow":["Bash"]}}`
+	if err := os.WriteFile(filepath.Join(real, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "CLAUDE.md"), []byte("global"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "skills", "s", "SKILL.md"), []byte("skill"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dispatch([]string{"create", "claude:slim", "--from", "default",
+		"--only-settings", "statusLine", "--only-settings", "theme"}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	dir := profile.Dir(a, "slim")
+	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		t.Fatalf("settings.json was not written: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got["theme"] != "dark-ansi" || got["statusLine"] == nil {
+		t.Errorf("settings.json = %s, want exactly statusLine and theme", b)
+	}
+	for _, gone := range []string{"CLAUDE.md", "skills"} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+			t.Errorf("--only-settings carried %s, which is the opposite of a fresh profile", gone)
+		}
+	}
+}
+
+// A typo must not seed silence, and must not fail a create that otherwise
+// worked: the profile exists, the key that did resolve is there, and the one
+// that did not is a warning on stderr. Captured with stderrOf (already used
+// elsewhere in this file) rather than only checking the file — a test that
+// never looks at stderr would stay green even if `rc.warn` were deleted.
+func TestCreateOnlySettingsWarnsAboutAMissingKeyAndStillCreates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"theme":"dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := stderrOf(t, func() error {
+		return dispatch([]string{"create", "claude:typo", "--from", "default",
+			"--only-settings", "theme", "--only-settings", "statuLine"})
+	})
+	if err != nil {
+		t.Fatalf("a missing key failed the create: %v", err)
+	}
+	if !strings.Contains(stderr, "statuLine") || !strings.Contains(stderr, "settings.json") {
+		t.Errorf("stderr = %q, want it to name the missing key and the file it was looked for in", stderr)
+	}
+	a, _ := agent.Lookup("claude")
+	if !profile.Exists(a, "typo") {
+		t.Error("the profile was not created")
+	}
+	b, err := os.ReadFile(filepath.Join(profile.Dir(a, "typo"), "settings.json"))
+	if err != nil || !strings.Contains(string(b), "dark") {
+		t.Errorf("settings.json = %s (%v), want the key that did resolve", b, err)
+	}
+}
+
+// The flag repeats; it never splits on commas. One value, one key, the way the
+// rest of this CLI works.
+func TestOnlySettingsIsRepeatableNotCommaSeparated(t *testing.T) {
+	var got repeatedFlag
+	for _, v := range []string{"a", "b,c"} {
+		if err := got.Set(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Join(got, "|") != "a|b,c" {
+		t.Errorf("repeatedFlag = %q, want the values verbatim", got)
+	}
+}

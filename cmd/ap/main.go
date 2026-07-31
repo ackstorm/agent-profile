@@ -42,11 +42,13 @@ Commands:
 
 There is no active profile: every command names one explicitly.
 
-"ap create" takes --from <profile> to clone an existing profile, and
+"ap create" takes --from <profile> to clone an existing profile,
+--only-settings <key> (repeatable) to narrow that clone to a few keys of the
+agent's settings file instead of everything --from would normally carry, and
 --copy-instructions to seed it with your global instructions file. --from
 copies configuration only, never sessions or credentials, and "default" names
 the agent you already had, outside any profile. It has nothing to pass
-through, so both flags work on either side of the reference, and after it
+through, so every flag works on either side of the reference, and after it
 reads better because the agent is already stated: "ap create claude:review
 --from plan" clones claude:plan.
 
@@ -71,6 +73,8 @@ Examples:
   ap create claude:review --from plan
   ap create claude:review --from default    # from the agent you already had
   ap create claude:work --copy-instructions
+  ap create claude:new --from default \
+      --only-settings statusLine --only-settings theme
   ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
   ap run claude:review:opus         # those arguments, then yours
   ap run claude:plan plugin install caveman@caveman
@@ -171,6 +175,38 @@ func parseAroundRef(fs *flag.FlagSet, args []string, cmd string) (stop bool, ref
 		return true, "", fmt.Errorf("unexpected argument %q\nusage: ap %s", extra[0], cmd)
 	}
 	return false, ref, nil
+}
+
+// repeatedFlag collects a flag given more than once. --only-settings takes many
+// values where --from takes one, and repeating is what the rest of this CLI
+// does; splitting on commas would make a key holding a comma untypeable and
+// would be a second syntax to remember.
+type repeatedFlag []string
+
+func (r *repeatedFlag) String() string { return strings.Join(*r, " ") }
+
+func (r *repeatedFlag) Set(v string) error {
+	if v == "" {
+		return errors.New("empty key")
+	}
+	*r = append(*r, v)
+	return nil
+}
+
+// checkOnlySettings validates --only-settings before anything is created — the
+// same "fail before the profile exists" rule as --from and --copy-instructions.
+func checkOnlySettings(a agent.Agent, keys []string, from string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	if from == "" {
+		return errors.New("--only-settings needs --from: there is no source to take settings out of\n" +
+			"    `--from default` reads the agent's real config")
+	}
+	if a.Settings == "" {
+		return fmt.Errorf("--only-settings: no settings file is known for %s (see internal/agent)", a.Name)
+	}
+	return nil
 }
 
 // --- what a writing command reports -----------------------------------------
@@ -387,7 +423,10 @@ func cmdCreate(args []string) error {
 	fs := flagSet("create")
 	from := fs.String("from", "", "clone an existing profile of the same agent")
 	copyMD := fs.Bool("copy-instructions", false, "copy your global instructions file (CLAUDE.md, AGENTS.md) into the profile")
-	stop, r, err := parseAroundRef(fs, args, "create [--from <profile>] [--copy-instructions] <agent>:<profile>")
+	var only repeatedFlag
+	fs.Var(&only, "only-settings", "clone only this key of the source's settings file, and nothing else (repeatable; needs --from)")
+	stop, r, err := parseAroundRef(fs, args,
+		"create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>")
 	if stop {
 		return err
 	}
@@ -424,6 +463,9 @@ func cmdCreate(args []string) error {
 			return err
 		}
 	}
+	if err := checkOnlySettings(a, only, *from); err != nil {
+		return err
+	}
 
 	dir, err := profile.Create(a, name)
 	if err != nil {
@@ -432,16 +474,8 @@ func cmdCreate(args []string) error {
 	rc := &receipt{}
 	rc.add("dir", tilde(dir))
 
-	if srcDir != "" {
-		if err := profile.Clone(a, srcDir, dir); err != nil {
-			// Remove the half-populated directory so `ap create` can be retried.
-			// Safe here specifically because Link has not run yet, so the directory
-			// provably contains no symlinks; the same cleanup after Link would not
-			// be safe to reason about so cheaply.
-			profile.Discard(a, name)
-			return err
-		}
-		rc.add("cloned", fmt.Sprintf("%s:%s", a.Name, *from))
+	if err := cloneAndReport(a, srcDir, *from, only, name, dir, rc); err != nil {
+		return err
 	}
 
 	if err := linkAndReport(a, dir, rc); err != nil {
@@ -465,7 +499,9 @@ func cmdCreate(args []string) error {
 	// A clone arrives configured; a fresh profile arrives empty, and what to do
 	// about that is different for every agent. The old line here said
 	// "plugin install", which is claude's answer and wrong for the other three.
-	if srcDir == "" {
+	// A --only-settings profile arrives nearly empty too, so it gets the same
+	// next step a fresh one does.
+	if srcDir == "" || len(only) > 0 {
 		if hint := setupHint(a, name); hint != "" {
 			fmt.Printf("\nnext: %s\n", hint)
 		}
@@ -567,6 +603,46 @@ func cmdVariant(args []string) error {
 	// already a list of strings.
 	linkWrapper(ref, rc)
 	rc.print(fmt.Sprintf("created %q", ref))
+	return nil
+}
+
+// cloneAndReport runs whichever clone --from asked for and reports it. Split out
+// of cmdCreate for the same reason linkAndReport was: the complexity gate.
+//
+// A failed clone removes the half-populated directory so `ap create` can be
+// retried. Safe here specifically because Link has not run yet, so the directory
+// provably contains no symlinks.
+func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir string, rc *receipt) error {
+	if srcDir == "" {
+		return nil
+	}
+	if len(only) == 0 {
+		if err := profile.Clone(a, srcDir, dir); err != nil {
+			profile.Discard(a, name)
+			return err
+		}
+		rc.add("cloned", fmt.Sprintf("%s:%s", a.Name, from))
+		return nil
+	}
+	found, missing, err := profile.CloneSettings(a, srcDir, dir, only)
+	if err != nil {
+		profile.Discard(a, name)
+		return err
+	}
+	for _, k := range missing {
+		// Named, not counted. A typo must not seed silence — and the same
+		// message covers a key holding a literal dot, which is unreachable
+		// because paths split on ".".
+		rc.warn("--only-settings %s: no such key in %s\n"+
+			"    (paths split on \".\", so a key holding a literal dot cannot be named)", k, a.Settings)
+	}
+	if len(found) > 0 {
+		// "nothing else" is not decoration: --from default normally carries six
+		// entries, and a reader has to be able to tell at a glance that this run
+		// did not.
+		rc.add("cloned", fmt.Sprintf("%s: %s   (from %s; nothing else)",
+			a.Settings, strings.Join(found, " "), from))
+	}
 	return nil
 }
 
