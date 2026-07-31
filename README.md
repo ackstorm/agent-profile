@@ -31,6 +31,7 @@ inside an `exec` profile that never installed the tools it used.
 
 ```bash
 ap create claude:plan                               # new, empty profile
+ap run claude:plan plugin marketplace add owner/repo # a marketplace of its own
 ap run claude:plan plugin install caveman@caveman   # populate it
 ap run claude:plan                                  # work in it
 claude:plan                                         # same thing, typed directly
@@ -66,10 +67,22 @@ Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent
 
 ### Installing into a profile with something that is not the agent
 
-Plugins go in through the agent (`ap run claude:plan plugin install ...`), but
-skills and most third-party installers are separate tools. They find their
-target by reading the same variable `ap` sets, so `ap env` with a command is all
-they need:
+Plugins go in through the agent itself, marketplace first, and both steps are
+ordinary passthrough — `ap run` hands everything after the reference to the
+agent verbatim:
+
+```bash
+ap run claude:plan plugin marketplace add DietrichGebert/ponytail
+ap run claude:plan plugin install ponytail@ponytail
+```
+
+The marketplace is the profile's, not yours: its clone, the plugin cache and the
+`enabledPlugins` entry all land under `ap which claude:plan`, so the same
+marketplace can be absent from `claude:review` and from a bare `claude`.
+
+Skills and most third-party installers are separate tools, though. They find
+their target by reading the same variable `ap` sets, so `ap env` with a command
+is all they need:
 
 ```bash
 ap env claude:plan npx skills add vercel-labs/agent-skills \
