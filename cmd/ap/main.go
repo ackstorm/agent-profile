@@ -297,13 +297,17 @@ func vref(args []string, cmd string) (agent.Agent, string, string, error) {
 	return a, name, v, err
 }
 
-// refAllowDefault is ref but also accepts Default, for the read-only commands
-// that may resolve to the agent's real config directory: which, env, run.
-func refAllowDefault(args []string, cmd string) (agent.Agent, string, error) {
+// vrefAllowDefault is vref but also accepts Default, for the read-only commands
+// that may resolve to the agent's real config directory: which, env. The
+// variant is parsed and then ignored by both, on purpose: a variant has no
+// configuration of its own, and answering with anything but the parent's
+// directory would invent a second one that nothing writes to.
+func vrefAllowDefault(args []string, cmd string) (agent.Agent, string, string, error) {
 	if len(args) != 1 {
-		return agent.Agent{}, "", fmt.Errorf("usage: ap %s <agent>:<profile>", cmd)
+		return agent.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
 	}
-	return profile.ParseRefAllowDefault(args[0])
+	a, name, v, err := profile.ParseVariantRefAllowDefault(args[0])
+	return a, name, v, err
 }
 
 func cmdCreate(args []string) error {
@@ -634,7 +638,7 @@ func setupHint(a agent.Agent, name string) string {
 }
 
 func cmdWhich(args []string) error {
-	a, name, err := refAllowDefault(args, "which")
+	a, name, _, err := vrefAllowDefault(args, "which")
 	if err != nil {
 		return err
 	}
@@ -658,7 +662,11 @@ func cmdEnv(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: ap env <agent>:<profile> [command [args...]]")
 	}
-	a, name, err := profile.ParseRefAllowDefault(args[0])
+	// The variant is parsed and then dropped, both for the printing form and for
+	// the exec'ing one. `ap env <ref> <command...>` runs something that is NOT
+	// the agent — an installer, `npx skills add` — and a variant's arguments are
+	// the agent's flags. runArgs is deliberately not called here.
+	a, name, _, err := profile.ParseVariantRefAllowDefault(args[0])
 	if err != nil {
 		return err
 	}
@@ -687,19 +695,49 @@ func cmdEnv(args []string) error {
 
 func cmdRun(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: ap run <agent>:<profile> [args...]")
+		return fmt.Errorf("usage: ap run <agent>:<profile>[:<variant>] [args...]")
 	}
 	// No flag parsing at all: everything after the reference belongs to the agent,
 	// verbatim. See the flag-order note in usage.
-	a, name, err := profile.ParseRefAllowDefault(args[0])
+	a, name, v, err := profile.ParseVariantRefAllowDefault(args[0])
 	if err != nil {
 		return err
 	}
+	// prepare first, so a variant of a profile that is not there reports the
+	// missing profile and how to create it, rather than a missing variant of
+	// nothing. A dangling variant needs no guard of its own beyond that.
 	dir, err := prepare(a, name)
 	if err != nil {
 		return err
 	}
-	return run.Exec(a, dir, args[1:])
+	argv, err := runArgs(a, name, v, args[1:])
+	if err != nil {
+		return err
+	}
+	return run.Exec(a, dir, argv)
+}
+
+// runArgs composes what the agent receives: the variant's arguments, then the
+// caller's. One rule, no special cases — later wins in every CLI here, so a
+// caller can override a baked default for one invocation without editing
+// anything, and ap still parses none of it.
+//
+// A baked positional prompt makes the variant terminal: claude's grammar has
+// exactly one trailing positional, so a variant ending in "/code-review"
+// composes with flags but not with a second prompt. That is deliberate.
+// Inserting the caller's arguments *before* a trailing positional would work
+// only because of agent-specific knowledge about four external CLIs that would
+// need re-verifying on every release. `ap variant`'s receipt says so at the
+// moment the variant is created instead.
+func runArgs(a agent.Agent, name, v string, caller []string) ([]string, error) {
+	if v == "" {
+		return caller, nil
+	}
+	baked, err := profile.VariantArgs(a, name, v)
+	if err != nil {
+		return nil, err
+	}
+	return append(baked, caller...), nil
 }
 
 // prepare is everything that happens between naming a profile and exec'ing into

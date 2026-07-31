@@ -967,3 +967,128 @@ func TestLinkRendersTheSameWrapperBytesAsBefore(t *testing.T) {
 		t.Errorf("wrapper = %q, want %q", b, want)
 	}
 }
+
+// --- run composition ---------------------------------------------------------
+
+// One rule, no special cases: the variant's arguments, then the caller's. Later
+// wins in every CLI here, so a caller can override a baked default for one
+// invocation without editing anything.
+//
+// Tested as a function, not through a pipe: run.Exec replaces the process, and
+// testing the function catches the regression that testing the exec would.
+func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if _, err := profile.Create(a, "review"); err != nil {
+		t.Fatal(err)
+	}
+	baked := []string{"--dangerously-skip-permissions", "--model=claude-opus-5[1m]"}
+	if err := profile.WriteVariant(a, "review", "opus", baked); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := runArgs(a, "review", "opus", []string{"--model=haiku", "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--dangerously-skip-permissions", "--model=claude-opus-5[1m]", "--model=haiku", "hello"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("runArgs = %q, want %q", got, want)
+	}
+
+	// No variant: the caller's arguments, untouched. This is every run that
+	// existed before this feature.
+	plain, err := runArgs(a, "review", "", []string{"--effort", "xhigh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(plain, "\x00") != strings.Join([]string{"--effort", "xhigh"}, "\x00") {
+		t.Errorf("runArgs with no variant = %q, want the caller's arguments unchanged", plain)
+	}
+}
+
+// A typo in the third segment must name the variants that do exist.
+func TestRunNamesTheVariantsThatExist(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:ci", "--", "-p"}); err != nil {
+		t.Fatal(err)
+	}
+	err := dispatch([]string{"run", "claude:review:opus"})
+	if err == nil {
+		t.Fatal("run of a missing variant = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "ci") {
+		t.Errorf("error %q does not name the variants that exist", err)
+	}
+}
+
+// A dangling variant needs no new guard: the existing profile lookup reports
+// the missing profile and how to create it, which is the more useful answer.
+func TestRunOnAVariantOfAMissingProfileReportsTheProfile(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"run", "claude:ghost:opus"})
+	if err == nil {
+		t.Fatal("run on a missing profile = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "ap create claude:ghost") {
+		t.Errorf("error %q does not tell the user how to fix it", err)
+	}
+}
+
+// Only `ap run` composes. `ap env <ref> <cmd...>` execs something that is not
+// the agent — an installer, npx skills add — and a variant's arguments are the
+// AGENT's flags. Handing `--dangerously-skip-permissions` to npx would at best
+// fail and at worst mean something else entirely.
+//
+// Asserted through the argument builder rather than the exec, which replaces
+// the process: cmdEnv must never call runArgs, and this is the shape of that.
+func TestEnvDoesNotComposeAVariantsArgumentsIntoTheCommand(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "--dangerously-skip-permissions"}); err != nil {
+		t.Fatal(err)
+	}
+	// A command that does not exist, so the error names what would have been
+	// exec'd and nothing is actually run.
+	err := dispatch([]string{"env", "claude:review:opus", "ap-no-such-binary"})
+	if err == nil {
+		t.Fatal("env with a missing command = nil error, want an error")
+	}
+	if strings.Contains(err.Error(), "dangerously") {
+		t.Errorf("env composed the variant's arguments into the command: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ap-no-such-binary") {
+		t.Errorf("error %q does not name the command that was to be run", err)
+	}
+}
+
+// A variant has no configuration of its own, so both of these answer for the
+// parent. Inventing a second directory that nothing writes to would be the
+// alternative, and it would be a lie.
+func TestWhichAndEnvOnAVariantAnswerForTheParent(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "-p"}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	dir := profile.Dir(a, "review")
+
+	if got := stdoutOf(t, func() error { return dispatch([]string{"which", "claude:review:opus"}) }); got != dir+"\n" {
+		t.Errorf("ap which on a variant = %q, want the parent's directory %q", got, dir+"\n")
+	}
+	want := a.ConfigEnv + "=" + dir + "\n"
+	if got := stdoutOf(t, func() error { return dispatch([]string{"env", "claude:review:opus"}) }); got != want {
+		t.Errorf("ap env on a variant = %q, want the parent's variable %q", got, want)
+	}
+}
