@@ -20,68 +20,65 @@ import (
 
 const usage = `ap - per-agent profile launcher
 
+Run claude, codex, opencode or pi under a named profile, so each one has its
+own settings, skills, agents and MCP servers. Your login and your session
+history stay shared with the agent you already had: a profile separates
+configuration, nothing else.
+
 Usage:
-  ap list [agent]                      list profiles
-  ap create [--from <profile>] [--copy-instructions] <agent>:<profile>
-                                       create a profile and a wrapper so it is
-                                       a command you can type, optionally
-                                       cloning one and seeding it with your
-                                       global instructions file
-  ap variant <agent>:<profile>:<variant> -- <args...>
-                                       name a set of launch arguments over an
-                                       existing profile — same configuration,
-                                       a different way to start it
-  ap which <agent>:<profile>[:<variant>]
-                                       print the profile directory — a variant
-                                       has none of its own, so it answers for
-                                       the parent
-  ap env <agent>:<profile>[:<variant>] [cmd...]
-                                       print the environment override, or set
-                                       it and run cmd — env(1), for tools that
-                                       write into the agent's config directory.
-                                       cmd never receives a variant's arguments
-  ap run <agent>:<profile>[:<variant>] [args...]
-                                       run the agent with that profile; a
-                                       variant's arguments come first, then
-                                       yours
-  ap delete [--yes] <agent>:<profile>[:<variant>]
-                                       delete a profile and its wrapper, asking
-                                       first unless --yes says not to; a
-                                       variant goes on its own, without asking
-  ap unlink <agent>:<profile>[:<variant>]
-                                       remove the wrapper, keep the profile
-  ap link <agent>:<profile>[:<variant>]
-                                       write it back (create already does this;
-                                       link is for profiles made before it did,
-                                       or after an unlink)
-  ap version                           print version, commit and build date
+  ap <command> <agent>:<profile>[:<variant>] [args...]
+
+Commands:
+  list      List profiles, or just one agent's
+  create    Create a profile and a wrapper you can type as a command
+  variant   Name a set of launch arguments over an existing profile
+  which     Print the profile directory
+  env       Print the environment override, or run a command under it
+  run       Run the agent with that profile
+  delete    Delete a profile and its wrapper, asking first
+  unlink    Remove the wrapper, keep the profile
+  link      Write the wrapper back
+  version   Print version, commit and build date
 
 There is no active profile: every command names one explicitly.
 
+"ap create" takes --from <profile> to clone an existing profile, and
+--copy-instructions to seed it with your global instructions file. --from
+copies configuration only, never sessions or credentials, and "default" names
+the agent you already had, outside any profile. It has nothing to pass
+through, so both flags work on either side of the reference, and after it
+reads better because the agent is already stated: "ap create claude:review
+--from plan" clones claude:plan.
+
 "ap run" parses no flags of its own. Everything after the reference goes to the
-agent verbatim, which is what lets you write "ap run claude:plan --effort xhigh"
+agent verbatim, which lets you write "ap run claude:plan --effort xhigh"
 without ap trying to interpret --effort. "ap env" with a command behaves the
 same way, for the same reason.
 
-"ap create" has nothing to pass through, so --from and --copy-instructions work
-on either side of the reference, and after it reads better because the agent is
-already stated: "ap create claude:review --from plan" clones claude:plan.
+A variant is a named set of launch arguments over a profile, so "ap variant
+claude:review:opus -- --effort xhigh" then "ap run claude:review:opus" runs
+those arguments first and yours after. It has no directory of its own: "ap
+which" and "ap env" answer for the parent, and "ap env" never passes a
+variant's arguments to the command it runs.
+
+"ap delete" asks before it removes a profile, and --yes is how a script
+answers. A variant is two lines of text, so it goes without asking. "ap link"
+writes a wrapper back; create already does this, so link is for profiles made
+before it did, or after an unlink.
 
 Examples:
   ap create claude:plan
   ap create claude:review --from plan
+  ap create claude:review --from default    # from the agent you already had
   ap create claude:work --copy-instructions
   ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
-  ap run claude:review:opus            # those arguments, then yours
+  ap run claude:review:opus         # those arguments, then yours
   ap run claude:plan plugin install caveman@caveman
   ap run claude:plan
   ap run claude:plan --effort xhigh
   ap run opencode:review --model anthropic/claude-sonnet-4-5
   ap env claude:plan npx skills add vercel-labs/agent-skills \
       --skill web-design-guidelines -g -a claude-code
-  claude:plan                          # the wrapper ap create wrote, once its
-                                       # directory (~/.local/bin by default)
-                                       # is on PATH
 `
 
 func main() {
