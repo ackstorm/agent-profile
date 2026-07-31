@@ -20,8 +20,8 @@ release command goes through `scripts/dev.sh`, which runs it inside the pinned
 `in_container` macro and delegate to a private `_name` half; add both when you
 add a gate, and never wrap a target that must touch the real home.
 
-Host-only targets, deliberately: `smoke` (drives the real agent binaries and
-asserts the user's session count survives), `install`, and the housekeeping ones.
+Host-only targets, deliberately: `install`, and the housekeeping ones. That list
+used to include `smoke`; it does not any more — see below.
 
 `AP_IN_DEVTOOLS=1` skips the container. It exists for CI's macOS runner, which
 has no docker. Do not reach for it to avoid a slow first image build.
@@ -29,6 +29,59 @@ has no docker. Do not reach for it to avoid a slow first image build.
 Do not add tool bootstrapping back into the Makefile — no `go install` into
 `./bin`. Tool versions belong in `Dockerfile.devtools`, pinned, so `make verify`
 means one thing everywhere.
+
+## Three images, and only one of them pins anything
+
+`Dockerfile.devtools` pins every tool, because `make verify` has to mean the same
+thing on every machine. `Dockerfile.smoke` installs the four agents from npm and
+pins **nothing**, on purpose: smoke exists to catch the day an agent changes what
+it does with the variable ap hands it, and a pinned agent freezes the very thing
+under observation. Do not "stabilise" it with versions.
+
+`make smoke` runs there now, not on the host. Two things follow:
+
+- Do not reintroduce a `command -v <agent>` guard as a reason to skip on the
+  host. The agents are in the image; if one is missing, that is a broken image
+  and a red run, not a skip.
+- The seeded home is load-bearing. Every "shared state survived" assertion is
+  vacuous against an empty one, and three checks were caught passing that way:
+  a `[user]` git section with no keys made the shim passthrough compare 0 against
+  0, and the credential and transcript assertions had nothing to lose. When you
+  add a check, seed what it needs to be able to fail.
+
+Both credentials in the seed are synthesised, from the **field names** of a real
+one and never a value. Neither needs to be accepted, because neither check is
+about acceptance: what is asserted is that the profile REACHED the file through
+ap's symlink. claude distinguishes the two cases itself — "Not logged in ·
+Please run /login" when it cannot get to the credential, "Failed to
+authenticate" when it read one and the token was rejected. Only the first is
+ap's business. With `ANTHROPIC_API_KEY` set claude does not open the credential
+at all, so that check skips rather than passing with the link severed.
+
+Two orderings there are load-bearing, and both were found by reverting a guard:
+
+- The symlink assertion runs **before** the agent does. Given a credential it
+  cannot refresh, claude replaces the file with a real one of its own — which is
+  the exact reason `Link` re-asserts the symlink on every run. Asserted
+  afterwards, it goes red because claude did its job, not because ap failed.
+- The authentication message goes to **stdout**, never to `--debug-file`. This
+  grepped the debug log for it and therefore could not fail; measured with the
+  link severed, it stayed green.
+
+codex's equivalent does work, and needs no key: `codex login status` reads
+`auth.json` and masks what it finds without validating it, so the seed
+synthesises one and the profile can still only report "logged in" by reaching
+that file through the link ap made. Whether the token would work is OpenAI's
+business, not ap's. It briefly used `printenv OPENAI_API_KEY | codex login
+--with-api-key`, which also works and is worth knowing — `--api-key` was removed
+upstream — but demanding a secret for something a literal could do is how a gate
+ends up unrunnable in CI.
+
+That check was also **vacuous for as long as it existed**, on the host too:
+`grep -qi "logged in"` matches "Not logged in". The mutation that found it —
+`Link` skipping codex's `Shared` entry, so the profile has no `auth.json` — left
+it green. The pattern is anchored now. When you write a check whose negative
+answer is the positive one with a word in front, anchor it.
 
 ## Three tests that must never be deleted or weakened
 
@@ -259,7 +312,8 @@ build failure instead of a silent toolchain download.
 ```bash
 make verify        # fmt-check, shellcheck, vet, lint, test (race + shuffle), vulncheck
 make secrets       # gitleaks over the full history
-make smoke         # host-only; needs the four agents installed and logged in
+make sandbox       # ap's own side, against a throwaway home, with stub agents
+make smoke         # the four real agents, in their own image
 ```
 
 `make doctor` is the fast preflight when something looks wrong with the
@@ -267,8 +321,15 @@ container itself rather than the code.
 
 `make fuzz` exercises the path validation, which is where the traversal bug was.
 
-`scripts/smoke.sh` touches the real home. It creates and deletes `apsmoke`
-profiles and asserts the user's session count is unchanged afterwards.
+`sandbox` and `smoke` overlap on purpose and answer different questions.
+`sandbox` uses stubs, so it is deterministic, needs no network and no
+credential, and can assert argv exactly; `smoke` drives the real binaries, so it
+is the only thing that can catch an upstream change. When both could cover an
+assertion, the sandbox is where it belongs — smoke's version of the variant
+check is now the weaker of the two and says so.
+
+Neither touches the real home any more. Both build their own, seeded, inside a
+container, and throw it away.
 
 ## Releasing
 

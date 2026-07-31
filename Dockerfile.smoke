@@ -1,0 +1,47 @@
+# The smoke image: the four real agents, and nothing of yours.
+#
+# scripts/smoke.sh drives the actual binaries to check that internal/agent's
+# claims about them still hold. That used to require them installed and logged
+# in on the host, which meant the release gate ran on exactly one machine and
+# touched the real home to do it. This image is where they live instead.
+#
+# Deliberately NOT pinned. Every other tool version in this repo is (see
+# Dockerfile.devtools, and the reasoning in CLAUDE.md), and this is the one
+# place where the opposite is right: smoke exists to catch the day an agent
+# changes what it does with the variable ap hands it. A pinned agent cannot
+# report that — it would freeze the very thing under observation, and the
+# registry would drift silently until someone upgraded by hand.
+#
+# Build it with `make smoke-image`; `make smoke` builds it on first use.
+FROM node:24-bookworm-slim
+
+# git: `claude plugin marketplace add` clones one.
+# ca-certificates: every agent talks HTTPS.
+# procps/less: opencode and codex shell out to them.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates procps less \
+    && rm -rf /var/lib/apt/lists/*
+
+# --prefix is not the default one: node:24's global prefix is /usr/local, which
+# is root-owned, and the container runs as the host's UID so files it writes
+# belong to you rather than to root. The agents themselves only need to be
+# readable, so they are installed at build time as root and put on PATH here.
+RUN npm install -g --no-fund --no-audit \
+    @anthropic-ai/claude-code \
+    @openai/codex \
+    @earendil-works/pi-coding-agent \
+    opencode-ai
+
+# A home for the run to write into. The entrypoint reassigns HOME to a fresh
+# directory under it, so nothing survives between runs and nothing is shared
+# with the host: the whole point is that this is not your machine.
+RUN mkdir -p /home/smoke && chmod 0777 /home/smoke
+ENV HOME=/home/smoke
+
+# npm's cache and the agents' own scratch space, for a container running as a
+# UID that has no passwd entry. Without these, npm and claude both fall back to
+# a home they cannot write.
+ENV NPM_CONFIG_CACHE=/home/smoke/.npm \
+    XDG_RUNTIME_DIR=/home/smoke/.run
+
+WORKDIR /workspace
