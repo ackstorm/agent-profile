@@ -55,12 +55,26 @@ func Clone(a agent.Agent, src, dst string) error {
 	}
 	defer func() { _ = root.Close() }()
 
-	// Never cloned, regardless of what CloneAllow says: the credential, a
-	// profile's own session history, and the config shim. Not exploitable by
-	// the current registry — TestCloneAllowNeverNamesASharedPath already keeps
-	// a Shared path itself out of CloneAllow — but this backstop does not
-	// depend on that discipline holding for every future edit, the same
-	// reason Delete re-checks Default independently of ParseRef.
+	skip := skipPaths(a)
+
+	for _, rel := range a.CloneAllow {
+		if err := cloneEntry(root, src, rel, skip); err != nil {
+			return fmt.Errorf("cloning %s: %w", rel, err)
+		}
+	}
+	return nil
+}
+
+// skipPaths is what is never cloned, regardless of what CloneAllow says: the
+// credential, a profile's own session history, and the config shim. Not
+// exploitable by the current registry — TestCloneAllowNeverNamesASharedPath
+// already keeps a Shared path itself out of CloneAllow — but this backstop does
+// not depend on that discipline holding for every future edit, the same reason
+// Delete re-checks Default independently of ParseRef.
+//
+// A function rather than eight lines inside Clone because CloneSettings applies
+// the same backstop, and two copies of this would eventually disagree.
+func skipPaths(a agent.Agent) []string {
 	skip := make([]string, 0, len(a.Shared)+len(a.State)+1)
 	for _, s := range a.Shared {
 		skip = append(skip, filepath.Clean(s.Rel))
@@ -71,13 +85,7 @@ func Clone(a agent.Agent, src, dst string) error {
 	if a.Shim != nil {
 		skip = append(skip, filepath.Clean(a.Shim.Rel))
 	}
-
-	for _, rel := range a.CloneAllow {
-		if err := cloneEntry(root, src, rel, skip); err != nil {
-			return fmt.Errorf("cloning %s: %w", rel, err)
-		}
-	}
-	return nil
+	return skip
 }
 
 // cloneEntry copies one CloneAllow entry — a file or a whole directory — from
