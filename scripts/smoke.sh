@@ -165,7 +165,7 @@ fi
 
 # --- default: <agent>:default is the real config dir, undeletable, and
 #     --from default clones configuration only, none of the runtime ----------
-for ag in $("$AP" agents | awk '{print $1}'); do
+for ag in $("$AP" list | cut -d: -f1); do
   command -v "$ag" >/dev/null 2>&1 || { skip "$ag"; continue; }
   # marker is one file CloneAllow actually names for this agent, checked only
   # when present in the real config - proof that --from default clones
@@ -439,7 +439,7 @@ fi
 # directories are never redirected, which is what keeps sessions shared.
 # internal/run.TestEnvOnlySetsPathsInsideTheProfile is the unit-level version.
 leak=0
-for ag in $("$AP" agents | awk '{print $1}'); do
+for ag in $("$AP" list | cut -d: -f1); do
   d=$("$AP" which "$ag:apsmoke" 2>/dev/null) || continue
   while IFS='=' read -r k v; do
     [ -n "$k" ] || continue

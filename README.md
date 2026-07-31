@@ -52,8 +52,7 @@ exactly that reason — see "`default`" below.
 
 | Command | What it does |
 |---|---|
-| `ap agents` | supported agents, their variable and their mode |
-| `ap list [agent]` | your profiles — always includes `default` |
+| `ap list [agent]` | your profiles — always includes `default`, and every supported agent |
 | `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
 | `ap which <agent>:<profile>` | the profile directory, for editing by hand |
 | `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
@@ -308,11 +307,11 @@ exactly what the config shim exists to avoid doing to every other program in the
 process tree (see above). So opencode gets auth and account sharing **for free**,
 with no code for it, but its *sessions* stay global across profiles too, which
 the one-credential rule would rather they were not. Known, not worth a second
-shim. `ap agents` carries the short form in its `Note` column.
+shim.
 
 A direct consequence: **a new profile starts completely empty**, and populating
 it is real work, different per agent. `ap create` prints the next step for a
-fresh (non-cloned) profile — `ap agents` shows the exact command for each.
+fresh (non-cloned) profile, which is different for each of the four.
 
 **`--copy-instructions`** seeds a fresh profile with your global instructions
 file (`CLAUDE.md` for claude — the only agent with a verified one today; the flag

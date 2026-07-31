@@ -21,7 +21,6 @@ import (
 const usage = `ap - per-agent profile launcher
 
 Usage:
-  ap agents                            list supported agents
   ap list [agent]                      list profiles
   ap create [--from <profile>] [--copy-instructions] <agent>:<profile>
                                        create a profile and a wrapper so it is
@@ -80,8 +79,6 @@ func dispatch(args []string) error {
 		return nil
 	}
 	switch args[0] {
-	case "agents":
-		return cmdAgents(args[1:])
 	case "list", "ls":
 		return cmdList(args[1:])
 	case "create":
@@ -251,21 +248,6 @@ func cmdVersion(args []string) error {
 	}
 	fmt.Printf("ap %s (commit %s, built %s, %s/%s, %s)\n",
 		version, commit, date, runtime.GOOS, runtime.GOARCH, runtime.Version())
-	return nil
-}
-
-func cmdAgents(args []string) error {
-	if len(args) != 0 {
-		return fmt.Errorf("usage: ap agents")
-	}
-	for _, name := range agent.Names() {
-		a, _ := agent.Lookup(name)
-		fmt.Printf("%-9s %-22s %-8s", a.Name, a.ConfigEnv, a.Mode)
-		if a.Note != "" {
-			fmt.Printf("  %s", a.Note)
-		}
-		fmt.Println()
-	}
 	return nil
 }
 

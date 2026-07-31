@@ -55,7 +55,6 @@ func TestDispatchRejectsBadReferences(t *testing.T) {
 		{"delete", "claude:.."},
 		{"create"},
 		{"which", "claude:a", "claude:b"},
-		{"agents", "extra"},
 		{"list", "claude", "codex"},
 		{"list", "notanagent"},
 	} {

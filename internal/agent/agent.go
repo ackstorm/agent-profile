@@ -193,8 +193,6 @@ type Agent struct {
 	CloneAllow []string
 	// Shim is non-nil only for an agent whose isolation needs a shared variable.
 	Shim *Shim
-	// Note is shown by `ap agents`, explaining any caveat.
-	Note string
 }
 
 func home() string {
@@ -352,7 +350,6 @@ func registry() map[string]Agent {
 			// State is nil for the same reason: its sessions are outside the profile
 			// entirely, so a clone cannot carry them.
 			Setup: "ap run %s providers   (a custom provider means editing opencode.json inside the profile)",
-			Note:  "isolated through a config shim; sessions stay global - see the README",
 		},
 	}
 }
