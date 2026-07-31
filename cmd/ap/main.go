@@ -27,6 +27,10 @@ Usage:
                                        a command you can type, optionally
                                        cloning one and seeding it with your
                                        global instructions file
+  ap variant <agent>:<profile>:<variant> -- <args...>
+                                       name a set of launch arguments over an
+                                       existing profile — same configuration,
+                                       a different way to start it
   ap which <agent>:<profile>           print the profile directory
   ap env <agent>:<profile> [cmd...]    print the environment override, or set
                                        it and run cmd — env(1), for tools that
@@ -55,6 +59,8 @@ Examples:
   ap create claude:plan
   ap create claude:review --from plan
   ap create claude:work --copy-instructions
+  ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
+  ap run claude:review:opus            # those arguments, then yours
   ap run claude:plan plugin install caveman@caveman
   ap run claude:plan
   ap run claude:plan --effort xhigh
@@ -83,6 +89,8 @@ func dispatch(args []string) error {
 		return cmdList(args[1:])
 	case "create":
 		return cmdCreate(args[1:])
+	case "variant":
+		return cmdVariant(args[1:])
 	case "which":
 		return cmdWhich(args[1:])
 	case "env":
@@ -278,13 +286,15 @@ func cmdList(args []string) error {
 	return nil
 }
 
-// ref parses the single positional argument shared by the writing commands
-// (create, delete). ParseRef rejects Default.
-func ref(args []string, cmd string) (agent.Agent, string, error) {
+// vref parses the single positional argument shared by the writing commands
+// that accept a variant (delete, link, unlink). ParseVariantRef rejects
+// Default. The variant is "" for a two-segment reference.
+func vref(args []string, cmd string) (agent.Agent, string, string, error) {
 	if len(args) != 1 {
-		return agent.Agent{}, "", fmt.Errorf("usage: ap %s <agent>:<profile>", cmd)
+		return agent.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
 	}
-	return profile.ParseRef(args[0])
+	a, name, v, err := profile.ParseVariantRef(args[0])
+	return a, name, v, err
 }
 
 // refAllowDefault is ref but also accepts Default, for the read-only commands
@@ -399,20 +409,88 @@ func seedAndLink(a agent.Agent, name, dir string, rc *receipt) {
 	} else if len(keys) > 0 {
 		rc.add("seeded", fmt.Sprintf("%q", keys))
 	}
-	p, err := writeWrapper(a, name)
+	linkWrapper(a.Name+":"+name, rc)
+}
+
+// linkWrapper writes ref's wrapper and reports it, or says why not.
+//
+// Never an error, for the reason above, and shared by `ap create` and `ap
+// variant` so the PATH warning cannot come with one and not the other — the
+// warning is not a question the variant design left open, it is a consequence
+// of reusing this helper.
+func linkWrapper(ref string, rc *receipt) {
+	p, err := writeWrapper(ref)
 	if err != nil {
 		rc.warn("not linked: %v", err)
 		return
 	}
-	rc.add("command", a.Name+":"+name)
+	rc.add("command", ref)
 	// Only the people it applies to. Told to everyone, this line was noise; told
 	// to nobody, a wrapper that silently does not run is the confusing case
 	// linking was supposed to remove.
 	if d := filepath.Dir(p); !onPath(d) {
-		rc.warn("%s is not on your PATH, so typing `%s:%s` will not work\n"+
-			"    add it to PATH, or use: ap run %s:%s",
-			tilde(d), a.Name, name, a.Name, name)
+		rc.warn("%s is not on your PATH, so typing `%s` will not work\n"+
+			"    add it to PATH, or use: ap run %s", tilde(d), ref, ref)
 	}
+}
+
+// cmdVariant records a set of launch arguments over an existing profile.
+//
+// A noun where every other writing verb is a verb, deliberately: `ap create`
+// makes profiles, and overloading it so the same word sometimes builds forty
+// megabytes and sometimes writes two lines is worse than one noun.
+//
+// No flag parsing at all, and `--` is required: everything after it is the
+// payload, and a flag package would eat it. Requiring the separator is also
+// what makes an empty payload impossible to type by accident — `ap variant
+// <ref> --` with nothing after it would create a name that behaves identically
+// to its parent.
+func cmdVariant(args []string) error {
+	const use = "usage: ap variant <agent>:<profile>:<variant> -- <args...>"
+	if len(args) < 3 || args[1] != "--" {
+		return errors.New(use)
+	}
+	a, name, v, err := profile.ParseVariantRef(args[0])
+	if err != nil {
+		return err
+	}
+	if v == "" {
+		return fmt.Errorf("%s:%s names no variant\n%s", a.Name, name, use)
+	}
+	// Never creates the parent implicitly: a profile is the expensive half, and
+	// this command writes two lines.
+	if !profile.Exists(a, name) {
+		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
+			a.Name, name, a.Name, name)
+	}
+	payload := args[2:]
+	if err := profile.WriteVariant(a, name, v, payload); err != nil {
+		return err
+	}
+
+	ref := a.Name + ":" + name + ":" + v
+	rc := &receipt{}
+	rc.add("profile", tilde(profile.Dir(a, name)))
+	rc.add("args", strings.Join(payload, " "))
+	// The composed line, unconditionally.
+	//
+	// A variant whose last argument is a positional prompt is terminal: claude's
+	// grammar is `claude [options] [command] [prompt]`, one trailing positional,
+	// so a second one is rejected by the agent. Printing what a run will
+	// actually look like is how that becomes visible at the moment the variant
+	// is created rather than the first time it fails.
+	//
+	// Detecting it instead would be a guess about someone else's argv grammar —
+	// `--model opus` also ends in a non-flag word — and this repository
+	// distrusts those by policy.
+	rc.add("runs", strings.Join(append([]string{a.Bin}, payload...), " ")+" [your args...]")
+	// Also printing --dangerously-skip-permissions where anyone creating a
+	// variant will read it. A command whose name silently disables every
+	// permission prompt is a real hazard, and this costs nothing: the store is
+	// already a list of strings.
+	linkWrapper(ref, rc)
+	rc.print(fmt.Sprintf("created %q", ref))
+	return nil
 }
 
 // linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
@@ -758,18 +836,18 @@ func linkDir() (string, error) {
 }
 
 func cmdLink(args []string) error {
-	a, name, err := ref(args, "link")
+	a, name, v, err := vref(args, "link")
 	if err != nil {
 		return err
 	}
 	// Belt as well as braces, the same reason Delete re-checks Default
-	// independently of ParseRef: ref already routes through ParseRef, which
-	// refuses Default for every writing command, so there is no path through
-	// dispatch that reaches this branch today - TestLinkRefusesDefaultViaParseRef
-	// pins the ParseRef rejection, which is what actually fires. Kept anyway,
-	// so a future change to ref or to link's own routing does not silently
-	// start writing a wrapper for "nothing" (ap run codex:default is already
-	// the real config).
+	// independently of ParseRef: vref already routes through ParseVariantRef,
+	// which refuses Default for every writing command, so there is no path
+	// through dispatch that reaches this branch today -
+	// TestLinkRefusesDefaultViaParseRef pins the ParseRef rejection, which is
+	// what actually fires. Kept anyway, so a future change to vref or to link's
+	// own routing does not silently start writing a wrapper for "nothing" (ap
+	// run codex:default is already the real config).
 	if name == profile.Default {
 		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, profile.Default)
 	}
@@ -777,19 +855,32 @@ func cmdLink(args []string) error {
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}
-	p, err := writeWrapper(a, name)
+	ref := a.Name + ":" + name
+	if v != "" {
+		// A name is invocable only if `ap run` can resolve it. link links names
+		// that already exist; it never invents one.
+		if _, err := profile.VariantArgs(a, name, v); err != nil {
+			return err
+		}
+		ref += ":" + v
+	}
+	p, err := writeWrapper(ref)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("linked %s -> %s:%s\n", p, a.Name, name)
+	fmt.Printf("linked %s -> %s\n", p, ref)
 	return nil
 }
 
-// writeWrapper writes the wrapper for a:name into linkDir and returns its path.
-// Shared by `ap link` and by `ap create`, which links every profile it creates —
-// the two must agree about the marker and about refusing a foreign file, so
-// there is one implementation and not two.
-func writeWrapper(a agent.Agent, name string) (string, error) {
+// writeWrapper writes the wrapper for ref into linkDir and returns its path.
+// ref is the whole reference — "claude:plan" or "claude:review:opus" — because
+// a variant's wrapper is named for all three segments and this function never
+// needed anything else from the agent.
+//
+// Shared by `ap link`, by `ap create` and by `ap variant`: the three must agree
+// about the marker and about refusing a foreign file, so there is one
+// implementation and not three.
+func writeWrapper(ref string) (string, error) {
 	dir, err := linkDir()
 	if err != nil {
 		return "", err
@@ -799,28 +890,28 @@ func writeWrapper(a agent.Agent, name string) (string, error) {
 	}
 	// Through an os.Root confined to dir, same as everything else that writes
 	// into a directory named partly by user input — see internal/profile.Link
-	// and copyInstructions above. refStr can never itself contain a path
-	// separator (ValidName already guarantees that), but the confinement is
-	// what makes that a property of the code rather than of the caller.
+	// and copyInstructions above. ref can never itself contain a path
+	// separator (ValidName already guarantees that for every segment), but the
+	// confinement is what makes that a property of the code rather than of the
+	// caller.
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = root.Close() }()
 
-	refStr := a.Name + ":" + name
-	p := filepath.Join(dir, refStr)
+	p := filepath.Join(dir, ref)
 	// Overwriting something ap did not write would be a good way to lose a
 	// real binary — refuse unless the file is either absent or already one of
 	// ours.
-	if b, err := root.ReadFile(refStr); err == nil {
+	if b, err := root.ReadFile(ref); err == nil {
 		if !strings.HasPrefix(string(b), wrapperHeader) {
 			return "", fmt.Errorf("refusing to overwrite %s: it was not written by ap", p)
 		}
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	if err := root.WriteFile(refStr, []byte(wrapperScript(refStr)), 0o755); err != nil {
+	if err := root.WriteFile(ref, []byte(wrapperScript(ref)), 0o755); err != nil {
 		return "", err
 	}
 	return p, nil
@@ -848,19 +939,23 @@ func confirm(dir string) error {
 }
 
 func cmdUnlink(args []string) error {
-	a, name, err := ref(args, "unlink")
+	a, name, v, err := vref(args, "unlink")
 	if err != nil {
 		return err
 	}
-	p, err := removeWrapperIfOurs(a.Name + ":" + name)
+	ref := a.Name + ":" + name
+	if v != "" {
+		ref += ":" + v
+	}
+	p, err := removeWrapperIfOurs(ref)
 	if err != nil {
 		return err
 	}
 	if p == "" {
-		fmt.Printf("%s:%s was not linked\n", a.Name, name)
+		fmt.Printf("%s was not linked\n", ref)
 		return nil
 	}
-	fmt.Printf("unlinked %s — the profile is untouched; ap run %s:%s still works\n", tilde(p), a.Name, name)
+	fmt.Printf("unlinked %s — nothing else is touched; ap run %s still works\n", tilde(p), ref)
 	return nil
 }
 

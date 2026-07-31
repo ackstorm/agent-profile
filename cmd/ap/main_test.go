@@ -757,3 +757,213 @@ func TestOnPathMatchesEntriesExactly(t *testing.T) {
 		}
 	}
 }
+
+// --- ap variant --------------------------------------------------------------
+
+// The store, and a wrapper that execs the three-segment reference. Both, from
+// one command: a name you cannot type is a name you do not use, and a wrapper
+// whose arguments ap run cannot resolve is the hidden state this design exists
+// to avoid.
+func TestVariantWritesTheStoreAndTheWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--dangerously-skip-permissions", "--model=claude-opus-5[1m]", "--effort=xhigh"}
+	if err := dispatch(append([]string{"variant", "claude:review:opus", "--"}, args...)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	got, err := profile.VariantArgs(a, "review", "opus")
+	if err != nil {
+		t.Fatalf("the store has no entry: %v", err)
+	}
+	if strings.Join(got, "\x00") != strings.Join(args, "\x00") {
+		t.Errorf("stored %q, want %q", got, args)
+	}
+	b, err := os.ReadFile(filepath.Join(bin, "claude:review:opus"))
+	if err != nil {
+		t.Fatalf("variant left no wrapper: %v", err)
+	}
+	if !strings.Contains(string(b), "exec ap run claude:review:opus") {
+		t.Errorf("wrapper does not exec the variant: %q", b)
+	}
+	// The arguments live in the store, never in the wrapper. If they leak in
+	// here, `ap run claude:review:opus` and typing the name diverge — and the
+	// source of truth starts depending on the artefact derived from it.
+	if strings.Contains(string(b), "--effort=xhigh") {
+		t.Errorf("the wrapper carries the payload; the store is the only source of truth: %q", b)
+	}
+}
+
+// Never creates the parent implicitly: forty megabytes and a background
+// reconciliation is not something a two-line command should trigger by typo.
+func TestVariantRefusesAMissingParent(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"variant", "claude:nope:v", "--", "-p"})
+	if err == nil {
+		t.Fatal("a variant over a missing profile = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "claude:nope") {
+		t.Errorf("error %q does not name the missing parent", err)
+	}
+	a, _ := agent.Lookup("claude")
+	if profile.Exists(a, "nope") {
+		t.Error("the parent profile was created implicitly")
+	}
+}
+
+func TestVariantRejectsBadInvocations(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"variant"},
+		{"variant", "claude:review:opus"},               // no separator, no payload
+		{"variant", "claude:review:opus", "--"},         // empty payload: same as the parent
+		{"variant", "claude:review:opus", "-p"},         // missing the -- separator
+		{"variant", "claude:review", "--", "-p"},        // two segments: no variant named
+		{"variant", "claude:review:opus:x", "--", "-p"}, // four segments
+		{"variant", "claude:default:opus", "--", "-p"},
+		{"variant", "claude:review:default", "--", "-p"},
+	} {
+		if err := dispatch(args); err == nil {
+			t.Errorf("dispatch(%q) = nil error, want error", args)
+		}
+	}
+}
+
+// Everything after the first -- is payload, literally — including flags ap
+// itself owns. `--from` belongs to `ap create`, which parses it on either side
+// of its reference with parseAroundRef; if `ap variant` ever reuses that helper
+// this stores nothing, or stores the wrong thing, and the failure is silent.
+func TestVariantStoresFlagsApItselfOwns(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	payload := []string{"--from", "default", "--yes", "-p"}
+	if err := dispatch(append([]string{"variant", "claude:review:literal", "--"}, payload...)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	got, err := profile.VariantArgs(a, "review", "literal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, "\x00") != strings.Join(payload, "\x00") {
+		t.Errorf("stored %q, want %q — ap parsed a payload that belongs to the agent", got, payload)
+	}
+	// And nothing was cloned: --from was payload, not an instruction.
+	if profile.Exists(a, "literal") {
+		t.Error("ap acted on --from inside the payload")
+	}
+}
+
+// The separator is required, and the error has to name it: without it the
+// command looks like it takes a bare list, and the first thing a user tries is
+// `ap variant <ref> -p`.
+func TestVariantWithoutTheSeparatorNamesIt(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"variant", "claude:review:opus"},
+		{"variant", "claude:review:opus", "-p"},
+	} {
+		err := dispatch(args)
+		if err == nil {
+			t.Fatalf("dispatch(%q) = nil error, want error", args)
+		}
+		if !strings.Contains(err.Error(), "--") {
+			t.Errorf("error %q does not name the -- separator", err)
+		}
+	}
+}
+
+// Editing is delete-then-write, at the dispatch level too.
+func TestVariantRefusesAnExistingVariant(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "-p"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "--effort=xhigh"}); err == nil {
+		t.Error("a second ap variant silently replaced the first")
+	}
+}
+
+// `ap create` makes profiles and only profiles. Overloading it so the same word
+// sometimes builds forty megabytes and sometimes writes two lines is worse than
+// one noun.
+func TestCreateStillRefusesAThreeSegmentReference(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review:opus"}); err == nil {
+		t.Error("ap create accepted a three-segment reference")
+	}
+}
+
+// link and unlink handle a variant's wrapper with the same rules and the same
+// marker as any other, and link refuses a name ap run could not resolve.
+func TestLinkAndUnlinkAVariant(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"unlink", "claude:review:opus"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:opus")); !os.IsNotExist(err) {
+		t.Fatal("unlink left the variant wrapper behind")
+	}
+	if err := dispatch([]string{"link", "claude:review:opus"}); err != nil {
+		t.Fatalf("link of a variant = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:opus")); err != nil {
+		t.Fatalf("link wrote no wrapper: %v", err)
+	}
+	// A name is invocable only if `ap run` can resolve it.
+	if err := dispatch([]string{"link", "claude:review:ghost"}); err == nil {
+		t.Error("link invented a name for a variant that does not exist")
+	}
+}
+
+// The wrapper's exact bytes are load-bearing across versions: every wrapper
+// already on disk is recognised as ours by that header. A refactor of
+// writeWrapper must not move a single byte of the two-segment case.
+func TestLinkRendersTheSameWrapperBytesAsBefore(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"link", "claude:plan"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(bin, "claude:plan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "#!/bin/sh\n# written by ap link. Safe to delete.\nexec ap run claude:plan \"$@\"\n"
+	if string(b) != want {
+		t.Errorf("wrapper = %q, want %q", b, want)
+	}
+}
