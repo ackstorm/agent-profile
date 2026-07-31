@@ -630,11 +630,17 @@ func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir
 		return err
 	}
 	for _, k := range missing {
-		// Named, not counted. A typo must not seed silence — and the same
-		// message covers a key holding a literal dot, which is unreachable
-		// because paths split on ".".
-		rc.warn("--only-settings %s: no such key in %s\n"+
-			"    (paths split on \".\", so a key holding a literal dot cannot be named)", k, a.Settings)
+		// Named, not counted. A typo must not seed silence.
+		if strings.Contains(k, ".") {
+			// A key holding a literal dot is unreachable because paths split
+			// on ".". Only said for a key that actually has one — a plain
+			// typo is not a dotted-path problem, and saying so would send
+			// someone looking in the wrong place.
+			rc.warn("--only-settings %s: no such key in %s\n"+
+				"    (paths split on \".\", so a key holding a literal dot cannot be named)", k, a.Settings)
+			continue
+		}
+		rc.warn("--only-settings %s: no such key in %s", k, a.Settings)
 	}
 	if len(found) > 0 {
 		// "nothing else" is not decoration: --from default normally carries six

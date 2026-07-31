@@ -155,6 +155,24 @@ func TestCloneSettingsNeverOverwritesAnExistingFile(t *testing.T) {
 	}
 }
 
+// A key given twice must not appear twice in the receipt, and a missing key
+// given twice must not warn twice for the one typo.
+func TestCloneSettingsDeduplicatesARepeatedKey(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writeTree(t, src, map[string]string{"settings.json": `{"theme":"dark"}`})
+
+	found, missing, err := CloneSettings(onlySettingsAgent(), src, dst, []string{"theme", "theme", "bogus", "bogus"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(found, " ") != "theme" {
+		t.Errorf("found = %q, want theme once", found)
+	}
+	if strings.Join(missing, " ") != "bogus" {
+		t.Errorf("missing = %q, want bogus once", missing)
+	}
+}
+
 // containment is Clone's guard against a destination that lives inside the
 // source. CloneSettings has no directory walk to run away with, but a
 // destination nested inside the source would still let the sliced file land

@@ -134,6 +134,19 @@ func TestSliceJSONRejectsAnUnreadableFile(t *testing.T) {
 	}
 }
 
+// An empty or whitespace-only source is tolerated the same way a missing one
+// is — every key reported missing, not a hard failure — because it is not
+// actually malformed, just not written yet. Genuinely broken JSON ("not json"
+// above) is still an error; this is specifically the "nothing here" case.
+func TestSliceJSONTakesAnEmptyOrWhitespaceFileAsNothingFound(t *testing.T) {
+	for _, src := range [][]byte{{}, []byte("   \n")} {
+		out, found, err := sliceSettings(agent.JSON, src, []string{"theme"})
+		if err != nil || out != nil || found != nil {
+			t.Errorf("sliceSettings(%q) = (%s, %q, %v), want (nil, nil, nil)", src, out, found, err)
+		}
+	}
+}
+
 const tomlFixture = `# codex config
 model = "gpt-5"
 approval_policy = "on-request"

@@ -28,7 +28,12 @@ import (
 // found is the keys that were present, in the order given; missing is the rest.
 // A missing key is the caller's warning to print, not an error: a typo must not
 // seed silence, and must not fail a create that otherwise worked.
+//
+// keys is deduplicated up front, keeping each key's first occurrence: a user
+// repeating --only-settings theme --only-settings theme must not see "theme"
+// twice in the receipt, and repeating a typo must not warn about it twice.
 func CloneSettings(a agent.Agent, src, dst string, keys []string) (found, missing []string, err error) {
+	keys = dedupeKeys(keys)
 	if a.Settings == "" {
 		return nil, nil, fmt.Errorf("no settings file is known for %s", a.Name)
 	}
@@ -97,4 +102,19 @@ func CloneSettings(a agent.Agent, src, dst string, keys []string) (found, missin
 		return nil, nil, err
 	}
 	return found, missing, f.Close()
+}
+
+// dedupeKeys drops repeats of a key, keeping the position of its first
+// occurrence — the order found/missing are documented to preserve.
+func dedupeKeys(keys []string) []string {
+	seen := make(map[string]bool, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	return out
 }

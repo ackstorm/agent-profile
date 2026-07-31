@@ -1465,6 +1465,43 @@ func TestCreateOnlySettingsWarnsAboutAMissingKeyAndStillCreates(t *testing.T) {
 	}
 }
 
+// The dotted-path caveat explains a real limit, but only when it is the
+// question actually being answered: a plain typo with no dot in it is not a
+// dotted-path problem, and telling someone it is would send them looking in
+// the wrong place.
+func TestCreateOnlySettingsOnlyMentionsDottedPathsWhenTheKeyHasADot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"theme":"dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := stderrOf(t, func() error {
+		return dispatch([]string{"create", "claude:typo2", "--from", "default",
+			"--only-settings", "statuLine", "--only-settings", "a.b.c"})
+	})
+	if err != nil {
+		t.Fatalf("a missing key failed the create: %v", err)
+	}
+	// Each warning is one line (possibly wrapped) starting with "ap: warning:".
+	// Splitting on that marker isolates the text that belongs to each key.
+	for _, w := range strings.Split(stderr, "ap: warning:")[1:] {
+		switch {
+		case strings.Contains(w, "statuLine: no such key"):
+			if strings.Contains(w, "split on") {
+				t.Errorf("statuLine has no dot, but got the dotted-path caveat: %q", w)
+			}
+		case strings.Contains(w, "a.b.c: no such key"):
+			if !strings.Contains(w, "split on") {
+				t.Errorf("a.b.c has a dot, want the dotted-path caveat: %q", w)
+			}
+		}
+	}
+}
+
 // The flag repeats; it never splits on commas. One value, one key, the way the
 // rest of this CLI works.
 func TestOnlySettingsIsRepeatableNotCommaSeparated(t *testing.T) {
