@@ -445,17 +445,23 @@ fi
 # it it opens an interactive session and the timeout kills it. Nothing else in
 # the suite proves the store is read at all - every Go test stops at the
 # []string.
+#
+# Its own profile, like every other block that needs one (apsmokeplug,
+# apsmokeclone, apsmokeseed, apsmokelink). claude:apsmoke is created once at the
+# top and read by the env loop and the delete block at the bottom, so a block
+# that ends by deleting it would take the fixture out from under both - and
+# `ap create` on it would fail first anyway, because it already exists.
 if command -v claude >/dev/null 2>&1; then
-  setup "$AP" delete --yes claude:apsmoke:apv
-  if setup "$AP" create claude:apsmoke && setup "$AP" variant claude:apsmoke:apv -- -p --model haiku; then
-    if timeout 180 "$AP" run claude:apsmoke:apv "reply with ok" >/dev/null 2>&1; then
+  setup "$AP" delete --yes claude:apsmokevar
+  if setup "$AP" create claude:apsmokevar && setup "$AP" variant claude:apsmokevar:apv -- -p --model haiku; then
+    if timeout 180 "$AP" run claude:apsmokevar:apv "reply with ok" >/dev/null 2>&1; then
       pass variant "stored arguments reached the agent"
     else
       bad variant "ap run <a>:<p>:<v> did not complete - are the stored args reaching claude?"
     fi
     # The cascade, end to end: deleting the profile takes the variant with it.
-    setup "$AP" delete --yes claude:apsmoke
-    if "$AP" list claude | grep -q "apsmoke:apv"; then
+    setup "$AP" delete --yes claude:apsmokevar
+    if "$AP" list claude | grep -q "apsmokevar:apv"; then
       bad variant "the variant outlived its profile"
     else
       pass variant "deleting the profile removed the variant"
