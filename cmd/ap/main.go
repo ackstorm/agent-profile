@@ -318,6 +318,7 @@ func cmdList(args []string) error {
 	}
 	// List always includes Default, so there is no "no profiles yet" case left
 	// to report: every agent has at least its real config to show.
+	var variants []string
 	for _, name := range names {
 		a, _ := agent.Lookup(name)
 		profiles, err := profile.List(a)
@@ -327,33 +328,64 @@ func cmdList(args []string) error {
 		// Padded to the longest agent name, so the profile columns line up and a
 		// four-agent listing can be read down instead of across.
 		//
-		// One line per agent, starting in column 0, and every variant line below
-		// it indented. That is not cosmetic: scripts/smoke.sh selects agent names
-		// with `for ag in $("$AP" list | ...)`, and an indented line reaching that
-		// loop becomes a bogus agent name that reds two blocks testing something
-		// else entirely. smoke.sh's agents() names this coupling from the other
-		// side, and TestListTopLevelStaysParseableByScriptsSmoke pins it.
-		fmt.Printf("%-10s %s\n", name+":", strings.Join(profiles, " "))
-		if err := listVariants(a, profiles); err != nil {
+		// One line per agent, starting in column 0, and every other line indented.
+		// That is not cosmetic: scripts/smoke.sh selects agent names with
+		// `for ag in $("$AP" list | ...)`, cutting each column-0 line at its first
+		// colon, and anything else starting in column 0 becomes a bogus agent name
+		// that reds two blocks testing something else entirely. The section header
+		// below would have yielded an agent called "Variants", and the footnote one
+		// called "* [default] is the agent's own config, outside any profile".
+		// smoke.sh's agents() names this coupling from the other side, and
+		// TestListTopLevelStaysParseableByScriptsSmoke pins it.
+		fmt.Printf("%-12s%s\n", name+":", strings.Join(marked(profiles), " | "))
+		vs, err := variantLines(a, profiles)
+		if err != nil {
 			return err
 		}
+		variants = append(variants, vs...)
 	}
+	// Every agent has a Default, so the footnote always has something to explain;
+	// the variants block only appears when there is one.
+	if len(variants) > 0 {
+		fmt.Printf("\n  Variants:\n%s\n", strings.Join(variants, "\n"))
+	}
+	fmt.Printf("\n  [%s] is the agent's own config, outside any profile: read-only.\n",
+		profile.Default)
 	return nil
 }
 
-// listVariants prints each profile's launch variants under its agent's line,
-// arguments included.
+// marked brackets Default. It is the one row in the listing ap did not create
+// and cannot remove — Dir resolves it to the agent's real config directory —
+// so printing it like a profile invites `ap delete claude:default`, which is
+// exactly the command profile.ValidName exists to refuse.
+func marked(profiles []string) []string {
+	out := make([]string, len(profiles))
+	for i, p := range profiles {
+		out[i] = p
+		if p == profile.Default {
+			out[i] = "[" + p + "]"
+		}
+	}
+	return out
+}
+
+// variantLines renders one variant as two lines: its full reference, then its
+// arguments indented under it.
 //
-// Indented, always — see the contract in cmdList above.
+// The reference is qualified, so the line is pasteable after `ap run` — which
+// the previous nested-under-the-agent format was not. The arguments are printed
+// unquoted: `--model=claude-opus-5[1m]` in zsh is `no matches found`, but
+// quoting them for display would reintroduce a shell-quoting function, and its
+// hostile-argument test, for a line nothing execs.
 //
-// Nothing on this line is pasteable, and that is the trade for nesting. The
-// name is printed as `<profile>:<variant>` because the agent is already on the
-// line above — repeating it on every row would undo the nesting this format
-// exists for — so the reference to type is that name with the agent prefixed.
-// The arguments are printed unquoted too: `--model=claude-opus-5[1m]` in zsh is
-// `no matches found`. Quoting them for display would reintroduce a
-// shell-quoting function, and its hostile-argument test, for a line nothing
-// execs.
+// Two lines rather than one because the arguments are the tail nobody aligns
+// on, and giving them a line of their own is what keeps them off the reference.
+// kubectl's help lets that tail overflow past 80 columns — `expose` reaches 117
+// — which costs nothing when it is prose. Here it is flags, and an 80-column
+// terminal breaks `--model=claude-sonnet-5[1m]` into `--model=claude-so` and
+// `nnet-5[1m]`, which reads as a broken flag rather than a wrapped sentence.
+// Six leading spaces leaves 74 columns, and a variant longer than that wraps
+// like kubectl's does, with no column left to fall out of alignment.
 //
 // The arguments are the point, not decoration. A command whose name silently
 // disables every permission prompt is a real hazard, and ap exists precisely so
@@ -362,13 +394,15 @@ func cmdList(args []string) error {
 // --dangerously-skip-permissions visible, with no special handling for that
 // flag in particular — and it costs nothing, because the store is already a
 // list of strings.
-func listVariants(a agent.Agent, profiles []string) error {
+func variantLines(a agent.Agent, profiles []string) ([]string, error) {
+	var out []string
 	for _, p := range profiles {
 		variants, err := profile.Variants(a, p)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, v := range variants {
+			out = append(out, "    "+a.Name+":"+p+":"+v)
 			// An entry that cannot be read is reported on its own line, not
 			// returned. Returning aborted the whole listing after it had already
 			// printed part of it — one unreadable file under claude and codex, pi
@@ -378,15 +412,13 @@ func listVariants(a agent.Agent, profiles []string) error {
 			// still reporting nothing wrong.
 			args, err := profile.VariantArgs(a, p, v)
 			if err != nil {
-				fmt.Printf("%-10s   %-13s (unreadable: %v)\n", "", p+":"+v, err)
+				out = append(out, fmt.Sprintf("      (unreadable: %v)", err))
 				continue
 			}
-			// Indented past the agent column, then a fixed column for the name, so
-			// the arguments line up between variants of different profiles.
-			fmt.Printf("%-10s   %-13s %s\n", "", p+":"+v, strings.Join(args, " "))
+			out = append(out, "      "+strings.Join(args, " "))
 		}
 	}
-	return nil
+	return out, nil
 }
 
 // vref parses the single positional argument taken by link and unlink.

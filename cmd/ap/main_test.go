@@ -1212,7 +1212,7 @@ func TestDeleteAProfileNamesItsVariantsInTheConfirmation(t *testing.T) {
 // remember what each one does. Printing the arguments is what stops that being
 // invisible, without inventing any special handling for that flag in
 // particular — and it is free, because the store is already a list of strings.
-func TestListShowsVariantsNestedUnderTheirProfileWithTheirArguments(t *testing.T) {
+func TestListShowsEachVariantAsAPasteableReferenceWithItsArguments(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	for _, args := range [][]string{
@@ -1227,23 +1227,81 @@ func TestListShowsVariantsNestedUnderTheirProfileWithTheirArguments(t *testing.T
 	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
 	for _, want := range []string{
 		"review",
-		"review:opus",
+		"claude:review:opus",
 		"--dangerously-skip-permissions --effort=xhigh",
-		"review:ci",
+		"claude:review:ci",
 		"-p",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("ap list output does not contain %q:\n%s", want, out)
 		}
 	}
-	// The variant lines are nested under the agent's line, not mixed into the
-	// profile column, or the listing stops being readable down the page.
+	// The reference and its arguments are on separate lines: the reference alone
+	// so it can be pasted after `ap run`, the arguments below so the part that
+	// overflows has no column left to fall out of alignment. A line carrying both
+	// is the format this replaced.
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("want one agent line and two variant lines, got %d:\n%s", len(lines), out)
+	below := map[string]string{
+		"claude:review:ci":   "-p",
+		"claude:review:opus": "--dangerously-skip-permissions --effort=xhigh",
+	}
+	for i, line := range lines {
+		ref := strings.TrimSpace(line)
+		args, ok := below[ref]
+		if !ok {
+			continue
+		}
+		delete(below, ref)
+		if i+1 >= len(lines) || strings.TrimSpace(lines[i+1]) != args {
+			t.Errorf("%s: its arguments are not the line below it:\n%s", ref, out)
+		}
+	}
+	if len(below) != 0 {
+		t.Errorf("no line holds just the reference %v:\n%s", below, out)
 	}
 	if strings.Contains(lines[0], "review:opus") {
 		t.Errorf("the variant is on the profile line: %q", lines[0])
+	}
+}
+
+// Default is the one row ap did not create and cannot remove: profile.Dir
+// resolves it to the agent's real config directory, so `ap delete
+// claude:default` would erase the configuration of the agent itself, and
+// profile.ValidName refuses it. Printing it like any other profile is what
+// invites that command in the first place.
+func TestListMarksDefaultAsNotAProfile(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
+	// On the agent's own line, not merely somewhere in the output: the footnote
+	// below quotes the bracketed form to explain it, so a Contains over the whole
+	// listing passes with the marking removed. It did, when this test was first
+	// written — the mutation that dropped the brackets from the profile column
+	// left it green.
+	agentLine, _, _ := strings.Cut(out, "\n")
+	_, profiles, ok := strings.Cut(agentLine, ":")
+	if !ok {
+		t.Fatalf("no agent line to read: %q", agentLine)
+	}
+	marked := false
+	for _, p := range strings.Split(profiles, "|") {
+		switch strings.TrimSpace(p) {
+		case profile.Default:
+			t.Errorf("%q is printed like any other profile: %q", profile.Default, agentLine)
+		case "[" + profile.Default + "]":
+			marked = true
+		}
+	}
+	if !marked {
+		t.Errorf("%q is not on the agent line at all: %q", profile.Default, agentLine)
+	}
+	// And the listing says what the brackets mean, in the same form it prints
+	// them: a marking nothing explains is decoration.
+	if !strings.Contains(out, "["+profile.Default+"] is") || !strings.Contains(out, "read-only") {
+		t.Errorf("nothing says what the brackets mean:\n%s", out)
 	}
 }
 

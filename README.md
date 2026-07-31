@@ -54,7 +54,7 @@ exactly that reason — see "`default`" below.
 
 | Command | What it does |
 |---|---|
-| `ap list [agent]` | your profiles — always includes `default`, and every supported agent |
+| `ap list [agent]` | your profiles — always includes `[default]`, and every supported agent |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
@@ -214,20 +214,30 @@ ap run claude:review:opus --effort=high   # those arguments, then yours — late
 claude:review:opus                        # the wrapper, same as any profile
 ```
 
-`ap list` prints them under their profile, arguments included, so a name that
+`ap list` prints them in their own section, arguments included, so a name that
 disables every permission prompt never becomes invisible:
 
 ```
-claude:    default review finops plan
-             review:opus   --dangerously-skip-permissions --model=claude-opus-5[1m] --effort=xhigh
-             review:ci     --dangerously-skip-permissions --model=claude-opus-5[1m] -p
+claude:     [default] | finops | plan | review
+codex:      [default]
+opencode:   [default]
+pi:         [default]
+
+  Variants:
+    claude:review:ci
+      --dangerously-skip-permissions --model=claude-opus-5[1m] -p
+    claude:review:opus
+      --dangerously-skip-permissions --model=claude-opus-5[1m] --effort=xhigh
+
+  [default] is the agent's own config, outside any profile: read-only.
 ```
 
-Those lines are for reading, not for pasting. The name is shown as
-`review:opus` because the agent is already on the line above, so the reference
-to type is that name with the agent prefixed — `claude:review:opus`. The
-arguments are printed unquoted too, and `--model=claude-opus-5[1m]` in zsh is
-`no matches found`.
+The reference is qualified, so the first line of each pair is exactly what you
+type after `ap run`. The arguments below it are not: they are printed unquoted,
+and `--model=claude-opus-5[1m]` in zsh is `no matches found`. They get a line of
+their own because they are the part that overflows, and an 80-column terminal
+breaking `--model=claude-sonnet-5[1m]` mid-flag reads as a broken flag rather
+than as a wrapped sentence.
 
 **Why not a shell alias?** Two reasons. An alias does not appear in `ap list`,
 and a name that carries `--dangerously-skip-permissions` needs to be
