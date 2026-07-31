@@ -37,6 +37,8 @@ ap run claude:plan                                  # work in it
 claude:plan                                         # same thing, typed directly
 ap create claude:review --from plan                 # clone it
 ap create claude:work --copy-instructions           # seed it with your CLAUDE.md
+ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
+ap run claude:review:opus                           # those arguments, then yours
 ap env claude:plan npx skills add <src> --skill <s> -g -a claude-code
 ap env codex:plan env | grep CODEX                  # what a command inherits
 ap list
@@ -54,13 +56,14 @@ exactly that reason — see "`default`" below.
 |---|---|
 | `ap list [agent]` | your profiles — always includes `default`, and every supported agent |
 | `ap create [--from <profile>] [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config) and seeding it with your global instructions file |
+| `ap variant <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it |
 | `ap which <agent>:<profile>` | the profile directory, for editing by hand |
 | `ap env <agent>:<profile>` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile> <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory |
-| `ap run <agent>:<profile> [args...]` | run it; args pass through verbatim |
-| `ap delete [--yes] <agent>:<profile>` | remove the profile and its wrapper — including its own session history; see "What every profile shares" below. Asks first, and `--yes` is how a script answers |
-| `ap unlink <agent>:<profile>` | remove the wrapper, keep the profile |
-| `ap link <agent>:<profile>` | write the wrapper back |
+| `ap run <agent>:<profile>[:<variant>] [args...]` | run it; a variant's arguments come first, then yours, both passed through verbatim |
+| `ap delete [--yes] <agent>:<profile>[:<variant>]` | remove the profile, its variants and their wrappers — including its own session history; see "What every profile shares" below. Asks first, and `--yes` is how a script answers. A variant on its own is removed without asking: it is two lines of text |
+| `ap unlink <agent>:<profile>[:<variant>]` | remove the wrapper, keep the profile or variant |
+| `ap link <agent>:<profile>[:<variant>]` | write the wrapper back |
 
 Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent>/<profile>/`.
 
@@ -178,6 +181,103 @@ itself is installed, and it names `ap` by `PATH` lookup rather than its own
 location — see "Install" for why that directory gets a `PATH` warning
 unconditionally. (`AP_LINK_DIR` overrides the location — an escape hatch for
 tests, not something to reach for day to day.)
+
+**Tab completion, if you want it.** The colon in these names predates variants
+and behaves differently per shell. zsh 5.9 completes them as-is. bash treats `:`
+as a word separator (`COMP_WORDBREAKS`), so after `claude:` it falls back to
+completing filenames; one line in your `~/.bashrc` fixes it globally:
+
+```bash
+COMP_WORDBREAKS=${COMP_WORDBREAKS//:}
+```
+
+`ap` does not do this for you: it would be a global mutation of your shell from
+a tool whose whole thesis is not touching what belongs to someone else.
+
+### Launch variants — one configuration, several ways to start it
+
+A profile is expensive: plugins, skills, marketplace caches, session
+transcripts. How you *launch* it is a handful of flags. The same
+`claude:review` usually wants at least two launch modes — interactive, and `-p`
+for pipes — and having two profiles to get them means duplicating the expensive
+half to vary the cheap one, then keeping the two configs in sync by hand
+forever.
+
+A third segment names a launch mode over an existing profile:
+
+```bash
+ap variant claude:review:opus -- --dangerously-skip-permissions --model='claude-opus-5[1m]' --effort=xhigh
+ap variant claude:review:ci   -- --dangerously-skip-permissions --model='claude-opus-5[1m]' -p
+
+ap run claude:review:opus                 # those arguments
+ap run claude:review:opus --effort=high   # those arguments, then yours — later wins
+claude:review:opus                        # the wrapper, same as any profile
+```
+
+`ap list` prints them under their profile, arguments included, so a name that
+disables every permission prompt never becomes invisible:
+
+```
+claude:    default review finops plan
+             review:opus   --dangerously-skip-permissions --model=claude-opus-5[1m] --effort=xhigh
+             review:ci     --dangerously-skip-permissions --model=claude-opus-5[1m] -p
+```
+
+Those argument lines are for reading, not for pasting — they are printed
+unquoted, and `--model=claude-opus-5[1m]` in zsh is `no matches found`. The
+thing to type is the name: `claude:review:opus`.
+
+**Why not a shell alias?** Two reasons. An alias does not appear in `ap list`,
+and a name that carries `--dangerously-skip-permissions` needs to be
+enumerable. An alias also does not exist outside an interactive shell, so it is
+unreachable from a script, from CI, from a Makefile, or from another agent
+shelling out — a wrapper in `~/.local/bin` is reachable from all four, and `ap
+run claude:review:opus` needs no shell at all.
+
+The arguments live in
+`${XDG_DATA_HOME:-~/.local/share}/agent-profile/variants/<agent>/<profile>/<variant>`,
+one per line — outside the profile directory, because that directory belongs to
+the agent. Not in the wrapper: a name is invocable only if `ap run` can resolve
+it, and arguments baked into a wrapper would either be invisible to `ap run` or
+make it read back the file it wrote. The store is also why there is no quoting
+to get wrong anywhere in this feature — arguments go from the file to
+`syscall.Exec` as a list, so `[1m]` cannot glob and `$(…)` cannot execute. The
+one limit it buys: **an argument may not contain a newline**, and `ap variant`
+says so rather than inventing an escape syntax.
+
+A few things a variant deliberately is not:
+
+- **Not a profile.** No directory, no shim, no links, no first-run seeding.
+  `ap which claude:review:opus` and `ap env claude:review:opus` answer for the
+  parent, because that is literally its configuration.
+- **Not editable in place.** `ap variant` refuses one that exists, exactly as
+  `ap create` refuses a profile that exists. `ap delete` then `ap variant` is
+  how arguments change; there is no `--force` for a two-line file.
+- **Not cloned by `--from`.** A clone is a different profile, and inheriting
+  `--dangerously-skip-permissions` without being asked is the opposite of what a
+  new profile should do.
+- **Not deeper than three.** `<agent>:<profile>:<variant>` and no further.
+- **Not applied by `ap env`.** `ap env claude:review:opus npx skills add …` runs
+  `npx` with the profile's variable set and *without* the variant's arguments:
+  those are the agent's flags.
+- **Not reconciled.** If you remove a profile directory by hand, its variants
+  stay in the store and `ap list` will not show them, because it lists the
+  profiles that exist. `ap run` still fails correctly, naming the missing
+  profile.
+
+Deleting a profile takes its variants with it, and names them while asking —
+a variant without its parent is a command that fails confusingly:
+
+```console
+$ ap delete claude:review
+? remove ~/.local/share/agent-profile/profiles/claude/review
+  and its 2 variants: opus, ci [y/N]
+```
+
+**A variant that ends in a prompt is terminal.** `claude`'s grammar takes one
+trailing positional, so a variant ending in `"/code-review"` composes with flags
+but not with a second prompt. `ap variant` prints the composed line when it
+creates one, so you can see it then rather than the first time it fails.
 
 ### Flag order matters for `run`
 

@@ -35,11 +35,18 @@ Usage:
   ap env <agent>:<profile> [cmd...]    print the environment override, or set
                                        it and run cmd — env(1), for tools that
                                        write into the agent's config directory
-  ap run <agent>:<profile> [args...]   run the agent with that profile
-  ap delete [--yes] <agent>:<profile>  delete a profile and its wrapper, asking
-                                       first unless --yes says not to
-  ap unlink <agent>:<profile>          remove the wrapper, keep the profile
-  ap link <agent>:<profile>            write it back (create already does this;
+  ap run <agent>:<profile>[:<variant>] [args...]
+                                       run the agent with that profile; a
+                                       variant's arguments come first, then
+                                       yours
+  ap delete [--yes] <agent>:<profile>[:<variant>]
+                                       delete a profile and its wrapper, asking
+                                       first unless --yes says not to; a
+                                       variant goes on its own, without asking
+  ap unlink <agent>:<profile>[:<variant>]
+                                       remove the wrapper, keep the profile
+  ap link <agent>:<profile>[:<variant>]
+                                       write it back (create already does this;
                                        link is for profiles made before it did,
                                        or after an unlink)
   ap version                           print version, commit and build date
@@ -281,7 +288,54 @@ func cmdList(args []string) error {
 		}
 		// Padded to the longest agent name, so the profile columns line up and a
 		// four-agent listing can be read down instead of across.
+		//
+		// One line per agent, starting in column 0, and every variant line below
+		// it indented. That is not cosmetic: scripts/smoke.sh selects agent names
+		// with `for ag in $("$AP" list | ...)`, and an indented line reaching that
+		// loop becomes a bogus agent name that reds two blocks testing something
+		// else entirely. smoke.sh's agents() names this coupling from the other
+		// side, and TestListTopLevelStaysParseableByScriptsSmoke pins it.
 		fmt.Printf("%-10s %s\n", name+":", strings.Join(profiles, " "))
+		if err := listVariants(a, profiles); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listVariants prints each profile's launch variants under its agent's line,
+// arguments included.
+//
+// Indented, always — see the contract in cmdList above.
+//
+// The arguments are printed unquoted, and the line is informational rather than
+// something to paste: `--model=claude-opus-5[1m]` in zsh is `no matches found`.
+// Quoting it for display would reintroduce a shell-quoting function, and its
+// hostile-argument test, for a line nothing execs. The pasteable thing here is
+// the reference — `claude:review:opus` — which is the point of naming it.
+//
+// The arguments are the point, not decoration. A command whose name silently
+// disables every permission prompt is a real hazard, and ap exists precisely so
+// that you have enough profiles not to remember what each one does. Printing
+// them here and in the `ap variant` receipt is what keeps
+// --dangerously-skip-permissions visible, with no special handling for that
+// flag in particular — and it costs nothing, because the store is already a
+// list of strings.
+func listVariants(a agent.Agent, profiles []string) error {
+	for _, p := range profiles {
+		variants, err := profile.Variants(a, p)
+		if err != nil {
+			return err
+		}
+		for _, v := range variants {
+			args, err := profile.VariantArgs(a, p, v)
+			if err != nil {
+				return err
+			}
+			// Indented past the agent column, then a fixed column for the name, so
+			// the arguments line up between variants of different profiles.
+			fmt.Printf("%-10s   %-13s %s\n", "", p+":"+v, strings.Join(args, " "))
+		}
 	}
 	return nil
 }

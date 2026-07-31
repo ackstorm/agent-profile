@@ -1204,3 +1204,82 @@ func TestDeleteAProfileNamesItsVariantsInTheConfirmation(t *testing.T) {
 		t.Error("delete removed the profile without an answer")
 	}
 }
+
+// --- ap list -----------------------------------------------------------------
+
+// A command whose name silently disables every permission prompt is a real
+// hazard, and ap exists precisely so that you have enough profiles not to
+// remember what each one does. Printing the arguments is what stops that being
+// invisible, without inventing any special handling for that flag in
+// particular — and it is free, because the store is already a list of strings.
+func TestListShowsVariantsNestedUnderTheirProfileWithTheirArguments(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "--dangerously-skip-permissions", "--effort=xhigh"},
+		{"variant", "claude:review:ci", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
+	for _, want := range []string{
+		"review",
+		"review:opus",
+		"--dangerously-skip-permissions --effort=xhigh",
+		"review:ci",
+		"-p",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ap list output does not contain %q:\n%s", want, out)
+		}
+	}
+	// The variant lines are nested under the agent's line, not mixed into the
+	// profile column, or the listing stops being readable down the page.
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want one agent line and two variant lines, got %d:\n%s", len(lines), out)
+	}
+	if strings.Contains(lines[0], "review:opus") {
+		t.Errorf("the variant is on the profile line: %q", lines[0])
+	}
+}
+
+// scripts/smoke.sh parses this output — `for ag in $("$AP" list | ...)` — and an
+// indented variant line reaching that loop becomes a bogus agent name, red-ing
+// two blocks that have nothing to do with variants. The contract is that an
+// agent line starts in column 0 and a variant line is indented; this applies
+// smoke's own filter and asserts what it yields, so the coupling fails here
+// rather than on somebody's machine at release time.
+func TestListTopLevelStaysParseableByScriptsSmoke(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "--dangerously-skip-permissions"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	out := stdoutOf(t, func() error { return dispatch([]string{"list"}) })
+
+	// The same selection scripts/smoke.sh's agents() makes: lines that begin in
+	// column 0, up to the first colon.
+	var got []string
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("agent line %q has no colon; smoke.sh's filter yields nothing for it", line)
+		}
+		got = append(got, name)
+	}
+	if strings.Join(got, " ") != strings.Join(agent.Names(), " ") {
+		t.Errorf("smoke.sh's filter over `ap list` yields %v, want exactly the agents %v", got, agent.Names())
+	}
+}

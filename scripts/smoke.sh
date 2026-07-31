@@ -21,6 +21,14 @@ AP=$(cd "$(dirname "$AP")" && pwd)/$(basename "$AP")
 # above masquerade as six unrelated ones. Callers check the return value.
 setup() { "$@" >/dev/null 2>&1; }
 
+# The agent names from `ap list`. Only lines that begin in column 0 are agent
+# lines: `ap list` indents each profile's launch variants under its agent, and
+# the plain `cut -d: -f1` this replaced turned "  review:opus  --dangerously..."
+# into an agent named "review" - `command -v review` then skipped, and
+# `ap which review:apsmoke` failed, in two blocks that test neither. cmd/ap
+# cmdList names this coupling from the other side, and a Go test pins the shape.
+agents() { "$AP" list | sed -n 's/^\([^ :][^:]*\):.*/\1/p'; }
+
 # Read the same way opencode and profile.ConfigBase do.
 real_config=${XDG_CONFIG_HOME:-$HOME/.config}
 
@@ -165,7 +173,7 @@ fi
 
 # --- default: <agent>:default is the real config dir, undeletable, and
 #     --from default clones configuration only, none of the runtime ----------
-for ag in $("$AP" list | cut -d: -f1); do
+for ag in $(agents); do
   command -v "$ag" >/dev/null 2>&1 || { skip "$ag"; continue; }
   # marker is one file CloneAllow actually names for this agent, checked only
   # when present in the real config - proof that --from default clones
@@ -432,6 +440,33 @@ else
   skip claude
 fi
 
+# --- variant: the stored arguments actually reach the binary ----------------
+# -p is the observable one: with it claude prints an answer and exits, without
+# it it opens an interactive session and the timeout kills it. Nothing else in
+# the suite proves the store is read at all - every Go test stops at the
+# []string.
+if command -v claude >/dev/null 2>&1; then
+  setup "$AP" delete --yes claude:apsmoke:apv
+  if setup "$AP" create claude:apsmoke && setup "$AP" variant claude:apsmoke:apv -- -p --model haiku; then
+    if timeout 180 "$AP" run claude:apsmoke:apv "reply with ok" >/dev/null 2>&1; then
+      pass variant "stored arguments reached the agent"
+    else
+      bad variant "ap run <a>:<p>:<v> did not complete - are the stored args reaching claude?"
+    fi
+    # The cascade, end to end: deleting the profile takes the variant with it.
+    setup "$AP" delete --yes claude:apsmoke
+    if "$AP" list claude | grep -q "apsmoke:apv"; then
+      bad variant "the variant outlived its profile"
+    else
+      pass variant "deleting the profile removed the variant"
+    fi
+  else
+    bad variant "could not set up the variant fixture"
+  fi
+else
+  skip variant
+fi
+
 # --- every variable set must point inside the profile -----------------------
 # This replaced a blanket "no XDG_* at all". opencode has no private config
 # variable, so isolating it means setting XDG_CONFIG_HOME; what is guaranteed now
@@ -439,7 +474,7 @@ fi
 # directories are never redirected, which is what keeps sessions shared.
 # internal/run.TestEnvOnlySetsPathsInsideTheProfile is the unit-level version.
 leak=0
-for ag in $("$AP" list | cut -d: -f1); do
+for ag in $(agents); do
   d=$("$AP" which "$ag:apsmoke" 2>/dev/null) || continue
   while IFS='=' read -r k v; do
     [ -n "$k" ] || continue
