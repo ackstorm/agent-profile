@@ -803,21 +803,30 @@ func cmdDelete(args []string) error {
 	fs.BoolVar(yes, "y", false, "shorthand for --yes")
 	// parseAroundRef, like create: delete passes nothing to the agent, so a flag
 	// after the reference is unambiguous. `run` must never do this.
-	stop, r, err := parseAroundRef(fs, args, "delete [--yes] <agent>:<profile>")
+	stop, r, err := parseAroundRef(fs, args, "delete [--yes] <agent>:<profile>[:<variant>]")
 	if stop {
 		return err
 	}
-	a, name, err := profile.ParseRef(r)
+	a, name, v, err := profile.ParseVariantRef(r)
 	if err != nil {
 		return err
+	}
+	if v != "" {
+		return deleteVariant(a, name, v)
 	}
 	// Before the prompt, not after: a typo must not be answered "y".
 	if !profile.Exists(a, name) {
 		return notThere(a, name)
 	}
+	// Read before the prompt, because the prompt names them: the answer is only
+	// meaningful with the whole cost in view.
+	variants, err := profile.Variants(a, name)
+	if err != nil {
+		return err
+	}
 	dir := profile.Dir(a, name)
 	if !*yes {
-		if err := confirm(dir); err != nil {
+		if err := confirm(dir, variants); err != nil {
 			return err
 		}
 	}
@@ -828,7 +837,9 @@ func cmdDelete(args []string) error {
 	rc.add("removed", tilde(dir))
 	// A deleted profile must not leave behind a wrapper that fails confusingly
 	// when someone types its name. Not an error if there never was one — and the
-	// row is omitted rather than claiming an unlink that did not happen.
+	// row is omitted rather than claiming an unlink that did not happen. The
+	// same argument applies to a variant of a profile that no longer exists,
+	// which is why the cascade below is not optional.
 	p, err := removeWrapperIfOurs(a.Name + ":" + name)
 	if err != nil {
 		return err
@@ -836,7 +847,52 @@ func cmdDelete(args []string) error {
 	if p != "" {
 		rc.add("command", fmt.Sprintf("%s:%s unlinked", a.Name, name))
 	}
+	if err := deleteTheVariantsToo(a, name, variants, rc); err != nil {
+		return err
+	}
 	rc.print(fmt.Sprintf("deleted %q", a.Name+":"+name))
+	return nil
+}
+
+// deleteTheVariantsToo removes the store entries and the wrappers that named
+// the profile just deleted. Split out of cmdDelete purely to keep it under the
+// project's cyclomatic-complexity gate.
+func deleteTheVariantsToo(a agent.Agent, name string, variants []string, rc *receipt) error {
+	if err := profile.DeleteVariants(a, name); err != nil {
+		return err
+	}
+	for _, v := range variants {
+		if _, err := removeWrapperIfOurs(a.Name + ":" + name + ":" + v); err != nil {
+			return err
+		}
+	}
+	if len(variants) > 0 {
+		rc.add("variants", strings.Join(variants, " "))
+	}
+	return nil
+}
+
+// deleteVariant removes one variant and its wrapper, and asks nothing first.
+//
+// Confirmation is proportional to what is lost: `ap delete` asks about a
+// profile because a profile holds its own session transcripts, and a variant
+// holds two lines of text. Asking about both equally is how a prompt stops
+// being read.
+func deleteVariant(a agent.Agent, name, v string) error {
+	ref := a.Name + ":" + name + ":" + v
+	if err := profile.DeleteVariant(a, name, v); err != nil {
+		return err
+	}
+	rc := &receipt{}
+	rc.add("removed", "variant args (the profile is untouched)")
+	p, err := removeWrapperIfOurs(ref)
+	if err != nil {
+		return err
+	}
+	if p != "" {
+		rc.add("command", ref+" unlinked")
+	}
+	rc.print(fmt.Sprintf("deleted %q", ref))
 	return nil
 }
 
@@ -959,12 +1015,24 @@ func writeWrapper(ref string) (string, error) {
 // is no: a profile holds its own session transcripts, and an absent-minded Enter
 // must not erase them.
 //
+// variants are named because they go with it. A variant without its parent is a
+// command that fails confusingly, so the cascade is not optional — and a
+// question that hides half of what it is about is not a question.
+//
 // EOF is not consent either, which is what makes this safe in a script: with no
 // terminal there is nobody to answer, so the answer has to be stated up front
 // with --yes. Reading the answer rather than testing for a tty also means
 // `echo y | ap delete ...` works, and /dev/null does not.
-func confirm(dir string) error {
-	fmt.Fprintf(os.Stderr, "? remove %s [y/N] ", tilde(dir))
+func confirm(dir string, variants []string) error {
+	fmt.Fprintf(os.Stderr, "? remove %s", tilde(dir))
+	if n := len(variants); n > 0 {
+		noun := "variants"
+		if n == 1 {
+			noun = "variant"
+		}
+		fmt.Fprintf(os.Stderr, "\n  and its %d %s: %s", n, noun, strings.Join(variants, ", "))
+	}
+	fmt.Fprint(os.Stderr, " [y/N] ")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && line == "" {
 		fmt.Fprintln(os.Stderr)

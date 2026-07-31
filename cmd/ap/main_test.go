@@ -717,6 +717,25 @@ func stdoutOf(t *testing.T, f func() error) string {
 	return string(b)
 }
 
+// stderrOf captures the prompt, which goes to stderr so it is never mistaken
+// for output. Unlike stdoutOf it returns the error rather than failing on it:
+// the interesting case here is the command that correctly refuses.
+func stderrOf(t *testing.T, f func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	ferr := f()
+	os.Stderr = orig
+	_ = w.Close()
+	b, _ := io.ReadAll(r)
+	_ = r.Close()
+	return string(b), ferr
+}
+
 // `which` and `env` are the two commands whose output is consumed rather than
 // read - $(ap which ...) and env(1) - so they print one bare line and nothing
 // else. No tick, no "~", no aligned block: a tilde in a shell substitution is a
@@ -1090,5 +1109,98 @@ func TestWhichAndEnvOnAVariantAnswerForTheParent(t *testing.T) {
 	want := a.ConfigEnv + "=" + dir + "\n"
 	if got := stdoutOf(t, func() error { return dispatch([]string{"env", "claude:review:opus"}) }); got != want {
 		t.Errorf("ap env on a variant = %q, want the parent's variable %q", got, want)
+	}
+}
+
+// --- deleting variants -------------------------------------------------------
+
+// Confirmation is proportional to what is lost. A profile holds session
+// transcripts; a variant holds two lines of text, which is what makes it cheap
+// to try five of them. Revert the "no confirmation" branch and this hangs or
+// fails on the missing answer.
+func TestDeleteAVariantAsksNothingAndLeavesTheProfile(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	noStdin(t)
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"delete", "claude:review:opus"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	if !profile.Exists(a, "review") {
+		t.Fatal("deleting a variant removed the profile")
+	}
+	if _, err := profile.VariantArgs(a, "review", "opus"); err == nil {
+		t.Error("the store entry outlived the delete")
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:opus")); !os.IsNotExist(err) {
+		t.Error("the variant's wrapper outlived the delete")
+	}
+	if err := dispatch([]string{"delete", "claude:review:ghost"}); err == nil {
+		t.Error("deleting a variant that does not exist = nil error, want an error")
+	}
+}
+
+// A variant without its parent is a command that fails confusingly — the same
+// reason delete already removes wrappers. Revert either half of the cascade
+// (DeleteVariants, or the wrapper loop) and this fails.
+func TestDeleteAProfileRemovesItsVariantsAndTheirWrappers(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"variant", "claude:review:ci", "--", "-p"},
+		{"delete", "--yes", "claude:review"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
+		t.Errorf("the variants outlived their profile: %v", got)
+	}
+	for _, v := range []string{"opus", "ci"} {
+		if _, err := os.Stat(filepath.Join(bin, "claude:review:"+v)); !os.IsNotExist(err) {
+			t.Errorf("the wrapper for claude:review:%s outlived its profile", v)
+		}
+	}
+}
+
+// Deleting a profile names the variants that go with it, so the answer is given
+// with the whole cost in view.
+func TestDeleteAProfileNamesItsVariantsInTheConfirmation(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	noStdin(t)
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"variant", "claude:review:ci", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	out, err := stderrOf(t, func() error { return dispatch([]string{"delete", "claude:review"}) })
+	if err == nil {
+		t.Fatal("delete with no way to confirm = nil error, want a refusal")
+	}
+	for _, want := range []string{"2 variants", "opus", "ci"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the prompt %q does not mention %q", out, want)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	if !profile.Exists(a, "review") {
+		t.Error("delete removed the profile without an answer")
 	}
 }
