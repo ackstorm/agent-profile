@@ -36,6 +36,13 @@ func sliceSettings(f agent.Format, b []byte, keys []string) (out []byte, found [
 // the honest answer — the alternative is an escape syntax for a case nobody has
 // hit.
 func sliceJSON(b []byte, keys []string) ([]byte, []string, error) {
+	if len(bytes.TrimSpace(b)) == 0 {
+		// Tolerated like a missing file, not a hard failure: this is empty
+		// because nothing has written it yet, not because it is corrupt.
+		// Genuinely malformed JSON below is still an error — that is a
+		// different claim than "there is nothing here."
+		return nil, nil, nil
+	}
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(b, &root); err != nil {
 		return nil, nil, err
