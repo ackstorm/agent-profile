@@ -216,7 +216,8 @@ _cover: _test
 fuzz: ## Fuzz the path-validation surface for 60s (the traversal-bug lesson).
 	$(call in_container,_fuzz)
 _fuzz:
-	go test -run '^$$' -fuzz FuzzValidName -fuzztime 60s ./internal/profile/
+	go test -run '^$$' -fuzz FuzzValidName -fuzztime 30s ./internal/profile/
+	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime 30s ./internal/profile/
 
 .PHONY: smoke
 smoke: build ## Host-only — drive the four real agent binaries. Needs them installed and logged in.

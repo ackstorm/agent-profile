@@ -204,3 +204,69 @@ func TestParseRefAllowDefaultStillRejectsTraversal(t *testing.T) {
 		t.Error("ParseRefAllowDefault(claude:../escape) = nil error, want rejection")
 	}
 }
+
+// Depth is exactly three, and the third segment is validated by the same
+// ValidName as the second — so `default` is refused as a variant name for the
+// same reason it is refused as a profile name. A variant over `default` is
+// refused whichever parser is used: it names the agent's real config, and
+// nothing is ever created for it.
+func TestParseVariantRef(t *testing.T) {
+	tests := []struct {
+		in                   string
+		agent, prof, variant string
+		wantErr              bool
+	}{
+		{in: "claude:review", agent: "claude", prof: "review"},
+		{in: "claude:review:opus", agent: "claude", prof: "review", variant: "opus"},
+		{in: "codex:plan:ci", agent: "codex", prof: "plan", variant: "ci"},
+		{in: "claude:review:opus:extra", wantErr: true}, // four segments, permanently
+		{in: "claude:review:default", wantErr: true},    // reserved as a variant name too
+		{in: "claude:default:opus", wantErr: true},      // nothing is created for default
+		{in: "claude:review:", wantErr: true},
+		{in: "claude:review:a/b", wantErr: true},
+		{in: "claude:review:.hidden", wantErr: true},
+		{in: "claude:review:..", wantErr: true},
+		{in: "nope:review:opus", wantErr: true},
+		{in: "claude", wantErr: true},
+		{in: "claude:default", wantErr: true}, // the writing parser refuses it
+	}
+	for _, tc := range tests {
+		a, p, v, err := ParseVariantRef(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("ParseVariantRef(%q) = (%q,%q,%q,nil), want error", tc.in, a.Name, p, v)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseVariantRef(%q) unexpected error: %v", tc.in, err)
+			continue
+		}
+		if a.Name != tc.agent || p != tc.prof || v != tc.variant {
+			t.Errorf("ParseVariantRef(%q) = (%q,%q,%q), want (%q,%q,%q)",
+				tc.in, a.Name, p, v, tc.agent, tc.prof, tc.variant)
+		}
+	}
+}
+
+// The read-only parser relaxes exactly one thing: `default` as a two-segment
+// profile. It must not relax the variant case with it.
+func TestParseVariantRefAllowDefault(t *testing.T) {
+	if _, p, v, err := ParseVariantRefAllowDefault("claude:default"); err != nil || p != Default || v != "" {
+		t.Errorf(`ParseVariantRefAllowDefault("claude:default") = (%q,%q,%v), want ("default","",nil)`, p, v, err)
+	}
+	if _, _, _, err := ParseVariantRefAllowDefault("claude:default:opus"); err == nil {
+		t.Error("a variant over default was accepted; nothing is ever created for default")
+	}
+	if _, p, v, err := ParseVariantRefAllowDefault("claude:review:opus"); err != nil || p != "review" || v != "opus" {
+		t.Errorf("ParseVariantRefAllowDefault on a normal variant = (%q,%q,%v)", p, v, err)
+	}
+}
+
+// `ap create` keeps the strict two-segment parser: a profile is the only thing
+// it makes, and `ap variant` is the verb for the other one.
+func TestParseRefStillRefusesThreeSegments(t *testing.T) {
+	if _, _, err := ParseRef("claude:review:opus"); err == nil {
+		t.Error("ParseRef accepted a three-segment reference; create would then make a profile named for a variant")
+	}
+}
