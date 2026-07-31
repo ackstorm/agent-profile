@@ -570,6 +570,7 @@ floor, which is a security floor, not a language requirement. See CLAUDE.md.
 ```bash
 make verify   # fmt-check, shellcheck, vet, lint (incl. gosec), test -race, vulncheck
 make secrets  # gitleaks over the full history
+make sandbox  # home-safety checks against a throwaway home, in the container
 make smoke    # drives the four real binaries; needs them installed and logged in
 make fuzz     # 60s against the path validation
 make hooks    # install a pre-push hook that runs verify
@@ -579,6 +580,18 @@ make shell    # a shell inside the devtools image
 Everything above is containerised except `smoke`, which has to stay on the host:
 it drives the real agent binaries and asserts your real session count is
 unchanged afterwards.
+
+`sandbox` is the half of that which never needed a real agent. It builds a home
+that has been used — configuration, credentials, transcripts, and a `~/.config`
+holding four other programs — inside the container, puts a stub on `PATH` in
+place of each agent, and asks whether `ap` keeps its hands off any of it: what
+`delete` removes, what `--from` copies, what the shim links, what argv and what
+environment `run` execs with. Every one of its checks was confirmed to go red
+with its guard reverted. It is not a substitute for `smoke`: the registry's
+claims are about what the real binaries do with the variable they are handed,
+and a stub cannot answer that. Running `smoke` inside a container is worse than
+not running it — every block is gated on `command -v <agent>`, so all twelve
+skip and it exits 0 announcing "all checks passed".
 
 Releases are cut with `make release VERSION=vX.Y.Z`. It gates first and tags
 last, so a failed release never leaves a tag behind on origin.

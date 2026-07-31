@@ -223,6 +223,18 @@ _fuzz:
 smoke: build ## Host-only — drive the four real agent binaries. Needs them installed and logged in.
 	./scripts/smoke.sh
 
+# Not wrapped by in_container: the script re-enters the container itself, having
+# first pointed HOME at a home it builds and throws away. Wrapping it would
+# nest, and dev.sh would then be arguing with itself about HOME.
+#
+# `sandbox` is not a substitute for `smoke`, and a green one does not stand in
+# for the other. smoke asks whether the real binaries honour the registry, which
+# needs them installed and logged in; sandbox asks whether ap keeps its hands off
+# a home that already has things in it, which needs neither and so can run here.
+.PHONY: sandbox
+sandbox: ## Run the home-safety checks against a throwaway home in the container.
+	./scripts/sandbox.sh
+
 ##@ Quality
 
 .PHONY: fmt
