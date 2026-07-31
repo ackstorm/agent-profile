@@ -717,6 +717,25 @@ func stdoutOf(t *testing.T, f func() error) string {
 	return string(b)
 }
 
+// stderrOf captures the prompt, which goes to stderr so it is never mistaken
+// for output. Unlike stdoutOf it returns the error rather than failing on it:
+// the interesting case here is the command that correctly refuses.
+func stderrOf(t *testing.T, f func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	ferr := f()
+	os.Stderr = orig
+	_ = w.Close()
+	b, _ := io.ReadAll(r)
+	_ = r.Close()
+	return string(b), ferr
+}
+
 // `which` and `env` are the two commands whose output is consumed rather than
 // read - $(ap which ...) and env(1) - so they print one bare line and nothing
 // else. No tick, no "~", no aligned block: a tilde in a shell substitution is a
@@ -754,6 +773,596 @@ func TestOnPathMatchesEntriesExactly(t *testing.T) {
 	} {
 		if got := onPath(tc.dir); got != tc.want {
 			t.Errorf("onPath(%q) = %v, want %v", tc.dir, got, tc.want)
+		}
+	}
+}
+
+// --- ap variant --------------------------------------------------------------
+
+// The store, and a wrapper that execs the three-segment reference. Both, from
+// one command: a name you cannot type is a name you do not use, and a wrapper
+// whose arguments ap run cannot resolve is the hidden state this design exists
+// to avoid.
+func TestVariantWritesTheStoreAndTheWrapper(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--dangerously-skip-permissions", "--model=claude-opus-5[1m]", "--effort=xhigh"}
+	if err := dispatch(append([]string{"variant", "claude:review:opus", "--"}, args...)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	got, err := profile.VariantArgs(a, "review", "opus")
+	if err != nil {
+		t.Fatalf("the store has no entry: %v", err)
+	}
+	if strings.Join(got, "\x00") != strings.Join(args, "\x00") {
+		t.Errorf("stored %q, want %q", got, args)
+	}
+	b, err := os.ReadFile(filepath.Join(bin, "claude:review:opus"))
+	if err != nil {
+		t.Fatalf("variant left no wrapper: %v", err)
+	}
+	if !strings.Contains(string(b), "exec ap run claude:review:opus") {
+		t.Errorf("wrapper does not exec the variant: %q", b)
+	}
+	// The arguments live in the store, never in the wrapper. If they leak in
+	// here, `ap run claude:review:opus` and typing the name diverge — and the
+	// source of truth starts depending on the artefact derived from it.
+	if strings.Contains(string(b), "--effort=xhigh") {
+		t.Errorf("the wrapper carries the payload; the store is the only source of truth: %q", b)
+	}
+}
+
+// Never creates the parent implicitly: forty megabytes and a background
+// reconciliation is not something a two-line command should trigger by typo.
+func TestVariantRefusesAMissingParent(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"variant", "claude:nope:v", "--", "-p"})
+	if err == nil {
+		t.Fatal("a variant over a missing profile = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "claude:nope") {
+		t.Errorf("error %q does not name the missing parent", err)
+	}
+	a, _ := agent.Lookup("claude")
+	if profile.Exists(a, "nope") {
+		t.Error("the parent profile was created implicitly")
+	}
+}
+
+func TestVariantRejectsBadInvocations(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"variant"},
+		{"variant", "claude:review:opus"},               // no separator, no payload
+		{"variant", "claude:review:opus", "--"},         // empty payload: same as the parent
+		{"variant", "claude:review:opus", "-p"},         // missing the -- separator
+		{"variant", "claude:review", "--", "-p"},        // two segments: no variant named
+		{"variant", "claude:review:opus:x", "--", "-p"}, // four segments
+		{"variant", "claude:default:opus", "--", "-p"},
+		{"variant", "claude:review:default", "--", "-p"},
+	} {
+		if err := dispatch(args); err == nil {
+			t.Errorf("dispatch(%q) = nil error, want error", args)
+		}
+	}
+}
+
+// Everything after the first -- is payload, literally — including flags ap
+// itself owns. `--from` belongs to `ap create`, which parses it on either side
+// of its reference with parseAroundRef; if `ap variant` ever reuses that helper
+// this stores nothing, or stores the wrong thing, and the failure is silent.
+func TestVariantStoresFlagsApItselfOwns(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	payload := []string{"--from", "default", "--yes", "-p"}
+	if err := dispatch(append([]string{"variant", "claude:review:literal", "--"}, payload...)); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	got, err := profile.VariantArgs(a, "review", "literal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, "\x00") != strings.Join(payload, "\x00") {
+		t.Errorf("stored %q, want %q — ap parsed a payload that belongs to the agent", got, payload)
+	}
+	// And nothing was cloned: --from was payload, not an instruction.
+	if profile.Exists(a, "literal") {
+		t.Error("ap acted on --from inside the payload")
+	}
+}
+
+// The separator is required, and the error has to name it: without it the
+// command looks like it takes a bare list, and the first thing a user tries is
+// `ap variant <ref> -p`.
+func TestVariantWithoutTheSeparatorNamesIt(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"variant", "claude:review:opus"},
+		{"variant", "claude:review:opus", "-p"},
+	} {
+		err := dispatch(args)
+		if err == nil {
+			t.Fatalf("dispatch(%q) = nil error, want error", args)
+		}
+		if !strings.Contains(err.Error(), "--") {
+			t.Errorf("error %q does not name the -- separator", err)
+		}
+	}
+}
+
+// Editing is delete-then-write, at the dispatch level too.
+func TestVariantRefusesAnExistingVariant(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "-p"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "--effort=xhigh"}); err == nil {
+		t.Error("a second ap variant silently replaced the first")
+	}
+}
+
+// `ap create` makes profiles and only profiles. Overloading it so the same word
+// sometimes builds forty megabytes and sometimes writes two lines is worse than
+// one noun.
+func TestCreateStillRefusesAThreeSegmentReference(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review:opus"}); err == nil {
+		t.Error("ap create accepted a three-segment reference")
+	}
+}
+
+// link and unlink handle a variant's wrapper with the same rules and the same
+// marker as any other, and link refuses a name ap run could not resolve.
+func TestLinkAndUnlinkAVariant(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"unlink", "claude:review:opus"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:opus")); !os.IsNotExist(err) {
+		t.Fatal("unlink left the variant wrapper behind")
+	}
+	if err := dispatch([]string{"link", "claude:review:opus"}); err != nil {
+		t.Fatalf("link of a variant = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:opus")); err != nil {
+		t.Fatalf("link wrote no wrapper: %v", err)
+	}
+	// A name is invocable only if `ap run` can resolve it.
+	if err := dispatch([]string{"link", "claude:review:ghost"}); err == nil {
+		t.Error("link invented a name for a variant that does not exist")
+	}
+}
+
+// The wrapper's exact bytes are load-bearing across versions: every wrapper
+// already on disk is recognised as ours by that header. A refactor of
+// writeWrapper must not move a single byte of the two-segment case.
+func TestLinkRendersTheSameWrapperBytesAsBefore(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"link", "claude:plan"}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(bin, "claude:plan"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "#!/bin/sh\n# written by ap link. Safe to delete.\nexec ap run claude:plan \"$@\"\n"
+	if string(b) != want {
+		t.Errorf("wrapper = %q, want %q", b, want)
+	}
+}
+
+// --- run composition ---------------------------------------------------------
+
+// One rule, no special cases: the variant's arguments, then the caller's. Later
+// wins in every CLI here, so a caller can override a baked default for one
+// invocation without editing anything.
+//
+// Tested as a function, not through a pipe: run.Exec replaces the process, and
+// testing the function catches the regression that testing the exec would.
+func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if _, err := profile.Create(a, "review"); err != nil {
+		t.Fatal(err)
+	}
+	baked := []string{"--dangerously-skip-permissions", "--model=claude-opus-5[1m]"}
+	if err := profile.WriteVariant(a, "review", "opus", baked); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := runArgs(a, "review", "opus", []string{"--model=haiku", "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--dangerously-skip-permissions", "--model=claude-opus-5[1m]", "--model=haiku", "hello"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("runArgs = %q, want %q", got, want)
+	}
+
+	// No variant: the caller's arguments, untouched. This is every run that
+	// existed before this feature.
+	plain, err := runArgs(a, "review", "", []string{"--effort", "xhigh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(plain, "\x00") != strings.Join([]string{"--effort", "xhigh"}, "\x00") {
+		t.Errorf("runArgs with no variant = %q, want the caller's arguments unchanged", plain)
+	}
+}
+
+// A typo in the third segment must name the variants that do exist.
+func TestRunNamesTheVariantsThatExist(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:ci", "--", "-p"}); err != nil {
+		t.Fatal(err)
+	}
+	err := dispatch([]string{"run", "claude:review:opus"})
+	if err == nil {
+		t.Fatal("run of a missing variant = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "ci") {
+		t.Errorf("error %q does not name the variants that exist", err)
+	}
+}
+
+// A dangling variant needs no new guard: the existing profile lookup reports
+// the missing profile and how to create it, which is the more useful answer.
+func TestRunOnAVariantOfAMissingProfileReportsTheProfile(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := dispatch([]string{"run", "claude:ghost:opus"})
+	if err == nil {
+		t.Fatal("run on a missing profile = nil error, want an error")
+	}
+	if !strings.Contains(err.Error(), "ap create claude:ghost") {
+		t.Errorf("error %q does not tell the user how to fix it", err)
+	}
+}
+
+// Only `ap run` composes. `ap env <ref> <cmd...>` execs something that is not
+// the agent — an installer, npx skills add — and a variant's arguments are the
+// AGENT's flags. Handing `--dangerously-skip-permissions` to npx would at best
+// fail and at worst mean something else entirely.
+//
+// Asserted through the argument builder rather than the exec, which replaces
+// the process: cmdEnv must never call runArgs, and this is the shape of that.
+func TestEnvDoesNotComposeAVariantsArgumentsIntoTheCommand(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "--dangerously-skip-permissions"}); err != nil {
+		t.Fatal(err)
+	}
+	// A command that does not exist, so the error names what would have been
+	// exec'd and nothing is actually run.
+	err := dispatch([]string{"env", "claude:review:opus", "ap-no-such-binary"})
+	if err == nil {
+		t.Fatal("env with a missing command = nil error, want an error")
+	}
+	if strings.Contains(err.Error(), "dangerously") {
+		t.Errorf("env composed the variant's arguments into the command: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ap-no-such-binary") {
+		t.Errorf("error %q does not name the command that was to be run", err)
+	}
+}
+
+// A variant has no configuration of its own, so both of these answer for the
+// parent. Inventing a second directory that nothing writes to would be the
+// alternative, and it would be a lie.
+func TestWhichAndEnvOnAVariantAnswerForTheParent(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:review"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:review:opus", "--", "-p"}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := agent.Lookup("claude")
+	dir := profile.Dir(a, "review")
+
+	if got := stdoutOf(t, func() error { return dispatch([]string{"which", "claude:review:opus"}) }); got != dir+"\n" {
+		t.Errorf("ap which on a variant = %q, want the parent's directory %q", got, dir+"\n")
+	}
+	want := a.ConfigEnv + "=" + dir + "\n"
+	if got := stdoutOf(t, func() error { return dispatch([]string{"env", "claude:review:opus"}) }); got != want {
+		t.Errorf("ap env on a variant = %q, want the parent's variable %q", got, want)
+	}
+}
+
+// --- deleting variants -------------------------------------------------------
+
+// Confirmation is proportional to what is lost. A profile holds session
+// transcripts; a variant holds two lines of text, which is what makes it cheap
+// to try five of them. Revert the "no confirmation" branch and this hangs or
+// fails on the missing answer.
+func TestDeleteAVariantAsksNothingAndLeavesTheProfile(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	noStdin(t)
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"delete", "claude:review:opus"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	if !profile.Exists(a, "review") {
+		t.Fatal("deleting a variant removed the profile")
+	}
+	if _, err := profile.VariantArgs(a, "review", "opus"); err == nil {
+		t.Error("the store entry outlived the delete")
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:opus")); !os.IsNotExist(err) {
+		t.Error("the variant's wrapper outlived the delete")
+	}
+	if err := dispatch([]string{"delete", "claude:review:ghost"}); err == nil {
+		t.Error("deleting a variant that does not exist = nil error, want an error")
+	}
+}
+
+// A variant without its parent is a command that fails confusingly — the same
+// reason delete already removes wrappers. Revert either half of the cascade
+// (DeleteVariants, or the wrapper loop) and this fails.
+func TestDeleteAProfileRemovesItsVariantsAndTheirWrappers(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"variant", "claude:review:ci", "--", "-p"},
+		{"delete", "--yes", "claude:review"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
+		t.Errorf("the variants outlived their profile: %v", got)
+	}
+	for _, v := range []string{"opus", "ci"} {
+		if _, err := os.Stat(filepath.Join(bin, "claude:review:"+v)); !os.IsNotExist(err) {
+			t.Errorf("the wrapper for claude:review:%s outlived its profile", v)
+		}
+	}
+}
+
+// Deleting a profile names the variants that go with it, so the answer is given
+// with the whole cost in view.
+func TestDeleteAProfileNamesItsVariantsInTheConfirmation(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	noStdin(t)
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"variant", "claude:review:ci", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	out, err := stderrOf(t, func() error { return dispatch([]string{"delete", "claude:review"}) })
+	if err == nil {
+		t.Fatal("delete with no way to confirm = nil error, want a refusal")
+	}
+	for _, want := range []string{"2 variants", "opus", "ci"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the prompt %q does not mention %q", out, want)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	if !profile.Exists(a, "review") {
+		t.Error("delete removed the profile without an answer")
+	}
+}
+
+// --- ap list -----------------------------------------------------------------
+
+// A command whose name silently disables every permission prompt is a real
+// hazard, and ap exists precisely so that you have enough profiles not to
+// remember what each one does. Printing the arguments is what stops that being
+// invisible, without inventing any special handling for that flag in
+// particular — and it is free, because the store is already a list of strings.
+func TestListShowsVariantsNestedUnderTheirProfileWithTheirArguments(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "--dangerously-skip-permissions", "--effort=xhigh"},
+		{"variant", "claude:review:ci", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
+	for _, want := range []string{
+		"review",
+		"review:opus",
+		"--dangerously-skip-permissions --effort=xhigh",
+		"review:ci",
+		"-p",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ap list output does not contain %q:\n%s", want, out)
+		}
+	}
+	// The variant lines are nested under the agent's line, not mixed into the
+	// profile column, or the listing stops being readable down the page.
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want one agent line and two variant lines, got %d:\n%s", len(lines), out)
+	}
+	if strings.Contains(lines[0], "review:opus") {
+		t.Errorf("the variant is on the profile line: %q", lines[0])
+	}
+}
+
+// scripts/smoke.sh parses this output — `for ag in $("$AP" list | ...)` — and an
+// indented variant line reaching that loop becomes a bogus agent name, red-ing
+// two blocks that have nothing to do with variants. The contract is that an
+// agent line starts in column 0 and a variant line is indented; this applies
+// smoke's own filter and asserts what it yields, so the coupling fails here
+// rather than on somebody's machine at release time.
+func TestListTopLevelStaysParseableByScriptsSmoke(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "--dangerously-skip-permissions"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	out := stdoutOf(t, func() error { return dispatch([]string{"list"}) })
+
+	// The same selection scripts/smoke.sh's agents() makes: lines that begin in
+	// column 0, up to the first colon.
+	var got []string
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if line == "" || line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
+			t.Fatalf("agent line %q has no colon; smoke.sh's filter yields nothing for it", line)
+		}
+		got = append(got, name)
+	}
+	if strings.Join(got, " ") != strings.Join(agent.Names(), " ") {
+		t.Errorf("smoke.sh's filter over `ap list` yields %v, want exactly the agents %v", got, agent.Names())
+	}
+}
+
+// --- what survives a failure partway through --------------------------------
+
+// The irreversible thing has already happened by the time the wrappers are
+// removed, so a wrapper ap refuses to touch must not abandon the rest of the
+// cascade or swallow the receipt. It used to do both: `ap delete` printed only
+// "refusing to remove ...", never mentioned the profile it had just erased, and
+// left the later variants' wrappers pointing at a store it had already emptied.
+func TestDeleteReportsTheProfileEvenWhenAWrapperIsRefused(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:aaa", "--", "-p"},
+		{"variant", "claude:review:zzz", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	// Something ap did not write, sitting where the first variant's wrapper was.
+	foreign := filepath.Join(bin, "claude:review:aaa")
+	if err := os.WriteFile(foreign, []byte("#!/bin/sh\necho not ours\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stdoutOf(t, func() error { return dispatch([]string{"delete", "--yes", "claude:review"}) })
+	if !strings.Contains(out, `deleted "claude:review"`) {
+		t.Errorf("the receipt never said what was deleted:\n%s", out)
+	}
+	// The refusal must not have stopped the variant after it.
+	if _, err := os.Stat(filepath.Join(bin, "claude:review:zzz")); !os.IsNotExist(err) {
+		t.Error("the cascade stopped at the refused wrapper; a later variant kept its wrapper")
+	}
+	// And the foreign file is still not ours to remove.
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("ap removed a file it did not write: %v", err)
+	}
+	a, _ := agent.Lookup("claude")
+	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
+		t.Errorf("the store outlived the profile: %v", got)
+	}
+}
+
+// One unreadable entry must not take the listing down with it. It used to
+// return the error, so `ap list` printed the claude line and then aborted with
+// exit 1 — codex, pi and opencode never appeared. That also silently defeated
+// scripts/smoke.sh's agents(), which parses this output: it yielded one agent
+// instead of four, and the two blocks driven by it tested nothing while
+// reporting nothing wrong.
+func TestListReportsAnUnreadableVariantWithoutAbandoningTheRest(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:good", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	a, _ := agent.Lookup("claude")
+	// A zero-byte entry: what an interrupted write used to be able to leave.
+	empty := filepath.Join(profile.VariantsRoot(), a.Name, "review", "broken")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stdoutOf(t, func() error { return dispatch([]string{"list"}) })
+	if !strings.Contains(out, "review:broken") {
+		t.Errorf("the unreadable entry is not reported at all:\n%s", out)
+	}
+	if !strings.Contains(out, "review:good") {
+		t.Errorf("a readable variant was lost:\n%s", out)
+	}
+	// Every agent still gets its line, which is what smoke.sh's agents() reads.
+	for _, name := range agent.Names() {
+		if !strings.Contains(out, name+":") {
+			t.Errorf("agent %q vanished from the listing:\n%s", name, out)
 		}
 	}
 }

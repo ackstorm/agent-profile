@@ -114,6 +114,52 @@ func parseRef(ref string, allowDefault bool) (agent.Agent, string, error) {
 	return a, parts[1], nil
 }
 
+// ParseVariantRef splits "<agent>:<profile>" or "<agent>:<profile>:<variant>",
+// returning an empty variant for the two-segment form. Rejects Default via
+// ValidName, so every writing command that routes through it — variant, delete,
+// link, unlink — refuses the sentinel.
+func ParseVariantRef(ref string) (agent.Agent, string, string, error) {
+	return parseVariantRef(ref, false)
+}
+
+// ParseVariantRefAllowDefault is ParseVariantRef but additionally accepts
+// Default as the profile of a two-segment reference, for the read-only paths
+// that may resolve to the agent's real config directory: run, which, env.
+func ParseVariantRefAllowDefault(ref string) (agent.Agent, string, string, error) {
+	return parseVariantRef(ref, true)
+}
+
+// parseVariantRef splits at most one trailing ":<variant>" off a reference.
+//
+// Depth is exactly three, permanently. The name is a reference that gets
+// parsed, so it has to be bounded; "for now" would make every later command
+// guess how deep the thing it was handed goes.
+//
+// A variant over Default is refused whatever allowDefault says, which is why
+// the head is parsed with allowDefault=false in that branch. Default is the
+// agent's real config directory, read-only, and nothing is ever created for it
+// — least of all a launch mode that only exists because ap wrote a file.
+func parseVariantRef(ref string, allowDefault bool) (agent.Agent, string, string, error) {
+	switch strings.Count(ref, ":") {
+	case 1:
+		a, name, err := parseRef(ref, allowDefault)
+		return a, name, "", err
+	case 2:
+		i := strings.LastIndex(ref, ":")
+		v := ref[i+1:]
+		// The same ValidName as the profile segment, so "default" is refused here
+		// too, and so the fuzz property covers both with one guard.
+		if err := ValidName(v); err != nil {
+			return agent.Agent{}, "", "", fmt.Errorf("variant: %w", err)
+		}
+		a, name, err := parseRef(ref[:i], false)
+		return a, name, v, err
+	default:
+		return agent.Agent{}, "", "", fmt.Errorf(
+			"bad reference %q: want <agent>:<profile> or <agent>:<profile>:<variant>, e.g. claude:review:opus", ref)
+	}
+}
+
 // Create makes the profile directory. It refuses to clobber an existing one.
 func Create(a agent.Agent, name string) (string, error) {
 	dir := Dir(a, name)

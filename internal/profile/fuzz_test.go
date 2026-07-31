@@ -56,3 +56,36 @@ func FuzzValidName(f *testing.F) {
 		}
 	})
 }
+
+// The reference splitter is the second place user input becomes a path, and it
+// has one job: never hand back a segment ValidName would have rejected.
+// FuzzValidName owns the "accepted name stays one level under the root"
+// property, so this one only has to prove nothing routes around it.
+func FuzzParseVariantRef(f *testing.F) {
+	for _, seed := range []string{
+		"claude:plan", "claude:plan:ci", "claude:plan:ci:extra",
+		"claude:../x:v", "claude:plan:../x", "claude:plan:", "claude::",
+		"claude:default:v", "claude:plan:.hidden", "::", ":", "", "claude",
+		"claude:plan:" + strings.Repeat("a", 300),
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, ref string) {
+		_, name, v, err := ParseVariantRef(ref)
+		if err != nil {
+			return // rejected: nothing to prove
+		}
+		if err := ValidName(name); err != nil {
+			t.Fatalf("ParseVariantRef(%q) accepted profile %q that ValidName rejects: %v", ref, name, err)
+		}
+		if v != "" {
+			if err := ValidName(v); err != nil {
+				t.Fatalf("ParseVariantRef(%q) accepted variant %q that ValidName rejects: %v", ref, v, err)
+			}
+		}
+		if n := strings.Count(ref, ":"); n > 2 {
+			t.Fatalf("ParseVariantRef(%q) accepted %d segments; depth is exactly three", ref, n+1)
+		}
+	})
+}
