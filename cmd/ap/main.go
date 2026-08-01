@@ -33,6 +33,7 @@ Commands:
   list      List profiles and variants, or just one agent's
   create    Create a profile and a wrapper you can type as a command
   variant   Name a set of launch arguments over an existing profile
+            (over one that exists it asks first; --yes answers)
   which     Print the profile directory
   env       Print the environment override, or run a command under it
   run       Run the agent with that profile
@@ -79,9 +80,12 @@ how a variant becomes a prompt prefix: "ap variant claude:plan:exec --
 variant that does not mention "{}" composes exactly as before.
 
 "ap delete" asks before it removes a profile, and --yes is how a script
-answers. A variant is two lines of text, so it goes without asking. "ap link"
-writes a wrapper back; create already does this, so link is for profiles made
-before it did, or after an unlink.
+answers. Deleting a variant goes without asking, since the profile it varies
+is untouched — but writing OVER one asks, and shows both argument lists while
+it does, because a variant's arguments are the part you wrote once and have
+not read since. --yes answers that too. "ap link" writes a wrapper back;
+create already does this, so link is for profiles made before it did, or after
+an unlink.
 
 Examples:
   ap create claude:plan
@@ -94,6 +98,7 @@ Examples:
   ap run claude:review:opus         # those arguments, then yours
   ap variant claude:review:on -- '/code-review {}'
   ap run claude:review:on src/auth.go   # runs "/code-review src/auth.go"
+  ap variant claude:review:on --yes -- '/code-review {} --fix'   # overwrite it
   ap run claude:plan plugin install caveman@caveman
   ap run claude:plan
   ap run claude:plan --effort xhigh
@@ -691,32 +696,52 @@ func linkWrapper(ref string, rc *receipt) {
 	}
 }
 
+// callerShown stands for the caller's arguments in the `runs:` receipt: what a
+// run will put wherever this appears.
+const callerShown = "[your args...]"
+
 // cmdVariant records a set of launch arguments over an existing profile.
 //
 // A noun where every other writing verb is a verb, deliberately: `ap create`
 // makes profiles, and overloading it so the same word sometimes builds forty
 // megabytes and sometimes writes two lines is worse than one noun.
 //
-// No flag parsing at all, and `--` is required: everything after it is the
-// payload, and a flag package would eat it. Requiring the separator is also
-// what makes an empty payload impossible to type by accident — `ap variant
-// <ref> --` with nothing after it would create a name that behaves identically
-// to its parent.
-// callerShown stands for the caller's arguments in the `runs:` receipt: what a
-// run will put wherever this appears.
-const callerShown = "[your args...]"
-
+// `--` is required and the payload is taken from the raw arguments, not from a
+// FlagSet: everything after the separator belongs to the agent, and a flag
+// package would eat `-p`. Requiring the separator is also what makes an empty
+// payload impossible to type by accident — `ap variant <ref> --` with nothing
+// after it would create a name that behaves identically to its parent.
+//
+// The head, before the separator, has no passthrough at all, so it parses with
+// parseAroundRef exactly like `create` and `delete` do — which is what lets
+// --yes sit on either side of the reference.
 func cmdVariant(args []string) error {
-	const use = "usage: ap variant <agent>:<profile>:<variant> -- <args...>"
-	if len(args) < 3 || args[1] != "--" {
-		return errors.New(use)
+	const use = "variant <agent>:<profile>:<variant> [--yes] -- <args...>"
+	sep := -1
+	for i, s := range args {
+		if s == "--" {
+			sep = i
+			break
+		}
 	}
-	a, name, v, err := profile.ParseVariantRef(args[0])
+	if sep < 0 {
+		return errors.New("usage: ap " + use)
+	}
+	payload := args[sep+1:]
+
+	fs := flagSet("variant")
+	yes := fs.Bool("yes", false, "overwrite an existing variant without asking")
+	fs.BoolVar(yes, "y", false, "shorthand for --yes")
+	stop, r, err := parseAroundRef(fs, args[:sep], use)
+	if stop {
+		return err
+	}
+	a, name, v, err := profile.ParseVariantRef(r)
 	if err != nil {
 		return err
 	}
 	if v == "" {
-		return fmt.Errorf("%s:%s names no variant\n%s", a.Name, name, use)
+		return fmt.Errorf("%s:%s names no variant\nusage: ap %s", a.Name, name, use)
 	}
 	// Never creates the parent implicitly: a profile is the expensive half, and
 	// this command writes two lines.
@@ -724,12 +749,24 @@ func cmdVariant(args []string) error {
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}
-	payload := args[2:]
-	if err := profile.WriteVariant(a, name, v, payload); err != nil {
+
+	// replace is decided here rather than passed straight from --yes, and the
+	// difference matters: for a variant that does not exist, false is what makes
+	// WriteVariant publish with Link, so one created in the gap between this read
+	// and that write is refused rather than silently clobbered. --yes answers a
+	// question; it does not turn every write into an overwrite.
+	was, err := profile.VariantArgs(a, name, v)
+	replace := err == nil
+	ref := a.Name + ":" + name + ":" + v
+	if replace && !*yes {
+		if err := confirmOverwrite(ref, was, payload); err != nil {
+			return err
+		}
+	}
+	if err := profile.WriteVariant(a, name, v, payload, replace); err != nil {
 		return err
 	}
 
-	ref := a.Name + ":" + name + ":" + v
 	rc := &receipt{}
 	rc.add("profile", tilde(profile.Dir(a, name)))
 	rc.add("args", strings.Join(payload, " "))
@@ -763,7 +800,15 @@ func cmdVariant(args []string) error {
 	// permission prompt is a real hazard, and this costs nothing: the store is
 	// already a list of strings.
 	linkWrapper(ref, rc)
-	rc.print(fmt.Sprintf("created %q", ref))
+	// "replaced", not "created", when it was. The receipt is the record of what
+	// just happened, and a variant whose arguments were silently swapped under a
+	// line that says "created" is the kind of report that teaches you to stop
+	// reading receipts.
+	verb := "created"
+	if replace {
+		verb = "replaced"
+	}
+	rc.print(fmt.Sprintf("%s %q", verb, ref))
 	return nil
 }
 
@@ -1400,16 +1445,58 @@ func confirm(dir string, variants []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "\n  and its %d %s: %s", n, noun, strings.Join(variants, ", "))
 	}
+	yes, noTerminal := answered()
+	if noTerminal {
+		return errors.New("delete needs a terminal to confirm; pass --yes")
+	}
+	if yes {
+		return nil
+	}
+	return errors.New("cancelled — nothing removed")
+}
+
+// answered prints the prompt's tail and reads the reply. Shared by the two
+// questions ap asks, so the rule that makes them safe in a script is written
+// once: EOF is not consent. With no terminal there is nobody to answer, so the
+// answer has to be stated up front with --yes.
+//
+// Reading the answer rather than testing for a tty also means `echo y | ap
+// delete ...` works and /dev/null does not, which is the behaviour a script
+// wants from both.
+func answered() (yes, noTerminal bool) {
 	fmt.Fprint(os.Stderr, " [y/N] ")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && line == "" {
 		fmt.Fprintln(os.Stderr)
-		return errors.New("delete needs a terminal to confirm; pass --yes")
+		return false, true
 	}
-	if s := strings.ToLower(strings.TrimSpace(line)); s == "y" || s == "yes" {
+	s := strings.ToLower(strings.TrimSpace(line))
+	return s == "y" || s == "yes", false
+}
+
+// confirmOverwrite asks before replacing a variant's arguments, and shows both
+// sets while asking.
+//
+// Showing the old ones is the whole value of the question. What you lose is a
+// line of flags you wrote once and have not read since — which is the same
+// reason `ap list` prints them — and a prompt that only said "overwrite? [y/N]"
+// would be asking you to consent to something it declined to show you. `ap
+// delete` names the variants it would take with the profile for the same reason.
+func confirmOverwrite(ref string, was, now []string) error {
+	// The trailing newline gives the question its own line. Both argument lists
+	// run past 80 columns routinely — that is why they are worth showing — and
+	// `[y/N]` tacked onto the end of the second one is a question you scroll to
+	// find.
+	fmt.Fprintf(os.Stderr, "? overwrite %s\n    was  %s\n    now  %s\n",
+		ref, strings.Join(was, " "), strings.Join(now, " "))
+	yes, noTerminal := answered()
+	if noTerminal {
+		return fmt.Errorf("%s already exists, and overwriting needs a terminal to confirm; pass --yes", ref)
+	}
+	if yes {
 		return nil
 	}
-	return errors.New("cancelled — nothing removed")
+	return errors.New("cancelled — the variant is unchanged")
 }
 
 func cmdUnlink(args []string) error {

@@ -42,10 +42,16 @@ func VariantsRoot() string {
 
 // WriteVariant records the launch arguments for a:name:v.
 //
-// Refuses an existing variant, exactly as Create refuses an existing profile.
-// `ap delete` then `ap variant` is how arguments change; there is no --force,
-// because the file is two lines and the pair of commands is one line of shell.
-func WriteVariant(a agent.Agent, name, v string, args []string) error {
+// replace is false for the default, which refuses an existing variant exactly as
+// Create refuses an existing profile. `ap variant` asks before passing true, and
+// --yes is how a script answers — the same shape as `ap delete`.
+//
+// The asking is the point, not the refusing. This used to have no override at
+// all, on the grounds that `ap delete` then `ap variant` is one line of shell;
+// what that argument missed is that the pair is one line only when you already
+// know the variant exists, and you find that out from an error after typing the
+// whole payload.
+func WriteVariant(a agent.Agent, name, v string, args []string, replace bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("variant %s:%s:%s would carry no arguments, so it would behave identically to %s:%s",
 			a.Name, name, v, a.Name, name)
@@ -84,12 +90,18 @@ func WriteVariant(a agent.Agent, name, v string, args []string) error {
 	// an interrupted `ap variant` (a kill, ENOSPC) leaves a TRUNCATED argument
 	// list that reads back without error — and a variant whose first line is
 	// --dangerously-skip-permissions and whose remaining lines were lost still
-	// execs. Link is what makes the entry appear complete or not at all, and it
-	// keeps the O_EXCL refusal atomic: it fails with EEXIST rather than
-	// clobbering, which a Rename would not.
+	// execs. Publishing the finished temporary file is what makes the entry
+	// appear complete or not at all.
+	//
+	// Which call publishes it is exactly the refuse-or-replace decision, and that
+	// is why it is not a check followed by a write. Link fails with EEXIST rather
+	// than clobbering, so the refusal is atomic — a Stat-then-Link would refuse a
+	// variant written between the two, and worse, permit one. Rename replaces
+	// atomically, so a reader either sees all of the old arguments or all of the
+	// new ones, never a mix.
 	//
 	// The temporary name is dot-prefixed so Variants skips it: a leftover from a
-	// crash between write and link is invisible rather than a variant nobody
+	// crash between write and publish is invisible rather than a variant nobody
 	// can explain.
 	rel := filepath.Join(a.Name, name, v)
 	tmp := filepath.Join(a.Name, name, "."+v+".tmp")
@@ -107,11 +119,20 @@ func WriteVariant(a agent.Agent, name, v string, args []string) error {
 		_ = root.Remove(tmp)
 		return err
 	}
+	if replace {
+		// Rename consumes the temporary name, so there is nothing left to clean
+		// up and nothing to remove on the way out.
+		return root.Rename(tmp, rel)
+	}
 	err = root.Link(tmp, rel)
 	_ = root.Remove(tmp)
 	if errors.Is(err, fs.ErrExist) {
-		return fmt.Errorf("variant %s:%s:%s already exists; change it with: ap delete %s:%s:%s && ap variant %s:%s:%s -- <args...>",
-			a.Name, name, v, a.Name, name, v, a.Name, name, v)
+		// `ap variant` looks the variant up and offers to overwrite before it gets
+		// here, so reaching this means the entry appeared between the two — the
+		// race Link exists to lose safely. The advice is the same either way, and
+		// it is the advice a caller of this function directly needs too.
+		return fmt.Errorf("variant %s:%s:%s already exists; overwrite it with: ap variant %s:%s:%s --yes -- <args...>",
+			a.Name, name, v, a.Name, name, v)
 	}
 	return err
 }

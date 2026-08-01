@@ -59,7 +59,7 @@ exactly that reason — see "`default`" below.
 |---|---|
 | `ap list [--raw] [agent]` | your profiles and their variants, as a tree — always includes `default`, and every supported agent. `--raw` prints the same listing tab-separated, for scripts |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
-| `ap variant <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it. May leave `{}` where your run-time arguments should be substituted, which is how a variant becomes a prompt prefix |
+| `ap variant [--yes] <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it. May leave `{}` where your run-time arguments should be substituted, which is how a variant becomes a prompt prefix. Over a variant that exists it asks first, showing both argument lists; `--yes` answers |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
 | `ap env <agent>:<profile>[:<variant>]` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile>[:<variant>] <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory. `cmd` never receives a variant's arguments: those are the agent's flags |
@@ -283,9 +283,24 @@ A few things a variant deliberately is not:
 - **Not a profile.** No directory, no shim, no links, no first-run seeding.
   `ap which claude:review:opus` and `ap env claude:review:opus` answer for the
   parent, because that is literally its configuration.
-- **Not editable in place.** `ap variant` refuses one that exists, exactly as
-  `ap create` refuses a profile that exists. `ap delete` then `ap variant` is
-  how arguments change; there is no `--force` for a two-line file.
+- **Not silently editable.** `ap variant` over one that exists asks first, and
+  shows both argument lists while asking — what you lose is a line of flags you
+  wrote once and have not read since. `--yes` (or `-y`) is how a script answers,
+  the same as `ap delete`. The replacement is atomic, so a reader sees all of
+  the old arguments or all of the new ones, never a mix.
+
+  ```console
+  $ ap variant claude:execute:test -- --effort=xhigh '/superpowers:executing-plans {}'
+  ? overwrite claude:execute:test
+      was  --dangerously-skip-permissions --effort=xhigh /superpowers:executing-plans
+      now  --effort=xhigh /superpowers:executing-plans {}
+   [y/N]
+  ```
+
+  This used to refuse outright, on the grounds that `ap delete` then `ap variant`
+  is one line of shell. What that missed is that the pair is one line only once
+  you know the variant exists — and you find that out from an error, after
+  typing the whole payload.
 - **Not cloned by `--from`.** A clone is a different profile, and inheriting
   `--dangerously-skip-permissions` without being asked is the opposite of what a
   new profile should do.

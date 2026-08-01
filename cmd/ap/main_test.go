@@ -652,6 +652,25 @@ func noStdin(t *testing.T) {
 	t.Cleanup(func() { os.Stdin = orig; _ = f.Close() })
 }
 
+// stdinSays points os.Stdin at a pipe carrying one answer, which is the
+// "somebody typed it" case. A pipe rather than a tty on purpose: `echo y | ap
+// delete ...` has to work, and testing for a tty instead of reading the answer
+// would break that.
+func stdinSays(t *testing.T, answer string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.WriteString(answer + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = orig; _ = r.Close() })
+}
+
 // Delete is the only irreversible thing this program does, and a profile holds
 // its own session transcripts. With no answer available it must refuse, and the
 // profile must still be there afterwards - the second half is the point. Revert
@@ -676,6 +695,165 @@ func TestDeleteWithoutYesAndWithNoAnswerKeepsTheProfile(t *testing.T) {
 	}
 	if profile.Exists(a, "keepme") {
 		t.Error("delete --yes left the profile behind")
+	}
+}
+
+// --- overwriting a variant ---------------------------------------------------
+
+// firstVariant records claude:execute:test, for the tests below whose subject is
+// the SECOND write over it. Its own receipt goes nowhere.
+func firstVariant(t *testing.T, args ...string) {
+	t.Helper()
+	stdoutOf(t, func() error {
+		return dispatch(append([]string{"variant", "claude:execute:test", "--"}, args...))
+	})
+}
+
+// With nobody to answer, the arguments already stored survive. The second half
+// is the point: an implementation that refused after writing would pass a test
+// that only checked the error.
+func TestVariantOverwriteWithNoAnswerKeepsTheOldArguments(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
+		t.Fatal(err)
+	}
+	firstVariant(t, "-p")
+
+	noStdin(t)
+	if err := dispatch([]string{"variant", "claude:execute:test", "--", "--effort=xhigh"}); err == nil {
+		t.Error("overwriting with no way to confirm = nil error, want a refusal")
+	}
+	got, err := profile.VariantArgs(a, "execute", "test")
+	if err != nil || strings.Join(got, " ") != "-p" {
+		t.Errorf("VariantArgs = %q (%v), want the original arguments", got, err)
+	}
+}
+
+// Answering no is not the same as failing to answer, and both leave the store
+// alone. This is the case a user actually hits: they read the prompt, saw what
+// they were about to lose, and said no.
+func TestVariantAnsweringNoLeavesTheArgumentsAlone(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
+		t.Fatal(err)
+	}
+	firstVariant(t, "-p")
+
+	stdinSays(t, "n")
+	if err := dispatch([]string{"variant", "claude:execute:test", "--", "--effort=xhigh"}); err == nil {
+		t.Error("answering no = nil error, want a refusal")
+	}
+	got, _ := profile.VariantArgs(a, "execute", "test")
+	if strings.Join(got, " ") != "-p" {
+		t.Errorf("VariantArgs = %q, want the original arguments", got)
+	}
+}
+
+// The prompt shows what is being lost as well as what replaces it. What you lose
+// is a line of flags you wrote once and have not read since — the same reason
+// `ap list` prints them — so a question that showed only the new ones would be
+// asking for consent to something it declined to show.
+func TestVariantOverwritePromptShowsBothArgumentLists(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
+		t.Fatal(err)
+	}
+	firstVariant(t, "--dangerously-skip-permissions", "-p")
+
+	stdinSays(t, "n")
+	prompt, err := stderrOf(t, func() error {
+		return dispatch([]string{"variant", "claude:execute:test", "--", "--effort=xhigh"})
+	})
+	if err == nil {
+		t.Fatal("answering no = nil error")
+	}
+	for _, want := range []string{
+		"claude:execute:test",
+		"--dangerously-skip-permissions -p", // what it was
+		"--effort=xhigh",                    // what it would become
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not show %q:\n%s", want, prompt)
+		}
+	}
+}
+
+// --yes is the stated way through, on either side of the reference, and the
+// receipt says "replaced" rather than "created" — a variant whose arguments were
+// swapped under a line saying "created" teaches you to stop reading receipts.
+func TestVariantYesOverwritesFromEitherSideOfTheReference(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
+		t.Fatal(err)
+	}
+	firstVariant(t, "-p")
+
+	noStdin(t) // --yes must not consult stdin at all
+	out := stdoutOf(t, func() error {
+		return dispatch([]string{"variant", "claude:execute:test", "--yes", "--", "--effort=xhigh"})
+	})
+	if !strings.Contains(out, `replaced "claude:execute:test"`) {
+		t.Errorf("the receipt does not say it replaced anything:\n%s", out)
+	}
+	got, _ := profile.VariantArgs(a, "execute", "test")
+	if strings.Join(got, " ") != "--effort=xhigh" {
+		t.Errorf("VariantArgs = %q, want the new arguments", got)
+	}
+
+	// Before the reference, and the short form, both reach the same place.
+	stdoutOf(t, func() error {
+		return dispatch([]string{"variant", "-y", "claude:execute:test", "--", "--effort=low"})
+	})
+	if got, _ := profile.VariantArgs(a, "execute", "test"); strings.Join(got, " ") != "--effort=low" {
+		t.Errorf("VariantArgs = %q, want the arguments from the -y form", got)
+	}
+}
+
+// --yes on a variant that does not exist creates it, without complaint. It
+// answers a question; it does not assert that one was going to be asked.
+func TestVariantYesOnANewVariantJustCreatesIt(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
+		t.Fatal(err)
+	}
+	noStdin(t)
+	out := stdoutOf(t, func() error {
+		return dispatch([]string{"variant", "claude:execute:new", "--yes", "--", "-p"})
+	})
+	if !strings.Contains(out, `created "claude:execute:new"`) {
+		t.Errorf("the receipt does not say it created it:\n%s", out)
+	}
+}
+
+// The payload is taken from the raw arguments, never from the FlagSet. Otherwise
+// `-y` meant for the agent becomes ap's own flag and vanishes — and it vanishes
+// silently, since it is a bool that was going to be true anyway.
+func TestVariantDoesNotParseFlagsAfterTheSeparator(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
+		t.Fatal(err)
+	}
+	noStdin(t)
+	stdoutOf(t, func() error {
+		return dispatch([]string{"variant", "claude:execute:flags", "--", "-y", "--yes", "--raw"})
+	})
+	got, err := profile.VariantArgs(a, "execute", "flags")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-y", "--yes", "--raw"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("VariantArgs = %q, want %q — everything after `--` is the agent's", got, want)
 	}
 }
 
@@ -1003,7 +1181,7 @@ func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
 		t.Fatal(err)
 	}
 	baked := []string{"--dangerously-skip-permissions", "--model=claude-opus-5[1m]"}
-	if err := profile.WriteVariant(a, "review", "opus", baked); err != nil {
+	if err := profile.WriteVariant(a, "review", "opus", baked, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1039,7 +1217,7 @@ func TestRunArgsFillsThePlaceholderInsteadOfAppending(t *testing.T) {
 		t.Fatal(err)
 	}
 	baked := []string{"--effort=xhigh", "/superpowers:executing-plans " + placeholder}
-	if err := profile.WriteVariant(a, "execute", "plan", baked); err != nil {
+	if err := profile.WriteVariant(a, "execute", "plan", baked, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1074,7 +1252,7 @@ func TestRunArgsFillsEveryPlaceholderAndJoinsTheCaller(t *testing.T) {
 	// leaves the first one half-done, and that mutation reads as green against
 	// a payload where every argument holds exactly one hole.
 	baked := []string{"--append-system-prompt", placeholder + " then " + placeholder, "/plan " + placeholder}
-	if err := profile.WriteVariant(a, "execute", "twice", baked); err != nil {
+	if err := profile.WriteVariant(a, "execute", "twice", baked, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1111,7 +1289,7 @@ func TestRunArgsWithoutAPlaceholderStillAppends(t *testing.T) {
 		t.Fatal(err)
 	}
 	baked := []string{"--dangerously-skip-permissions", "/code-review"}
-	if err := profile.WriteVariant(a, "review", "ci", baked); err != nil {
+	if err := profile.WriteVariant(a, "review", "ci", baked, false); err != nil {
 		t.Fatal(err)
 	}
 

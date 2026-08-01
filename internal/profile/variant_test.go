@@ -32,7 +32,7 @@ func TestVariantArgsRoundTripWithoutAShell(t *testing.T) {
 		"",              // an empty line is an empty argument, and "" is legal argv
 		"/code-review",  // the final newline terminates, it does not separate
 	}
-	if err := WriteVariant(a, "review", "opus", want); err != nil {
+	if err := WriteVariant(a, "review", "opus", want, false); err != nil {
 		t.Fatal(err)
 	}
 	got, err := VariantArgs(a, "review", "opus")
@@ -51,7 +51,7 @@ func TestVariantArgsRoundTripWithoutAShell(t *testing.T) {
 func TestVariantArgsKeepsATrailingEmptyArgument(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")
-	if err := WriteVariant(a, "review", "trailing", []string{"-p", ""}); err != nil {
+	if err := WriteVariant(a, "review", "trailing", []string{"-p", ""}, false); err != nil {
 		t.Fatal(err)
 	}
 	got, err := VariantArgs(a, "review", "trailing")
@@ -69,7 +69,7 @@ func TestVariantArgsKeepsATrailingEmptyArgument(t *testing.T) {
 func TestWriteVariantRefusesANewlineInAnArgument(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")
-	err := WriteVariant(a, "review", "nl", []string{"-p", "line one\nline two"})
+	err := WriteVariant(a, "review", "nl", []string{"-p", "line one\nline two"}, false)
 	if err == nil {
 		t.Fatal("a newline in an argument was accepted; the store would read back two arguments")
 	}
@@ -86,7 +86,7 @@ func TestWriteVariantRefusesANewlineInAnArgument(t *testing.T) {
 func TestWriteVariantRefusesATabInAnArgument(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")
-	err := WriteVariant(a, "review", "tab", []string{"-p", "one\ttwo"})
+	err := WriteVariant(a, "review", "tab", []string{"-p", "one\ttwo"}, false)
 	if err == nil {
 		t.Fatal("a tab in an argument was accepted; `ap list --raw` would read back two arguments")
 	}
@@ -98,25 +98,76 @@ func TestWriteVariantRefusesATabInAnArgument(t *testing.T) {
 func TestWriteVariantRefusesAnEmptyPayload(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")
-	if err := WriteVariant(a, "review", "nothing", nil); err == nil {
+	if err := WriteVariant(a, "review", "nothing", nil, false); err == nil {
 		t.Error("a variant with no arguments was accepted; it would behave identically to its parent")
 	}
 }
 
-// Editing is delete-then-write, exactly as a profile is. No --force: the file is
-// two lines and the pair of commands is one line of shell.
+// replace=false refuses, and refuses without touching what is there. `ap variant`
+// passes false whenever it did not find an existing variant to ask about, so this
+// is the path a race takes: an entry created between that read and this write is
+// refused rather than clobbered by someone who was never asked about it.
 func TestWriteVariantRefusesAnExistingVariant(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")
-	if err := WriteVariant(a, "review", "opus", []string{"-p"}); err != nil {
+	if err := WriteVariant(a, "review", "opus", []string{"-p"}, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteVariant(a, "review", "opus", []string{"--effort=xhigh"}); err == nil {
+	if err := WriteVariant(a, "review", "opus", []string{"--effort=xhigh"}, false); err == nil {
 		t.Fatal("an existing variant was silently overwritten")
 	}
 	got, err := VariantArgs(a, "review", "opus")
 	if err != nil || !slices.Equal(got, []string{"-p"}) {
 		t.Errorf("VariantArgs = %q (%v), want the original arguments", got, err)
+	}
+}
+
+// replace=true publishes over whatever is there, and the whole payload changes
+// together. The old arguments are gone, not merged: a variant is one list, and a
+// replacement that left the tail of a longer previous list behind would build a
+// command line nobody wrote.
+func TestWriteVariantReplacesTheWholePayload(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a := agentOrFail(t, "claude")
+	long := []string{"--dangerously-skip-permissions", "--model=opus", "--effort=xhigh", "-p"}
+	if err := WriteVariant(a, "review", "opus", long, false); err != nil {
+		t.Fatal(err)
+	}
+	short := []string{"--effort=low"}
+	if err := WriteVariant(a, "review", "opus", short, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := VariantArgs(a, "review", "opus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, short) {
+		t.Errorf("VariantArgs = %q, want exactly %q — the replacement is the whole list", got, short)
+	}
+}
+
+// A replacement leaves nothing behind under the dot-prefixed temporary name.
+// Rename consumes it; a Link-then-Remove would not, and a leftover there is a
+// file `ap list` cannot show and nobody can explain.
+func TestWriteVariantReplacementLeavesNoTemporary(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a := agentOrFail(t, "claude")
+	for _, replace := range []bool{false, true} {
+		if err := WriteVariant(a, "review", "opus", []string{"-p"}, replace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(VariantsRoot(), a.Name, "review"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") {
+			t.Errorf("a temporary survived the replacement: %q", e.Name())
+		}
+	}
+	if len(entries) != 1 {
+		t.Errorf("the store holds %d entries after one create and one replace, want 1", len(entries))
 	}
 }
 
@@ -131,7 +182,7 @@ func TestVariantsAreNotStoredInTheProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteVariant(a, "review", "opus", []string{"-p"}); err != nil {
+	if err := WriteVariant(a, "review", "opus", []string{"-p"}, false); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -154,7 +205,7 @@ func TestVariantsListsSortedAndToleratesNone(t *testing.T) {
 		t.Errorf("Variants of a profile with none = (%v,%v), want (empty,nil)", got, err)
 	}
 	for _, v := range []string{"opus", "ci"} {
-		if err := WriteVariant(a, "review", v, []string{"-p"}); err != nil {
+		if err := WriteVariant(a, "review", v, []string{"-p"}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -171,7 +222,7 @@ func TestDeleteVariantRemovesOneAndDeleteVariantsRemovesAll(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")
 	for _, v := range []string{"opus", "ci"} {
-		if err := WriteVariant(a, "review", v, []string{"-p"}); err != nil {
+		if err := WriteVariant(a, "review", v, []string{"-p"}, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -202,7 +253,7 @@ func TestDeleteVariantRemovesOneAndDeleteVariantsRemovesAll(t *testing.T) {
 func TestVariantArgsNamesTheVariantsThatExist(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")
-	if err := WriteVariant(a, "review", "ci", []string{"-p"}); err != nil {
+	if err := WriteVariant(a, "review", "ci", []string{"-p"}, false); err != nil {
 		t.Fatal(err)
 	}
 	_, err := VariantArgs(a, "review", "opus")
@@ -238,7 +289,7 @@ func TestWriteVariantLeavesNoVisibleTemporary(t *testing.T) {
 	if got, err := Variants(a, "review"); err != nil || len(got) != 0 {
 		t.Errorf("a leftover temporary is listed as a variant: %v (%v)", got, err)
 	}
-	if err := WriteVariant(a, "review", "opus", []string{"-p"}); err != nil {
+	if err := WriteVariant(a, "review", "opus", []string{"-p"}, false); err != nil {
 		t.Fatalf("a leftover temporary blocked a write: %v", err)
 	}
 
