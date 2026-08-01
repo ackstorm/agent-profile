@@ -724,9 +724,11 @@ func cmdVariant(args []string) error {
 	//
 	// A variant whose last argument is a positional prompt is terminal: claude's
 	// grammar is `claude [options] [command] [prompt]`, one trailing positional,
-	// so a second one is rejected by the agent. Printing what a run will
-	// actually look like is how that becomes visible at the moment the variant
-	// is created rather than the first time it fails.
+	// and a second one is DROPPED IN SILENCE — measured, not assumed:
+	// `claude -p "say FIRST" "say SECOND"` answers FIRST and exits 0. There is no
+	// error to read, which is exactly why printing what a run will actually look
+	// like matters: it is visible at the moment the variant is created, and never
+	// afterwards.
 	//
 	// Detecting it instead would be a guess about someone else's argv grammar —
 	// `--model opus` also ends in a non-flag word — and this repository

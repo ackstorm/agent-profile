@@ -307,8 +307,17 @@ $ ap delete claude:review
 
 **A variant that ends in a prompt is terminal.** `claude`'s grammar takes one
 trailing positional, so a variant ending in `"/code-review"` composes with flags
-but not with a second prompt. `ap variant` prints the composed line when it
-creates one, so you can see it then rather than the first time it fails.
+but not with a second prompt — and the second one is **dropped in silence**,
+not refused: `claude -p "say FIRST" "say SECOND"` answers `FIRST` and exits 0.
+So a variant cannot be a prompt *prefix* you complete at run time. Quote the
+whole prompt as one argument instead:
+
+```bash
+ap run claude:plan "/superpowers:executing-plans docs/plans/some-plan.md"
+```
+
+`ap variant` prints the composed line when it creates one, so you can see the
+shape then — there is no failure to notice later.
 
 ### Flag order matters for `run`
 
