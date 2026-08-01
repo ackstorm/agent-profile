@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1207,11 +1208,37 @@ func TestDeleteAProfileNamesItsVariantsInTheConfirmation(t *testing.T) {
 
 // --- ap list -----------------------------------------------------------------
 
+// treeGlyphs are the box-drawing characters and spacing a listing line can be
+// prefixed with. Trimming them from the left is how these tests recover the
+// reference a line carries — and it is why a leaf printed as ":opus" instead of
+// the qualified form fails: what is left would not start with the agent's name.
+const treeGlyphs = "├└│─ "
+
+// listLineFor returns the listing line carrying exactly this reference, with the
+// tree prefix removed. Matching on the reference rather than on Contains is what
+// keeps `claude:review` from being answered by the `claude:review:opus` line.
+func listLineFor(t *testing.T, out, ref string) string {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		body := strings.TrimLeft(line, treeGlyphs)
+		if body == ref || strings.HasPrefix(body, ref+" ") {
+			return body
+		}
+	}
+	t.Fatalf("no line carries the reference %q:\n%s", ref, out)
+	return ""
+}
+
 // A command whose name silently disables every permission prompt is a real
 // hazard, and ap exists precisely so that you have enough profiles not to
 // remember what each one does. Printing the arguments is what stops that being
 // invisible, without inventing any special handling for that flag in
 // particular — and it is free, because the store is already a list of strings.
+//
+// The reference is qualified on every line, including a variant's, because the
+// listing is read to answer "which one was it?" and the answer has to be
+// copyable where it is read. A tree could get away with printing the leaf name
+// alone; this one does not, and that is the point of the format.
 func TestListShowsEachVariantAsAPasteableReferenceWithItsArguments(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -1225,42 +1252,64 @@ func TestListShowsEachVariantAsAPasteableReferenceWithItsArguments(t *testing.T)
 		}
 	}
 	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
-	for _, want := range []string{
-		"review",
-		"claude:review:opus",
-		"--dangerously-skip-permissions --effort=xhigh",
-		"claude:review:ci",
-		"-p",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("ap list output does not contain %q:\n%s", want, out)
-		}
-	}
-	// The reference and its arguments are on separate lines: the reference alone
-	// so it can be pasted after `ap run`, the arguments below so the part that
-	// overflows has no column left to fall out of alignment. A line carrying both
-	// is the format this replaced.
-	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	below := map[string]string{
+
+	// The arguments are the tail of the variant's own line, not a line below it
+	// and not somewhere else in the listing.
+	for ref, args := range map[string]string{
 		"claude:review:ci":   "-p",
 		"claude:review:opus": "--dangerously-skip-permissions --effort=xhigh",
-	}
-	for i, line := range lines {
-		ref := strings.TrimSpace(line)
-		args, ok := below[ref]
-		if !ok {
-			continue
-		}
-		delete(below, ref)
-		if i+1 >= len(lines) || strings.TrimSpace(lines[i+1]) != args {
-			t.Errorf("%s: its arguments are not the line below it:\n%s", ref, out)
+	} {
+		line := listLineFor(t, out, ref)
+		if !strings.HasSuffix(line, args) {
+			t.Errorf("%s: the arguments are not on its own line: %q", ref, line)
 		}
 	}
-	if len(below) != 0 {
-		t.Errorf("no line holds just the reference %v:\n%s", below, out)
+	// And the profile's line carries none of them: a variant that collapsed onto
+	// its parent would still satisfy every assertion above.
+	if line := listLineFor(t, out, "claude:review"); line != "claude:review" {
+		t.Errorf("the profile line carries more than its reference: %q", line)
 	}
-	if strings.Contains(lines[0], "review:opus") {
-		t.Errorf("the variant is on the profile line: %q", lines[0])
+}
+
+// The tree is what attaches a variant to the profile it varies. The format this
+// replaced collected every variant into one block at the bottom of the listing,
+// so a name and the thing it modifies were nowhere near each other.
+func TestListNestsEachVariantUnderItsProfile(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"create", "claude:zzz"},
+		{"variant", "claude:review:opus", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	lines := strings.Split(strings.TrimSuffix(
+		stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) }), "\n"), "\n")
+
+	at := func(ref string) int {
+		for i, line := range lines {
+			if body := strings.TrimLeft(line, treeGlyphs); body == ref || strings.HasPrefix(body, ref+" ") {
+				return i
+			}
+		}
+		t.Fatalf("no line carries %q:\n%s", ref, strings.Join(lines, "\n"))
+		return -1
+	}
+	profileAt, variantAt, nextAt := at("claude:review"), at("claude:review:opus"), at("claude:zzz")
+	if variantAt != profileAt+1 {
+		t.Errorf("the variant is not directly under its profile:\n%s", strings.Join(lines, "\n"))
+	}
+	if nextAt < variantAt {
+		t.Errorf("the variant sorted past the next profile:\n%s", strings.Join(lines, "\n"))
+	}
+	// Indented further than its parent, which is what makes the nesting visible
+	// rather than merely ordered.
+	indent := func(i int) int { return len(lines[i]) - len(strings.TrimLeft(lines[i], treeGlyphs)) }
+	if indent(variantAt) <= indent(profileAt) {
+		t.Errorf("the variant is not indented under its profile:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
@@ -1269,6 +1318,11 @@ func TestListShowsEachVariantAsAPasteableReferenceWithItsArguments(t *testing.T)
 // claude:default` would erase the configuration of the agent itself, and
 // profile.ValidName refuses it. Printing it like any other profile is what
 // invites that command in the first place.
+//
+// The marking is on Default's own line, and this reads that line rather than the
+// whole listing. The bracket-and-footnote form this replaced was first tested
+// with a Contains over everything, and the mutation that dropped the brackets
+// left it green — the footnote quoted the bracketed form to explain it.
 func TestListMarksDefaultAsNotAProfile(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -1276,42 +1330,25 @@ func TestListMarksDefaultAsNotAProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
-	// On the agent's own line, not merely somewhere in the output: the footnote
-	// below quotes the bracketed form to explain it, so a Contains over the whole
-	// listing passes with the marking removed. It did, when this test was first
-	// written — the mutation that dropped the brackets from the profile column
-	// left it green.
-	agentLine, _, _ := strings.Cut(out, "\n")
-	_, profiles, ok := strings.Cut(agentLine, ":")
-	if !ok {
-		t.Fatalf("no agent line to read: %q", agentLine)
+
+	line := listLineFor(t, out, "claude:"+profile.Default)
+	if !strings.Contains(line, "read-only") {
+		t.Errorf("%q is printed like any other profile: %q", profile.Default, line)
 	}
-	marked := false
-	for _, p := range strings.Split(profiles, "|") {
-		switch strings.TrimSpace(p) {
-		case profile.Default:
-			t.Errorf("%q is printed like any other profile: %q", profile.Default, agentLine)
-		case "[" + profile.Default + "]":
-			marked = true
-		}
-	}
-	if !marked {
-		t.Errorf("%q is not on the agent line at all: %q", profile.Default, agentLine)
-	}
-	// And the listing says what the brackets mean, in the same form it prints
-	// them: a marking nothing explains is decoration.
-	if !strings.Contains(out, "["+profile.Default+"] is") || !strings.Contains(out, "read-only") {
-		t.Errorf("nothing says what the brackets mean:\n%s", out)
+	// And no ordinary profile carries it, which is what makes it a marking rather
+	// than a banner every row repeats.
+	if other := listLineFor(t, out, "claude:review"); strings.Contains(other, "read-only") {
+		t.Errorf("an ordinary profile carries the marking too: %q", other)
 	}
 }
 
-// scripts/smoke.sh parses this output — `for ag in $("$AP" list | ...)` — and an
-// indented variant line reaching that loop becomes a bogus agent name, red-ing
-// two blocks that have nothing to do with variants. The contract is that an
-// agent line starts in column 0 and a variant line is indented; this applies
-// smoke's own filter and asserts what it yields, so the coupling fails here
-// rather than on somebody's machine at release time.
-func TestListTopLevelStaysParseableByScriptsSmoke(t *testing.T) {
+// scripts/smoke.sh reads this to enumerate the agents. It used to parse the
+// human listing, and that coupling broke twice in ways that reddened blocks
+// testing something else entirely — a variant line reaching the loop became a
+// bogus agent name, and `command -v <that>` then skipped silently. `--raw`
+// exists so nothing has to parse a format meant for reading; this applies
+// smoke's own pipeline, so the coupling fails here rather than at release time.
+func TestListRawIsWhatScriptsSmokeParses(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	for _, args := range [][]string{
@@ -1322,23 +1359,137 @@ func TestListTopLevelStaysParseableByScriptsSmoke(t *testing.T) {
 			t.Fatalf("ap %v: %v", args, err)
 		}
 	}
-	out := stdoutOf(t, func() error { return dispatch([]string{"list"}) })
+	out := stdoutOf(t, func() error { return dispatch([]string{"list", "--raw"}) })
 
-	// The same selection scripts/smoke.sh's agents() makes: lines that begin in
-	// column 0, up to the first colon.
-	var got []string
+	// `cut -f1 | cut -d: -f1 | sort -u`, in Go.
+	seen := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
-		if line == "" || line[0] == ' ' || line[0] == '\t' {
-			continue
-		}
-		name, _, ok := strings.Cut(line, ":")
+		ref, _, _ := strings.Cut(line, "\t")
+		name, _, ok := strings.Cut(ref, ":")
 		if !ok {
-			t.Fatalf("agent line %q has no colon; smoke.sh's filter yields nothing for it", line)
+			t.Fatalf("line %q has no reference in field 1; smoke.sh's filter yields nothing for it", line)
 		}
+		seen[name] = true
+	}
+	got := make([]string, 0, len(seen))
+	for name := range seen {
 		got = append(got, name)
 	}
+	sort.Strings(got)
 	if strings.Join(got, " ") != strings.Join(agent.Names(), " ") {
-		t.Errorf("smoke.sh's filter over `ap list` yields %v, want exactly the agents %v", got, agent.Names())
+		t.Errorf("smoke.sh's filter over `ap list --raw` yields %v, want exactly the agents %v", got, agent.Names())
+	}
+}
+
+// --raw is a machine format, so every line is a reference and a tab-separated
+// argument list: no tree, no padding, no notes, no header. One argument per
+// field rather than one joined string, which is the shape the store already has
+// and is why there is no quoting to get wrong.
+func TestListRawIsOneTabSeparatedLinePerReference(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "--dangerously-skip-permissions", "--model=claude-opus-5[1m]"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	out := stdoutOf(t, func() error { return dispatch([]string{"list", "--raw", "claude"}) })
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+
+	want := map[string][]string{
+		"claude:default":     {},
+		"claude:review":      {},
+		"claude:review:opus": {"--dangerously-skip-permissions", "--model=claude-opus-5[1m]"},
+	}
+	got := map[string][]string{}
+	for _, line := range lines {
+		// Nothing decorates a raw line: no glyph, no leading space, and the note
+		// that marks default in the human listing is absent here.
+		if line != strings.TrimLeft(line, treeGlyphs+"\t") {
+			t.Errorf("a raw line is decorated: %q", line)
+		}
+		if strings.Contains(line, "read-only") {
+			t.Errorf("a raw line carries a human note: %q", line)
+		}
+		fields := strings.Split(line, "\t")
+		got[fields[0]] = fields[1:]
+	}
+	if len(got) != len(want) {
+		t.Fatalf("raw listing has %d references, want %d:\n%s", len(got), len(want), out)
+	}
+	for ref, args := range want {
+		if strings.Join(got[ref], "\x00") != strings.Join(args, "\x00") {
+			t.Errorf("%s: raw fields %q, want %q", ref, got[ref], args)
+		}
+	}
+}
+
+// The two renderers walk the same rows, so a reference cannot exist in one and
+// not the other. That is the property that lets a script read --raw and trust it
+// answers for what a person sees.
+func TestListRawCarriesEveryReferenceTheTreeShows(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"create", "codex:work"},
+		{"variant", "claude:review:opus", "--", "-p"},
+		{"variant", "codex:work:yolo", "--", "-s", "danger-full-access"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	tree := stdoutOf(t, func() error { return dispatch([]string{"list"}) })
+	raw := stdoutOf(t, func() error { return dispatch([]string{"list", "--raw"}) })
+
+	for _, line := range strings.Split(strings.TrimSuffix(raw, "\n"), "\n") {
+		ref, _, _ := strings.Cut(line, "\t")
+		listLineFor(t, tree, ref) // fatal if the tree does not carry it
+	}
+}
+
+// Trailing whitespace is what a padded column produces on the rows that have
+// nothing to put in it. It survives copy-paste, it shows up in diffs of captured
+// output, and nothing about it is visible while writing the code that emits it.
+func TestListPadsNoLineItDoesNotFill(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for _, args := range [][]string{
+		{"create", "claude:review"},
+		{"variant", "claude:review:opus", "--", "-p"},
+	} {
+		if err := dispatch(args); err != nil {
+			t.Fatalf("ap %v: %v", args, err)
+		}
+	}
+	for _, cmd := range [][]string{{"list"}, {"list", "--raw"}} {
+		out := stdoutOf(t, func() error { return dispatch(cmd) })
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if line != strings.TrimRight(line, " \t") {
+				t.Errorf("ap %v: line has trailing whitespace: %q", cmd, line)
+			}
+		}
+	}
+}
+
+// The agent is optional, so list cannot use parseAroundRef, which requires one.
+// It parses twice all the same, and this is why: a flag typed after the agent is
+// the order people reach for, and list has no passthrough for either order to be
+// ambiguous about.
+func TestListTakesItsFlagOnEitherSideOfTheAgent(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	before := stdoutOf(t, func() error { return dispatch([]string{"list", "--raw", "claude"}) })
+	after := stdoutOf(t, func() error { return dispatch([]string{"list", "claude", "--raw"}) })
+	if before != after {
+		t.Errorf("the flag before the agent gives\n%s\nand after it gives\n%s", before, after)
+	}
+	if err := dispatch([]string{"list", "claude", "codex"}); err == nil {
+		t.Error("two agents were accepted")
 	}
 }
 

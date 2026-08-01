@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
@@ -29,7 +30,7 @@ Usage:
   ap <command> <agent>:<profile>[:<variant>] [args...]
 
 Commands:
-  list      List profiles, or just one agent's
+  list      List profiles and variants, or just one agent's
   create    Create a profile and a wrapper you can type as a command
   variant   Name a set of launch arguments over an existing profile
   which     Print the profile directory
@@ -41,6 +42,13 @@ Commands:
   version   Print version, commit and build date
 
 There is no active profile: every command names one explicitly.
+
+"ap list" prints a tree: an agent per line, its profiles under it, and each
+profile's variants under that, with a variant's arguments after its name so a
+name that disables every permission prompt is never invisible. Every reference
+is qualified, so any line is pasteable after "ap run". "ap list --raw" is the
+same listing for scripts: one tab-separated line per reference, the reference
+in field 1 and one argument per field after it, no tree and no padding.
 
 "ap create" takes --from <profile> to clone an existing profile,
 --only-settings <key> (repeatable) to narrow that clone to a few keys of the
@@ -305,120 +313,215 @@ func cmdVersion(args []string) error {
 }
 
 func cmdList(args []string) error {
+	fs := flagSet("list")
+	raw := fs.Bool("raw", false, "one tab-separated line per reference, no tree and no padding")
+	stop, err := parse(fs, args)
+	if stop {
+		return err
+	}
 	names := agent.Names()
-	switch len(args) {
-	case 0:
-	case 1:
-		if _, ok := agent.Lookup(args[0]); !ok {
-			return fmt.Errorf("unknown agent %q: supported are %s", args[0], strings.Join(agent.Names(), ", "))
+	// The agent is optional, so this cannot use parseAroundRef, which requires
+	// one. The second parse is that helper's trick all the same: it is what lets
+	// `ap list claude --raw` work as well as `ap list --raw claude`. list has no
+	// passthrough, so there is nothing for either order to be ambiguous about.
+	if rest := fs.Args(); len(rest) > 0 {
+		if _, ok := agent.Lookup(rest[0]); !ok {
+			return fmt.Errorf("unknown agent %q: supported are %s", rest[0], strings.Join(agent.Names(), ", "))
 		}
-		names = args[:1]
-	default:
-		return fmt.Errorf("usage: ap list [agent]")
-	}
-	// List always includes Default, so there is no "no profiles yet" case left
-	// to report: every agent has at least its real config to show.
-	var variants []string
-	for _, name := range names {
-		a, _ := agent.Lookup(name)
-		profiles, err := profile.List(a)
-		if err != nil {
+		names = []string{rest[0]}
+		if stop, err := parse(fs, rest[1:]); stop {
 			return err
 		}
-		// Padded to the longest agent name, so the profile columns line up and a
-		// four-agent listing can be read down instead of across.
-		//
-		// One line per agent, starting in column 0, and every other line indented.
-		// That is not cosmetic: scripts/smoke.sh selects agent names with
-		// `for ag in $("$AP" list | ...)`, cutting each column-0 line at its first
-		// colon, and anything else starting in column 0 becomes a bogus agent name
-		// that reds two blocks testing something else entirely. The section header
-		// below would have yielded an agent called "Variants", and the footnote one
-		// called "* [default] is the agent's own config, outside any profile".
-		// smoke.sh's agents() names this coupling from the other side, and
-		// TestListTopLevelStaysParseableByScriptsSmoke pins it.
-		fmt.Printf("%-12s%s\n", name+":", strings.Join(marked(profiles), " | "))
-		vs, err := variantLines(a, profiles)
-		if err != nil {
-			return err
+		if extra := fs.Args(); len(extra) > 0 {
+			return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [agent]", extra[0])
 		}
-		variants = append(variants, vs...)
 	}
-	// Every agent has a Default, so the footnote always has something to explain;
-	// the variants block only appears when there is one.
-	if len(variants) > 0 {
-		fmt.Printf("\n  Variants:\n%s\n", strings.Join(variants, "\n"))
+	rows, err := listRows(names)
+	if err != nil {
+		return err
 	}
-	fmt.Printf("\n  [%s] is the agent's own config, outside any profile: read-only.\n",
-		profile.Default)
+	if *raw {
+		printRaw(rows)
+		return nil
+	}
+	printTree(rows)
 	return nil
 }
 
-// marked brackets Default. It is the one row in the listing ap did not create
-// and cannot remove — Dir resolves it to the agent's real config directory —
-// so printing it like a profile invites `ap delete claude:default`, which is
-// exactly the command profile.ValidName exists to refuse.
-func marked(profiles []string) []string {
-	out := make([]string, len(profiles))
-	for i, p := range profiles {
-		out[i] = p
-		if p == profile.Default {
-			out[i] = "[" + p + "]"
-		}
-	}
-	return out
+// defaultNote is what Default carries where a variant carries its arguments.
+//
+// Default is the one row in the listing ap did not create and cannot remove —
+// Dir resolves it to the agent's real config directory — so printing it exactly
+// like a profile invites `ap delete claude:default`, which is the command
+// profile.ValidName exists to refuse. It replaced a bracketed name plus a
+// footnote explaining the brackets: the note says the same thing in the place
+// you are already looking, and a reference nothing decorates stays pasteable.
+const defaultNote = "(the agent's own config: read-only)"
+
+// listRow is one line of the listing.
+//
+// ref is qualified on every row, so any line is pasteable after `ap run`. That
+// is the whole reason the tree carries full references rather than the leaf
+// names the glyphs would let it get away with: the format is read to answer
+// "which one was it?", and the answer has to be copyable where it is read.
+type listRow struct {
+	head string   // the agent's own line; every other field is empty on it
+	tree string   // box-drawing prefix, human output only
+	ref  string   // the qualified reference
+	args []string // a variant's arguments; nil for a profile
+	note string   // what Default carries instead of arguments
+	bad  error    // set when a variant's arguments could not be read
 }
 
-// variantLines renders one variant as two lines: its full reference, then its
-// arguments indented under it.
-//
-// The reference is qualified, so the line is pasteable after `ap run` — which
-// the previous nested-under-the-agent format was not. The arguments are printed
-// unquoted: `--model=claude-opus-5[1m]` in zsh is `no matches found`, but
-// quoting them for display would reintroduce a shell-quoting function, and its
-// hostile-argument test, for a line nothing execs.
-//
-// Two lines rather than one because the arguments are the tail nobody aligns
-// on, and giving them a line of their own is what keeps them off the reference.
-// kubectl's help lets that tail overflow past 80 columns — `expose` reaches 117
-// — which costs nothing when it is prose. Here it is flags, and an 80-column
-// terminal breaks `--model=claude-sonnet-5[1m]` into `--model=claude-so` and
-// `nnet-5[1m]`, which reads as a broken flag rather than a wrapped sentence.
-// Six leading spaces leaves 74 columns, and a variant longer than that wraps
-// like kubectl's does, with no column left to fall out of alignment.
-//
-// The arguments are the point, not decoration. A command whose name silently
-// disables every permission prompt is a real hazard, and ap exists precisely so
-// that you have enough profiles not to remember what each one does. Printing
-// them here and in the `ap variant` receipt is what keeps
-// --dangerously-skip-permissions visible, with no special handling for that
-// flag in particular — and it costs nothing, because the store is already a
-// list of strings.
-func variantLines(a agent.Agent, profiles []string) ([]string, error) {
-	var out []string
-	for _, p := range profiles {
-		variants, err := profile.Variants(a, p)
+// listRows walks the agents in one pass and returns every line to print, in
+// order. Both renderers consume the same slice, so `--raw` cannot drift out of
+// agreement with what the tree shows.
+func listRows(names []string) ([]listRow, error) {
+	var rows []listRow
+	for _, name := range names {
+		a, _ := agent.Lookup(name)
+		// List always includes Default, so there is no "no profiles yet" case to
+		// report: every agent has at least its real config to show.
+		profiles, err := profile.List(a)
 		if err != nil {
 			return nil, err
 		}
-		for _, v := range variants {
-			out = append(out, "    "+a.Name+":"+p+":"+v)
-			// An entry that cannot be read is reported on its own line, not
-			// returned. Returning aborted the whole listing after it had already
-			// printed part of it — one unreadable file under claude and codex, pi
-			// and opencode never appeared at all. That also silently defeated
-			// scripts/smoke.sh's agents(), which reads this output: it yielded one
-			// agent instead of four, and two blocks then tested nothing while
-			// still reporting nothing wrong.
-			args, err := profile.VariantArgs(a, p, v)
-			if err != nil {
-				out = append(out, fmt.Sprintf("      (unreadable: %v)", err))
-				continue
+		rows = append(rows, listRow{head: a.Name})
+		for i, p := range profiles {
+			lastProfile := i == len(profiles)-1
+			row := listRow{tree: branch(lastProfile), ref: a.Name + ":" + p}
+			if p == profile.Default {
+				row.note = defaultNote
 			}
-			out = append(out, "      "+strings.Join(args, " "))
+			rows = append(rows, row)
+
+			variants, err := profile.Variants(a, p)
+			if err != nil {
+				return nil, err
+			}
+			for j, v := range variants {
+				r := listRow{
+					tree: continuation(lastProfile) + branch(j == len(variants)-1),
+					ref:  a.Name + ":" + p + ":" + v,
+				}
+				// An entry that cannot be read is reported on its own row, not
+				// returned. Returning aborted the whole listing after it had
+				// already printed part of it — one unreadable file under claude
+				// and codex, and pi and opencode never appeared at all. That also
+				// silently defeated scripts/smoke.sh's agents(), which reads this
+				// output: it yielded one agent instead of four, and two blocks
+				// then tested nothing while still reporting nothing wrong.
+				r.args, r.bad = profile.VariantArgs(a, p, v)
+				rows = append(rows, r)
+			}
 		}
 	}
-	return out, nil
+	return rows, nil
+}
+
+func branch(last bool) string {
+	if last {
+		return "└─ "
+	}
+	return "├─ "
+}
+
+func continuation(lastProfile bool) string {
+	if lastProfile {
+		return "   "
+	}
+	return "│  "
+}
+
+// printTree is the human listing: an agent per column-0 line, its profiles
+// under it, and each profile's variants under that.
+//
+// The tree is what attaches a variant to the profile it belongs to. The format
+// this replaced collected every variant into one block at the bottom, so the
+// name and the thing it varies were nowhere near each other.
+//
+// The payload column is last and allowed to overflow, the deal `ps aux` makes
+// with CMD. Arguments are printed unquoted: `--model=claude-opus-5[1m]` in zsh
+// is `no matches found`, but quoting them for display would reintroduce a
+// shell-quoting function, and its hostile-argument test, for a line nothing
+// execs.
+//
+// They are printed at all because they are the point, not decoration. A command
+// whose name silently disables every permission prompt is a real hazard, and ap
+// exists precisely so that you have enough profiles not to remember what each
+// one does. Printing them here and in the `ap variant` receipt is what keeps
+// --dangerously-skip-permissions visible, with no special handling for that flag
+// in particular — and it costs nothing, because the store is already a list of
+// strings.
+func printTree(rows []listRow) {
+	// Width over the rows that actually have a payload. Measuring the others too
+	// would pad short rows out to a column nothing occupies, which is trailing
+	// whitespace with extra steps.
+	w := 0
+	for _, r := range rows {
+		if r.ref == "" || r.payload() == "" {
+			continue
+		}
+		if n := utf8.RuneCountInString(r.tree + r.ref); n > w {
+			w = n
+		}
+	}
+	for _, r := range rows {
+		if r.head != "" {
+			fmt.Println(r.head)
+			continue
+		}
+		name := r.tree + r.ref
+		pay := r.payload()
+		if pay == "" {
+			fmt.Println(name)
+			continue
+		}
+		fmt.Printf("%s%s%s\n", name, strings.Repeat(" ", w-utf8.RuneCountInString(name)+3), pay)
+	}
+}
+
+// payload is what follows the reference: a variant's arguments, the note that
+// marks Default, or nothing.
+func (r listRow) payload() string {
+	switch {
+	case r.bad != nil:
+		return fmt.Sprintf("(unreadable: %v)", r.bad)
+	case len(r.args) > 0:
+		return strings.Join(r.args, " ")
+	default:
+		return r.note
+	}
+}
+
+// printRaw is the machine listing: the reference in field 1, one argument per
+// field after it, tab-separated, no tree, no padding, no notes, no header.
+//
+// It exists so that nothing has to parse the human format. scripts/smoke.sh
+// parsed it for years — `agents()` cut every column-0 line at its first colon —
+// and that coupling has already broken twice in ways that reddened blocks
+// testing something else entirely. `ap list --raw | cut -f1` is also the exact
+// list of references `ap run` accepts, which is what shell completion needs.
+//
+// One argument per field rather than one joined string, because that is the
+// same shape the store already has (one argument per line) — so there is no
+// quoting to invent and none to get wrong. WriteVariant refuses an argument
+// containing a tab for the same reason it refuses a newline, which is what
+// makes this lossless by construction rather than by luck.
+//
+// An unreadable entry goes to stderr and its reference is still printed, with
+// no arguments. `cut -f1` — the reason raw exists — stays correct, and the
+// failure is not silent.
+func printRaw(rows []listRow) {
+	for _, r := range rows {
+		if r.ref == "" {
+			continue
+		}
+		if r.bad != nil {
+			fmt.Fprintf(os.Stderr, "ap list: %v\n", r.bad)
+		}
+		fmt.Println(strings.Join(append([]string{r.ref}, r.args...), "\t"))
+	}
 }
 
 // vref parses the single positional argument taken by link and unlink.

@@ -78,6 +78,23 @@ func TestWriteVariantRefusesANewlineInAnArgument(t *testing.T) {
 	}
 }
 
+// The same limit one layer out. `ap list --raw` separates arguments with a tab
+// so that no script has to parse the listing meant for reading; an argument
+// carrying one would split into two fields there and read back wrong. Refusing
+// at write time is what makes that format lossless by construction — the
+// alternative is an escape syntax in the reader for a case nobody has.
+func TestWriteVariantRefusesATabInAnArgument(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a := agentOrFail(t, "claude")
+	err := WriteVariant(a, "review", "tab", []string{"-p", "one\ttwo"})
+	if err == nil {
+		t.Fatal("a tab in an argument was accepted; `ap list --raw` would read back two arguments")
+	}
+	if _, err := VariantArgs(a, "review", "tab"); err == nil {
+		t.Error("the refused variant was written anyway")
+	}
+}
+
 func TestWriteVariantRefusesAnEmptyPayload(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	a := agentOrFail(t, "claude")

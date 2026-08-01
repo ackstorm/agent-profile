@@ -41,7 +41,8 @@ ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
 ap run claude:review:opus                           # those arguments, then yours
 ap env claude:plan npx skills add <src> --skill <s> -g -a claude-code
 ap env codex:plan env | grep CODEX                  # what a command inherits
-ap list
+ap list                                             # everything, as a tree
+ap list --raw | cut -f1                             # the same, for scripts
 ```
 
 There is **no active profile**. Every command names one. A bare `claude` in any
@@ -54,7 +55,7 @@ exactly that reason — see "`default`" below.
 
 | Command | What it does |
 |---|---|
-| `ap list [agent]` | your profiles — always includes `[default]`, and every supported agent |
+| `ap list [--raw] [agent]` | your profiles and their variants, as a tree — always includes `default`, and every supported agent. `--raw` prints the same listing tab-separated, for scripts |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
@@ -214,30 +215,47 @@ ap run claude:review:opus --effort=high   # those arguments, then yours — late
 claude:review:opus                        # the wrapper, same as any profile
 ```
 
-`ap list` prints them in their own section, arguments included, so a name that
-disables every permission prompt never becomes invisible:
+`ap list` prints each one under the profile it varies, arguments included, so a
+name that disables every permission prompt never becomes invisible:
 
 ```
-claude:     [default] | finops | plan | review
-codex:      [default]
-opencode:   [default]
-pi:         [default]
-
-  Variants:
-    claude:review:ci
-      --dangerously-skip-permissions --model=claude-opus-5[1m] -p
-    claude:review:opus
-      --dangerously-skip-permissions --model=claude-opus-5[1m] --effort=xhigh
-
-  [default] is the agent's own config, outside any profile: read-only.
+claude
+├─ claude:default             (the agent's own config: read-only)
+├─ claude:finops
+├─ claude:plan
+└─ claude:review
+   ├─ claude:review:ci        --dangerously-skip-permissions --model=claude-opus-5[1m] -p
+   └─ claude:review:opus      --dangerously-skip-permissions --model=claude-opus-5[1m] --effort=xhigh
+codex
+└─ codex:default              (the agent's own config: read-only)
+opencode
+└─ opencode:default           (the agent's own config: read-only)
+pi
+└─ pi:default                 (the agent's own config: read-only)
 ```
 
-The reference is qualified, so the first line of each pair is exactly what you
-type after `ap run`. The arguments below it are not: they are printed unquoted,
-and `--model=claude-opus-5[1m]` in zsh is `no matches found`. They get a line of
-their own because they are the part that overflows, and an 80-column terminal
-breaking `--model=claude-sonnet-5[1m]` mid-flag reads as a broken flag rather
-than as a wrapped sentence.
+Every reference is qualified, including a variant's, so any line is exactly what
+you type after `ap run` — the tree could get away with printing the leaf name
+alone, and does not, because the listing is read to answer "which one was it?"
+and the answer has to be copyable where it is read. The arguments are not
+pasteable: they are printed unquoted, and `--model=claude-opus-5[1m]` in zsh is
+`no matches found`. They are the last column and are allowed to overflow, the
+deal `ps aux` makes with `CMD`.
+
+For scripts there is `--raw`, so nothing has to parse the format meant for
+reading: one line per reference, the reference in field 1 and one argument per
+field after it, tab-separated, no tree and no padding.
+
+```console
+$ ap list --raw | cut -f1                      # every reference ap run accepts
+$ ap list --raw | awk -F: 'NF==3'              # just the variants
+$ ap list --raw | grep -c dangerously          # how many skip permissions
+```
+
+One argument per field is the shape the store already has — one argument per
+line — so there is no quoting to invent and none to get wrong. It costs one more
+stated limit: **an argument may not contain a tab**, alongside the newline the
+store already refuses, and `ap variant` says so at write time.
 
 **Why not a shell alias?** Two reasons. An alias does not appear in `ap list`,
 and a name that carries `--dangerously-skip-permissions` needs to be
@@ -254,8 +272,9 @@ it, and arguments baked into a wrapper would either be invisible to `ap run` or
 make it read back the file it wrote. The store is also why there is no quoting
 to get wrong anywhere in this feature — arguments go from the file to
 `syscall.Exec` as a list, so `[1m]` cannot glob and `$(…)` cannot execute. The
-one limit it buys: **an argument may not contain a newline**, and `ap variant`
-says so rather than inventing an escape syntax.
+two limits it buys: **an argument may not contain a newline**, which is the
+store's own separator, or **a tab**, which is `ap list --raw`'s. `ap variant`
+says so at write time rather than inventing an escape syntax for either.
 
 A few things a variant deliberately is not:
 

@@ -51,8 +51,16 @@ func WriteVariant(a agent.Agent, name, v string, args []string) error {
 			a.Name, name, v, a.Name, name)
 	}
 	for _, s := range args {
-		if strings.Contains(s, "\n") {
+		switch {
+		case strings.Contains(s, "\n"):
 			return fmt.Errorf("argument %q contains a newline: the store is one argument per line, and has no escape", s)
+		case strings.Contains(s, "\t"):
+			// The same stated limit as the newline above, for the same reason and
+			// one layer out: `ap list --raw` separates arguments with a tab so that
+			// nothing has to parse the human listing, and it has no escape either.
+			// Refusing at write time is what makes that format lossless by
+			// construction rather than by luck.
+			return fmt.Errorf("argument %q contains a tab: `ap list --raw` separates arguments with one, and has no escape", s)
 		}
 	}
 	root, err := openVariantsRoot(true)

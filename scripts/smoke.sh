@@ -75,13 +75,16 @@ AP=$(cd "$(dirname "$AP")" && pwd)/$(basename "$AP")
 # above masquerade as six unrelated ones. Callers check the return value.
 setup() { "$@" >/dev/null 2>&1; }
 
-# The agent names from `ap list`. Only lines that begin in column 0 are agent
-# lines: `ap list` indents each profile's launch variants under its agent, and
-# the plain `cut -d: -f1` this replaced turned "  review:opus  --dangerously..."
-# into an agent named "review" - `command -v review` then skipped, and
-# `ap which review:apsmoke` failed, in two blocks that test neither. cmd/ap
-# cmdList names this coupling from the other side, and a Go test pins the shape.
-agents() { "$AP" list | sed -n 's/^\([^ :][^:]*\):.*/\1/p'; }
+# The agent names, from the machine format rather than the human one.
+#
+# This used to read the human listing - `sed -n 's/^\([^ :][^:]*\):.*/\1/p'`
+# over the lines that begin in column 0 - and that coupling broke twice. The
+# plain `cut -d: -f1` before it turned "  review:opus  --dangerously..." into an
+# agent named "review", so `command -v review` skipped and `ap which
+# review:apsmoke` failed, in two blocks that test neither. `--raw` exists so
+# nothing has to parse the format meant for reading: field 1 is the reference,
+# and every line has one. TestListRawIsWhatScriptsSmokeParses pins it.
+agents() { "$AP" list --raw | cut -f1 | cut -d: -f1 | sort -u; }
 
 # Read the same way opencode and profile.ConfigBase do.
 real_config=${XDG_CONFIG_HOME:-$HOME/.config}
