@@ -92,6 +92,8 @@ Examples:
       --only-settings statusLine --only-settings theme
   ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
   ap run claude:review:opus         # those arguments, then yours
+  ap variant claude:review:on -- '/code-review {}'
+  ap run claude:review:on src/auth.go   # runs "/code-review src/auth.go"
   ap run claude:plan plugin install caveman@caveman
   ap run claude:plan
   ap run claude:plan --effort xhigh

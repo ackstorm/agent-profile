@@ -197,6 +197,27 @@ extend that helper to commands that pass nothing to the agent.
 `--from` takes a bare profile name, never a qualified reference: a profile is
 only ever cloned within its own agent, which the destination already names.
 
+`{}` in a variant is the one exception to "the store goes to `syscall.Exec`
+untouched", and it is narrow on purpose. `runArgs` substitutes the caller's
+arguments — joined with a space — into every `{}` and does **not** also append
+them; a variant that never types `{}` composes exactly as before. It exists
+because appending cannot express a prompt prefix: claude's grammar takes one
+trailing positional and **drops a second in silence** (measured: `claude -p "say
+FIRST" "say SECOND"` answers FIRST, exit 0), so the prefix and the caller's
+argument have to arrive as *one* element of argv.
+
+Do not "generalise" this into ap deciding where the caller's arguments go on its
+own. That was rejected, and the reason still stands: it would mean deciding that
+`/code-review` is a positional while the `opus` in `--model opus` is not, which
+is a claim about four external CLIs needing re-verification every release. The
+placeholder infers nothing — the author states the position. There is no escape
+for a literal `{}`, the same class of stated limit as the newline and the tab.
+
+The sandbox check for it is asserted on `arg:[…]`, never on `argv:`. The stub's
+`"$*"` joins with a space, so a check written against that line cannot tell one
+argument from two — which is the entire property under test. That check was
+written against `argv:` first and would have been vacuous.
+
 ## install.sh is a `curl | bash` target, so treat it as one
 
 Two couplings that no compiler checks:
