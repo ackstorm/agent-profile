@@ -1027,6 +1027,136 @@ func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
 	}
 }
 
+// The placeholder exists so a variant can be a prompt PREFIX. Appending can
+// never produce that: claude's grammar has one trailing positional, and a
+// second is dropped in silence, so the prefix and the caller's argument have to
+// arrive as one element of argv. Substituting into the string is the only way
+// to make one element out of two.
+func TestRunArgsFillsThePlaceholderInsteadOfAppending(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if _, err := profile.Create(a, "execute"); err != nil {
+		t.Fatal(err)
+	}
+	baked := []string{"--effort=xhigh", "/superpowers:executing-plans " + placeholder}
+	if err := profile.WriteVariant(a, "execute", "plan", baked); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := runArgs(a, "execute", "plan", []string{"docs/plans/x.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--effort=xhigh", "/superpowers:executing-plans docs/plans/x.md"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("runArgs = %q, want %q", got, want)
+	}
+	// The point of the whole feature: the prompt is ONE element, not two. An
+	// implementation that substituted and then also appended would satisfy a
+	// Contains over the joined string and fail here.
+	if len(got) != 2 {
+		t.Errorf("the caller's argument landed as its own element: %q", got)
+	}
+}
+
+// Several arguments join with a space, because what they compose is a prompt.
+// Several placeholders all fill, like `xargs -I`. And a caller with nothing to
+// say leaves the prefix alone rather than erroring: running the slash command
+// with no argument, so the agent asks, is a legitimate use of the same name.
+func TestRunArgsFillsEveryPlaceholderAndJoinsTheCaller(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if _, err := profile.Create(a, "execute"); err != nil {
+		t.Fatal(err)
+	}
+	// Two in one argument and one in another. Both halves matter: a
+	// per-argument Replace(…, 1) fills the second argument correctly and still
+	// leaves the first one half-done, and that mutation reads as green against
+	// a payload where every argument holds exactly one hole.
+	baked := []string{"--append-system-prompt", placeholder + " then " + placeholder, "/plan " + placeholder}
+	if err := profile.WriteVariant(a, "execute", "twice", baked); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := runArgs(a, "execute", "twice", []string{"docs/a.md", "and", "docs/b.md"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const joined = "docs/a.md and docs/b.md"
+	want := []string{"--append-system-prompt", joined + " then " + joined, "/plan " + joined}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("runArgs = %q, want %q", got, want)
+	}
+	if strings.Contains(strings.Join(got, " "), placeholder) {
+		t.Errorf("a placeholder survived unfilled: %q", got)
+	}
+
+	empty, err := runArgs(a, "execute", "twice", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantEmpty := []string{"--append-system-prompt", " then ", "/plan "}
+	if strings.Join(empty, "\x00") != strings.Join(wantEmpty, "\x00") {
+		t.Errorf("runArgs with no caller arguments = %q, want %q", empty, wantEmpty)
+	}
+}
+
+// Every variant written before the placeholder existed must compose exactly as
+// it did. The feature is opt-in by typing `{}`, and a variant that never
+// mentions it is not a variant with an empty placeholder.
+func TestRunArgsWithoutAPlaceholderStillAppends(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, _ := agent.Lookup("claude")
+	if _, err := profile.Create(a, "review"); err != nil {
+		t.Fatal(err)
+	}
+	baked := []string{"--dangerously-skip-permissions", "/code-review"}
+	if err := profile.WriteVariant(a, "review", "ci", baked); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := runArgs(a, "review", "ci", []string{"high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--dangerously-skip-permissions", "/code-review", "high"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("runArgs = %q, want %q — appending is what a variant with no placeholder does", got, want)
+	}
+}
+
+// The receipt is the only place a variant's shape is ever shown, so it has to
+// show where the caller's arguments actually land. Printing them at the end of a
+// variant that fills them in the middle would teach the wrong thing about the
+// variant it just created.
+func TestVariantReceiptShowsWhereTheCallersArgumentsLand(t *testing.T) {
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stdoutOf(t, func() error {
+		return dispatch([]string{"variant", "claude:execute:plan", "--",
+			"--effort=xhigh", "/superpowers:executing-plans " + placeholder})
+	})
+	want := "claude --effort=xhigh /superpowers:executing-plans " + callerShown
+	if !strings.Contains(out, want) {
+		t.Errorf("the receipt does not show the substitution:\nwant %q in\n%s", want, out)
+	}
+	if strings.HasSuffix(strings.TrimSpace(out), callerShown) {
+		t.Errorf("the receipt also appended them at the end:\n%s", out)
+	}
+
+	// And a variant with no placeholder still says they go at the end.
+	tail := stdoutOf(t, func() error {
+		return dispatch([]string{"variant", "claude:execute:ci", "--", "-p"})
+	})
+	if !strings.Contains(tail, "claude -p "+callerShown) {
+		t.Errorf("the receipt does not show them appended:\n%s", tail)
+	}
+}
+
 // A typo in the third segment must name the variants that do exist.
 func TestRunNamesTheVariantsThatExist(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())

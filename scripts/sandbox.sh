@@ -91,6 +91,11 @@ seed() {
     cat >"$SANDBOX/bin/stub" <<'STUB'
 #!/bin/sh
 echo "argv:$*"
+# And again with the element boundaries visible. "$*" joins with a space, so a
+# check written against it alone cannot tell one argument from two - which is
+# precisely the property `ap run`'s {} placeholder exists to produce, since a
+# prompt has to reach the agent as ONE element of argv.
+for x in "$@"; do printf 'arg:[%s]\n' "$x"; done
 env | grep -E '^(CLAUDE_CONFIG_DIR|CODEX_HOME|PI_CODING_AGENT_DIR|XDG_CONFIG_HOME)=' || true
 STUB
     chmod +x "$SANDBOX/bin/stub"
@@ -232,6 +237,28 @@ if quiet "$AP" create claude:sbxrun; then
         fi
     else
         bad variant "could not store the variant"
+    fi
+
+    # A variant that leaves {} is a prompt PREFIX: the caller's arguments are
+    # substituted there, joined, and NOT also appended. Asserted on the bracketed
+    # form, never on argv:, because "$*" joins with a space and would read the
+    # same whether the prompt arrived as one element or as two - and one element
+    # is the entire point. claude's grammar takes one trailing positional and
+    # drops a second in silence, which is why appending cannot express this.
+    if quiet "$AP" variant claude:sbxrun:sbxfill -- --effort=xhigh "/plan {}"; then
+        out=$("$AP" run claude:sbxrun:sbxfill docs/a.md docs/b.md 2>&1 || true)
+        if printf '%s' "$out" | grep -qxF 'arg:[/plan docs/a.md docs/b.md]'; then
+            pass variant "{} substituted, and the prompt is one argument"
+        else
+            bad variant "the placeholder did not fill into a single argument: $out"
+        fi
+        # And nothing was appended as well, which a substitute-then-append
+        # implementation would leave behind.
+        if printf '%s' "$out" | grep -qxF 'arg:[docs/a.md]'; then
+            bad variant "the caller's arguments were substituted AND appended: $out"
+        fi
+    else
+        bad variant "could not store the placeholder variant"
     fi
     quiet "$AP" delete --yes claude:sbxrun
 else

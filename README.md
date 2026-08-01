@@ -305,19 +305,40 @@ $ ap delete claude:review
   and its 2 variants: opus, ci [y/N]
 ```
 
-**A variant that ends in a prompt is terminal.** `claude`'s grammar takes one
-trailing positional, so a variant ending in `"/code-review"` composes with flags
-but not with a second prompt — and the second one is **dropped in silence**,
-not refused: `claude -p "say FIRST" "say SECOND"` answers `FIRST` and exits 0.
-So a variant cannot be a prompt *prefix* you complete at run time. Quote the
-whole prompt as one argument instead:
+**A variant that ends in a prompt is terminal, unless it leaves `{}`.**
+`claude`'s grammar takes one trailing positional, so a variant ending in
+`"/code-review"` composes with flags but not with a second prompt — and the
+second one is **dropped in silence**, not refused: `claude -p "say FIRST" "say
+SECOND"` answers `FIRST` and exits 0.
+
+To make a variant a prompt *prefix* you complete at run time, leave a hole where
+your arguments go, spelled the way `xargs -I{}` spells it:
 
 ```bash
-ap run claude:plan "/superpowers:executing-plans docs/plans/some-plan.md"
+ap variant claude:plan:exec -- --effort=xhigh '/superpowers:executing-plans {}'
+
+ap run claude:plan:exec docs/plans/some-plan.md
+claude:plan:exec        docs/plans/some-plan.md   # the wrapper, unchanged
 ```
 
-`ap variant` prints the composed line when it creates one, so you can see the
-shape then — there is no failure to notice later.
+Your arguments are joined with a space and substituted there — reaching the
+agent as **one** element of `argv`, which is what appending can never produce —
+and are not also appended at the end. Every placeholder in the variant fills,
+like `xargs -I`. Running it with nothing to add leaves the prefix alone, so the
+slash command asks you itself.
+
+A variant that never mentions `{}` composes exactly as it always did: arguments
+first, yours after. The hole is opt-in by typing it.
+
+This is not `ap` guessing which of your baked arguments is the prompt — that
+would mean deciding that `/code-review` is a positional while the `opus` in
+`--model opus` is not, which is a claim about four external CLIs that would need
+re-checking every release. You state the position; `ap` substitutes text and
+infers nothing. There is **no escape for a literal `{}`**, the same kind of
+stated limit as the newline and the tab: `claude --agents '{"reviewer":{}}'`
+baked into a variant would be substituted. `ap variant` prints the composed line
+when it creates one, so that shows up where you write it rather than at run
+time.
 
 ### Flag order matters for `run`
 

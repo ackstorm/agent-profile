@@ -71,6 +71,13 @@ those arguments first and yours after. It has no directory of its own: "ap
 which" and "ap env" answer for the parent, and "ap env" never passes a
 variant's arguments to the command it runs.
 
+A variant may leave "{}" where your arguments should go, spelled the way
+"xargs -I{}" spells it. They are joined with a space and substituted there,
+reaching the agent as one argument rather than appended as a new one, which is
+how a variant becomes a prompt prefix: "ap variant claude:plan:exec --
+'/superpowers:executing-plans {}'" then "ap run claude:plan:exec plan.md". A
+variant that does not mention "{}" composes exactly as before.
+
 "ap delete" asks before it removes a profile, and --yes is how a script
 answers. A variant is two lines of text, so it goes without asking. "ap link"
 writes a wrapper back; create already does this, so link is for profiles made
@@ -693,6 +700,10 @@ func linkWrapper(ref string, rc *receipt) {
 // what makes an empty payload impossible to type by accident — `ap variant
 // <ref> --` with nothing after it would create a name that behaves identically
 // to its parent.
+// callerShown stands for the caller's arguments in the `runs:` receipt: what a
+// run will put wherever this appears.
+const callerShown = "[your args...]"
+
 func cmdVariant(args []string) error {
 	const use = "usage: ap variant <agent>:<profile>:<variant> -- <args...>"
 	if len(args) < 3 || args[1] != "--" {
@@ -720,20 +731,31 @@ func cmdVariant(args []string) error {
 	rc := &receipt{}
 	rc.add("profile", tilde(profile.Dir(a, name)))
 	rc.add("args", strings.Join(payload, " "))
-	// The composed line, unconditionally.
+	// The composed line, unconditionally, with the caller's arguments shown where
+	// they will actually land — substituted into the placeholder if the variant
+	// left one, appended at the end if it did not.
 	//
-	// A variant whose last argument is a positional prompt is terminal: claude's
-	// grammar is `claude [options] [command] [prompt]`, one trailing positional,
-	// and a second one is DROPPED IN SILENCE — measured, not assumed:
-	// `claude -p "say FIRST" "say SECOND"` answers FIRST and exits 0. There is no
-	// error to read, which is exactly why printing what a run will actually look
-	// like matters: it is visible at the moment the variant is created, and never
-	// afterwards.
+	// A variant whose last argument is a positional prompt and leaves no
+	// placeholder is terminal: claude's grammar is `claude [options] [command]
+	// [prompt]`, one trailing positional, and a second one is DROPPED IN SILENCE
+	// — measured, not assumed: `claude -p "say FIRST" "say SECOND"` answers FIRST
+	// and exits 0. There is no error to read, which is exactly why printing what
+	// a run will look like matters: it is visible at the moment the variant is
+	// created, and never afterwards.
 	//
-	// Detecting it instead would be a guess about someone else's argv grammar —
-	// `--model opus` also ends in a non-flag word — and this repository
-	// distrusts those by policy.
-	rc.add("runs", strings.Join(append([]string{a.Bin}, payload...), " ")+" [your args...]")
+	// Detecting that case instead would be a guess about someone else's argv
+	// grammar — `--model opus` also ends in a non-flag word — and this repository
+	// distrusts those by policy. The placeholder is the other answer: the author
+	// states the position, so nothing has to be inferred.
+	//
+	// This line is also where a placeholder that collided with a literal `{}`
+	// becomes visible, since it renders the substitution rather than the store.
+	shown, filled := fill(payload, callerShown)
+	runs := strings.Join(append([]string{a.Bin}, shown...), " ")
+	if !filled {
+		runs += " " + callerShown
+	}
+	rc.add("runs", runs)
 	// Also printing --dangerously-skip-permissions where anyone creating a
 	// variant will read it. A command whose name silently disables every
 	// permission prompt is a real hazard, and this costs nothing: the store is
@@ -1009,18 +1031,41 @@ func cmdRun(args []string) error {
 	return run.Exec(a, dir, argv)
 }
 
-// runArgs composes what the agent receives: the variant's arguments, then the
-// caller's. One rule, no special cases — later wins in every CLI here, so a
-// caller can override a baked default for one invocation without editing
-// anything, and ap still parses none of it.
+// placeholder is the hole a variant may leave for the caller's arguments,
+// spelled the way `xargs -I{}` and `find -exec … {} \;` spell it.
 //
-// A baked positional prompt makes the variant terminal: claude's grammar has
-// exactly one trailing positional, so a variant ending in "/code-review"
-// composes with flags but not with a second prompt. That is deliberate.
-// Inserting the caller's arguments *before* a trailing positional would work
-// only because of agent-specific knowledge about four external CLIs that would
-// need re-verifying on every release. `ap variant`'s receipt says so at the
-// moment the variant is created instead.
+// Deliberately NOT a whole-argument token. The case it exists for is a prompt
+// prefix — `"/superpowers:executing-plans {}"` — and a prompt has to reach the
+// agent as ONE element of argv. A token that only matched a bare argument would
+// substitute into a new element and change nothing.
+//
+// There is no escape, the same stated limit as the newline and the tab. The
+// collision it buys is real and worth naming: claude takes `--agents <json>`,
+// and a nested empty object (`{"reviewer":{}}`) baked into a variant would be
+// substituted. `ap variant`'s receipt prints the composed line at create time,
+// so it is visible where it is written rather than the first time it runs.
+const placeholder = "{}"
+
+// runArgs composes what the agent receives.
+//
+// Without a placeholder: the variant's arguments, then the caller's. One rule,
+// no special cases — later wins in every CLI here, so a caller can override a
+// baked default for one invocation without editing anything, and ap still
+// parses none of it.
+//
+// With one: the caller's arguments are joined by a space and substituted where
+// the variant asked for them, and are NOT also appended. That exists because a
+// baked positional prompt is otherwise terminal — claude's grammar has exactly
+// one trailing positional, so a second is dropped in silence (measured: `claude
+// -p "say FIRST" "say SECOND"` answers FIRST and exits 0).
+//
+// This is not the agent-specific insertion that was rejected before, and the
+// distinction is the whole reason it is allowed now. Inserting the caller's
+// arguments before a trailing positional on ap's own initiative would mean
+// deciding which baked argument IS the positional — `--model opus` also ends in
+// a bare word — which is a guess about four external CLIs, re-verified every
+// release. A placeholder guesses nothing: the author states the position, and
+// ap substitutes text. Every variant without one behaves exactly as before.
 func runArgs(a agent.Agent, name, v string, caller []string) ([]string, error) {
 	if v == "" {
 		return caller, nil
@@ -1029,7 +1074,30 @@ func runArgs(a agent.Agent, name, v string, caller []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if filled, ok := fill(baked, strings.Join(caller, " ")); ok {
+		return filled, nil
+	}
 	return append(baked, caller...), nil
+}
+
+// fill substitutes with into every placeholder in args, and reports whether it
+// found one. Every occurrence, like `xargs -I`, because a variant that names the
+// hole twice meant it twice.
+//
+// A caller with no arguments substitutes the empty string rather than being an
+// error: running only the prefix — the slash command with no argument, so the
+// agent asks — is a legitimate thing to want from the same name.
+func fill(args []string, with string) ([]string, bool) {
+	found := false
+	out := make([]string, len(args))
+	for i, s := range args {
+		if strings.Contains(s, placeholder) {
+			found = true
+			s = strings.ReplaceAll(s, placeholder, with)
+		}
+		out[i] = s
+	}
+	return out, found
 }
 
 // prepare is everything that happens between naming a profile and exec'ing into
