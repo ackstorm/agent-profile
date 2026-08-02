@@ -861,12 +861,15 @@ func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir
 // linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
 // purely to keep cmdCreate under the project's cyclomatic-complexity gate.
 func linkAndReport(a agent.Agent, dir string, rc *receipt) error {
-	linked, skipped, unshared, err := profile.Link(a, dir)
+	linked, skipped, unshared, orphaned, err := profile.Link(a, dir)
 	if err != nil {
 		return err
 	}
 	if len(linked) > 0 {
 		rc.add("shares", fmt.Sprintf("%q", linked))
+	}
+	if len(orphaned) > 0 {
+		rc.warn("%s", orphanWarning(orphaned))
 	}
 	if len(skipped) > 0 {
 		// A warning, not a row. Silence here used to mean the user believed their
@@ -882,6 +885,15 @@ func linkAndReport(a agent.Agent, dir string, rc *receipt) error {
 		rc.add("unshared", fmt.Sprintf("%q — now this profile's own", unshared))
 	}
 	return nil
+}
+
+// orphanWarning phrases what Link did when an agent had overwritten a shared
+// link with a real file of its own. One wording, used by both `ap create`'s
+// receipt and `ap run`'s stderr, so the two cannot drift apart.
+func orphanWarning(orphaned []string) string {
+	return fmt.Sprintf("the agent had replaced a shared link with a file of its own: %s\n"+
+		"    sharing is restored; that file is kept in case it held a newer token.\n"+
+		"    Delete it once you are logged in again.", strings.Join(orphaned, " "))
 }
 
 // checkCopyInstructions validates that --copy-instructions is usable for a,
@@ -1176,8 +1188,15 @@ func prepare(a agent.Agent, name string) (string, error) {
 	// Re-assert the shared links on every run: agents rewrite their credential
 	// files, and a temp-file-plus-rename would leave a real file where our
 	// symlink was, silently unsharing auth. See internal/profile.Link.
-	if _, _, _, err := profile.Link(a, dir); err != nil {
+	_, _, _, orphaned, err := profile.Link(a, dir)
+	if err != nil {
 		return "", err
+	}
+	// Say so. Link healed the sharing, but a credential was moved aside to do it,
+	// and a token the agent wrote inside this profile is no longer the one it will
+	// use. Silence here would make a re-login look like it came out of nowhere.
+	if len(orphaned) > 0 {
+		fmt.Fprintf(os.Stderr, "ap: warning: %s\n", orphanWarning(orphaned))
 	}
 	// Re-assert the config shim too: ~/.config gains entries over time, and a
 	// profile created last month must not hide a tool installed yesterday.

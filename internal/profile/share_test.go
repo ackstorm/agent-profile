@@ -21,7 +21,7 @@ func TestLinkRemovesAnUnsharedSymlink(t *testing.T) {
 	}
 
 	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
-	_, _, unshared, err := Link(a, dir)
+	_, _, unshared, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestLinkLeavesARealFileAtAnUnsharedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
-	_, _, unshared, err := Link(a, dir)
+	_, _, unshared, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestLinkLeavesARealFileAtAnUnsharedPath(t *testing.T) {
 func TestLinkIsQuietWhenNothingIsUnshared(t *testing.T) {
 	dir := t.TempDir()
 	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
-	_, _, unshared, err := Link(a, dir)
+	_, _, unshared, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestLinkSkipsMissingTargets(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "auth.json", From: filepath.Join(t.TempDir(), "nope.json")},
 	}}
-	linked, skipped, _, err := Link(a, dir)
+	linked, skipped, _, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestLinkCreatesSymlinks(t *testing.T) {
 		{Rel: "auth.json", From: authFile},
 	}}
 
-	linked, _, _, err := Link(a, dir)
+	linked, _, _, _, err := Link(a, dir)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestLinkCreatesParentDirs(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "plugins/cache", From: cache},
 	}}
-	if _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	fi, err := os.Lstat(filepath.Join(dir, "plugins", "cache"))
@@ -165,10 +165,10 @@ func TestLinkIsIdempotent(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: sessions},
 	}}
-	if _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("second Link: %v", err)
 	}
 }
@@ -187,7 +187,7 @@ func TestLinkRepointsStaleSymlink(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: want},
 	}}
-	if _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	got, err := os.Readlink(filepath.Join(dir, "sessions"))
@@ -200,8 +200,13 @@ func TestLinkRepointsStaleSymlink(t *testing.T) {
 }
 
 // If an agent replaced our link with a real file (token rotation via
-// temp+rename), say so loudly rather than deleting the user's data.
-func TestLinkRefusesToClobberRealData(t *testing.T) {
+// temp+rename), Link must restore the sharing WITHOUT destroying what it found.
+//
+// Both halves matter and each catches a different regression. Healing: this used
+// to be a hard refusal, which dead-ended every later `ap run` on the profile —
+// measured on two real claude profiles. Keeping: healing by removing would delete
+// a credential, and the file moved aside may hold the newer token of the two.
+func TestLinkMovesRealDataAsideAndRelinks(t *testing.T) {
 	src := t.TempDir()
 	sessions := filepath.Join(src, "sessions")
 	if err := os.Mkdir(sessions, 0o700); err != nil {
@@ -220,11 +225,56 @@ func TestLinkRefusesToClobberRealData(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: sessions},
 	}}
-	if _, _, _, err := Link(a, dir); err == nil {
-		t.Fatal("Link over real data = nil error, want refusal")
+	_, _, _, orphaned, err := Link(a, dir)
+	if err != nil {
+		t.Fatalf("Link over real data = %v, want it healed", err)
 	}
-	if _, err := os.Stat(filepath.Join(real, "keepme")); err != nil {
-		t.Errorf("Link destroyed real data: %v", err)
+	if want := []string{"sessions" + orphanSuffix}; !slices.Equal(orphaned, want) {
+		t.Errorf("orphaned = %v, want %v", orphaned, want)
+	}
+	// The sharing is restored...
+	fi, err := os.Lstat(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("share is not a symlink after Link: the sharing was not restored")
+	}
+	// ...and nothing was destroyed to do it.
+	if _, err := os.Stat(filepath.Join(real+orphanSuffix, "keepme")); err != nil {
+		t.Errorf("Link destroyed real data instead of moving it aside: %v", err)
+	}
+}
+
+// A second overwrite must not fail because the first orphan is still there.
+// os.Root.Rename overwrites, and that is the intended behaviour: of two stale
+// credentials the older one is the one worth losing.
+func TestLinkOverwritesAPreviousOrphan(t *testing.T) {
+	src := t.TempDir()
+	cred := filepath.Join(src, "cred")
+	if err := os.WriteFile(cred, []byte("shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	a := agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "cred", From: cred}}}
+
+	for _, content := range []string{"first", "second"} {
+		if err := os.Remove(filepath.Join(dir, "cred")); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cred"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, _, err := Link(a, dir); err != nil {
+			t.Fatalf("Link with %q in place = %v", content, err)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "cred"+orphanSuffix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "second" {
+		t.Errorf("orphan = %q, want %q: the newer file must win", got, "second")
 	}
 }
 
@@ -250,7 +300,7 @@ func TestDeleteDoesNotFollowSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir); err != nil {
 		t.Fatal(err)
 	}
 

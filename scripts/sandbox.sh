@@ -260,6 +260,27 @@ if quiet "$AP" create claude:sbxrun; then
     else
         bad variant "could not store the placeholder variant"
     fi
+    # An agent that rewrites its credential with temp-file-plus-rename leaves a
+    # real file where ap's symlink was. Measured on two real claude profiles, so
+    # this is reproduction, not hypothesis. `ap run` must heal it and keep going:
+    # it used to abort, and the profile stayed unusable until someone moved the
+    # file by hand. Asserted on all three of link, orphan and warning — healing
+    # by deleting would satisfy the first two, and silence would satisfy all but
+    # the third while a token the profile wrote vanished without a word.
+    rm -f "$d/.credentials.json"
+    echo '{"token":"overwritten-by-the-agent"}' >"$d/.credentials.json"
+    out=$("$AP" run claude:sbxrun -p 2>&1 || true)
+    if [ ! -L "$d/.credentials.json" ]; then
+        bad heal "ap run left the credential unshared: $out"
+    elif [ ! -f "$d/.credentials.json.ap-orphan" ]; then
+        bad heal "the overwritten credential was destroyed, not moved aside"
+    elif ! printf '%s' "$out" | grep -q 'ap-orphan'; then
+        bad heal "healing was silent - a token the profile wrote went missing unannounced"
+    else
+        pass heal "overwritten share relinked, the old file kept, and said so"
+    fi
+    rm -f "$d/.credentials.json.ap-orphan"
+
     quiet "$AP" delete --yes claude:sbxrun
 else
     bad run "could not create claude:sbxrun"

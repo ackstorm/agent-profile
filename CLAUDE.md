@@ -64,6 +64,8 @@ Two orderings there are load-bearing, and both were found by reverting a guard:
   cannot refresh, claude replaces the file with a real one of its own — which is
   the exact reason `Link` re-asserts the symlink on every run. Asserted
   afterwards, it goes red because claude did its job, not because ap failed.
+  That ordering is also why smoke could never have caught the bug below: the one
+  thing it does not observe is the state claude leaves behind.
 - The authentication message goes to **stdout**, never to `--debug-file`. This
   grepped the debug log for it and therefore could not fail; measured with the
   link severed, it stayed green.
@@ -82,6 +84,26 @@ That check was also **vacuous for as long as it existed**, on the host too:
 `Link` skipping codex's `Shared` entry, so the profile has no `auth.json` — left
 it green. The pattern is anchored now. When you write a check whose negative
 answer is the positive one with a word in front, anchor it.
+
+## A share the agent overwrote is healed, not refused
+
+`Link` used to abort on finding a real file where a share's symlink belongs.
+That was wrong, and it was measured wrong on this machine: two of three claude
+profiles held a 74 KB regular file at `.credentials.json`, differing from the
+shared one in exactly the four `claudeAiOauth` leaves out of 796 — claude's own
+temp-file-plus-rename, during ordinary use. `ap run` on those profiles was dead
+until someone moved the file by hand, which is what the error text asked for.
+
+It now does that itself: rename to `<rel>.ap-orphan` through the same `os.Root`,
+relink, and say so — `rc.warn` from `create`, stderr from `run`, one wording in
+`orphanWarning`. Renamed and not removed because it is a credential and may hold
+the newer of the two tokens; both halves are mutation-tested by
+`TestLinkMovesRealDataAsideAndRelinks` (restore the refusal and it fails; heal by
+`RemoveAll` and it fails). A second overwrite overwrites the first orphan, which
+is the point — of two stale credentials the older one is the one worth losing.
+
+Do not make ap copy the orphan's token back into the real home to avoid a
+re-login. Writing into `~/.claude` is the thing every other path here avoids.
 
 ## Three tests that must never be deleted or weakened
 
