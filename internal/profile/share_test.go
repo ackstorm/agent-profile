@@ -21,7 +21,7 @@ func TestLinkRemovesAnUnsharedSymlink(t *testing.T) {
 	}
 
 	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
-	_, _, unshared, _, err := Link(a, dir)
+	_, _, unshared, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestLinkLeavesARealFileAtAnUnsharedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
-	_, _, unshared, _, err := Link(a, dir)
+	_, _, unshared, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestLinkLeavesARealFileAtAnUnsharedPath(t *testing.T) {
 func TestLinkIsQuietWhenNothingIsUnshared(t *testing.T) {
 	dir := t.TempDir()
 	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
-	_, _, unshared, _, err := Link(a, dir)
+	_, _, unshared, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestLinkSkipsMissingTargets(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "auth.json", From: filepath.Join(t.TempDir(), "nope.json")},
 	}}
-	linked, skipped, _, _, err := Link(a, dir)
+	linked, skipped, _, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestLinkCreatesSymlinks(t *testing.T) {
 		{Rel: "auth.json", From: authFile},
 	}}
 
-	linked, _, _, _, err := Link(a, dir)
+	linked, _, _, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatalf("Link: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestLinkCreatesParentDirs(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "plugins/cache", From: cache},
 	}}
-	if _, _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir, nil); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	fi, err := os.Lstat(filepath.Join(dir, "plugins", "cache"))
@@ -165,10 +165,10 @@ func TestLinkIsIdempotent(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: sessions},
 	}}
-	if _, _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir, nil); err != nil {
 		t.Fatalf("second Link: %v", err)
 	}
 }
@@ -187,7 +187,7 @@ func TestLinkRepointsStaleSymlink(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: want},
 	}}
-	if _, _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir, nil); err != nil {
 		t.Fatalf("Link: %v", err)
 	}
 	got, err := os.Readlink(filepath.Join(dir, "sessions"))
@@ -225,7 +225,7 @@ func TestLinkMovesRealDataAsideAndRelinks(t *testing.T) {
 	a := agent.Agent{Name: "fake", Shared: []agent.Share{
 		{Rel: "sessions", From: sessions},
 	}}
-	_, _, _, orphaned, err := Link(a, dir)
+	_, _, _, orphaned, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatalf("Link over real data = %v, want it healed", err)
 	}
@@ -265,7 +265,7 @@ func TestLinkOverwritesAPreviousOrphan(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "cred"), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, _, _, err := Link(a, dir); err != nil {
+		if _, _, _, _, err := Link(a, dir, nil); err != nil {
 			t.Fatalf("Link with %q in place = %v", content, err)
 		}
 	}
@@ -300,7 +300,7 @@ func TestDeleteDoesNotFollowSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, err := Link(a, dir); err != nil {
+	if _, _, _, _, err := Link(a, dir, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -315,6 +315,176 @@ func TestDeleteDoesNotFollowSymlinks(t *testing.T) {
 	}
 	if _, err := os.Stat(realSessions); err != nil {
 		t.Fatalf("real sessions directory was removed: %v", err)
+	}
+}
+
+// conflicted builds the state claude leaves behind when it refreshes a token or
+// takes a /login inside a profile: its temp-file-plus-rename has replaced the
+// symlink, so the profile holds a real credential and the shared one still has
+// the old token.
+func conflicted(t *testing.T, shared, mine string) (agent.Agent, string, string) {
+	t.Helper()
+	src := t.TempDir()
+	from := filepath.Join(src, "cred")
+	if err := os.WriteFile(from, []byte(shared), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cred"), []byte(mine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "cred", From: from}}}, dir, from
+}
+
+// Promotion is the only thing in this program that writes outside a profile, and
+// the reason it exists at all: without it the next run relinks over the profile's
+// newer token, the shared credential never advances, and — since only a refresh
+// moves refreshTokenExpiresAt forward — it eventually expires outright.
+func TestLinkPromotesTheProfilesCredentialOntoTheSharedPath(t *testing.T) {
+	a, dir, from := conflicted(t, "old-shared", "new-from-the-profile")
+
+	_, _, _, orphaned, err := Link(a, dir, func(Conflict) Resolution { return Promote })
+	if err != nil {
+		t.Fatalf("Link with Promote = %v", err)
+	}
+	if b, err := os.ReadFile(from); err != nil || string(b) != "new-from-the-profile" {
+		t.Errorf("shared = %q, %v; want the profile's credential promoted onto it", b, err)
+	}
+	// The replaced one stays recoverable. ap cannot tell whose account either
+	// credential belongs to — that lives in .claude.json, which is not shared — so
+	// a promotion has to be undoable by hand.
+	if b, err := os.ReadFile(from + previousSuffix); err != nil || string(b) != "old-shared" {
+		t.Errorf("%s = %q, %v; want the replaced credential kept", from+previousSuffix, b, err)
+	}
+	// Promote still ends where Orphan does: sharing restored, nothing destroyed.
+	fi, err := os.Lstat(filepath.Join(dir, "cred"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("share is not a symlink after Link: the sharing was not restored")
+	}
+	if want := []string{"cred" + orphanSuffix}; !slices.Equal(orphaned, want) {
+		t.Errorf("orphaned = %v, want %v", orphaned, want)
+	}
+}
+
+func TestLinkLeavesTheSharedCredentialAloneWhenTheAnswerIsKeep(t *testing.T) {
+	a, dir, from := conflicted(t, "old-shared", "new-from-the-profile")
+
+	if _, _, _, _, err := Link(a, dir, func(Conflict) Resolution { return Orphan }); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(from); err != nil || string(b) != "old-shared" {
+		t.Errorf("shared = %q, %v; want it untouched", b, err)
+	}
+	if _, err := os.Lstat(from + previousSuffix); !os.IsNotExist(err) {
+		t.Error("a backup was written for a promotion that never happened")
+	}
+}
+
+// `ap create` passes no resolver. Promotion is a decision, and silence is not one:
+// a caller that never asked must not be able to overwrite the real credential.
+func TestLinkWithNoResolverNeverTouchesTheSharedPath(t *testing.T) {
+	a, dir, from := conflicted(t, "old-shared", "new-from-the-profile")
+
+	if _, _, _, _, err := Link(a, dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(from); err != nil || string(b) != "old-shared" {
+		t.Errorf("shared = %q, %v; want a nil resolver to leave it alone", b, err)
+	}
+}
+
+// claude rewrites its credential whether or not the tokens changed. A prompt whose
+// two answers produce the same bytes is noise, and a prompt people learn to
+// dismiss is worse than no prompt at all.
+func TestLinkDoesNotAskAboutAnIdenticalFile(t *testing.T) {
+	a, dir, _ := conflicted(t, "same-bytes", "same-bytes")
+
+	asked := 0
+	_, _, _, orphaned, err := Link(a, dir, func(Conflict) Resolution {
+		asked++
+		return Orphan
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked != 0 {
+		t.Errorf("resolver consulted %d times about a file identical to the shared one", asked)
+	}
+	// Healed anyway, just without asking.
+	if want := []string{"cred" + orphanSuffix}; !slices.Equal(orphaned, want) {
+		t.Errorf("orphaned = %v, want %v", orphaned, want)
+	}
+}
+
+// Promotion is a credential idea, and a share need not be a file: these were
+// directories once (projects/, sessions/) and the registry could carry one again.
+// Reading a directory to compare it fails with EISDIR, which would turn healing
+// into a dead `ap run` — the failure healing exists to prevent.
+func TestLinkDoesNotOfferToPromoteADirectory(t *testing.T) {
+	src := t.TempDir()
+	from := filepath.Join(src, "sessions")
+	if err := os.Mkdir(from, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "sessions", From: from}}}
+
+	asked := 0
+	_, _, _, orphaned, err := Link(a, dir, func(Conflict) Resolution {
+		asked++
+		return Promote
+	})
+	if err != nil {
+		t.Fatalf("Link over a directory share = %v; want it healed, not failed", err)
+	}
+	if asked != 0 {
+		t.Errorf("resolver consulted %d times about a directory", asked)
+	}
+	if want := []string{"sessions" + orphanSuffix}; !slices.Equal(orphaned, want) {
+		t.Errorf("orphaned = %v, want %v", orphaned, want)
+	}
+}
+
+// A symlink at the shared path is somebody's dotfile manager, not ours. Replacing
+// it would quietly turn their link into a regular file and strand the file they
+// actually version; writing through it would put a credential in a directory ap
+// was never pointed at. Refusing costs nothing, because the same choice is offered
+// again on the next run.
+func TestPromoteRefusesASymlinkedSharedPath(t *testing.T) {
+	elsewhere := t.TempDir()
+	target := filepath.Join(elsewhere, "dotfiles-cred")
+	if err := os.WriteFile(target, []byte("managed-elsewhere"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	from := filepath.Join(src, "cred")
+	if err := os.Symlink(target, from); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "cred"), []byte("new-from-the-profile"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "cred", From: from}}}
+
+	if _, _, _, _, err := Link(a, dir, func(Conflict) Resolution { return Promote }); err == nil {
+		t.Fatal("Link promoted onto a symlinked shared path, want a refusal")
+	}
+	if b, err := os.ReadFile(target); err != nil || string(b) != "managed-elsewhere" {
+		t.Errorf("wrote through the symlink: target = %q, %v", b, err)
+	}
+	if fi, err := os.Lstat(from); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the shared path is no longer a symlink")
+	}
+	// A refusal moves nothing, so the next run can offer the same choice.
+	if b, err := os.ReadFile(filepath.Join(dir, "cred")); err != nil || string(b) != "new-from-the-profile" {
+		t.Errorf("profile credential = %q, %v; want it left in place after a refusal", b, err)
 	}
 }
 

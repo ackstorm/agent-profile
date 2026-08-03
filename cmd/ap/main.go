@@ -588,6 +588,14 @@ func cmdCreate(args []string) error {
 	// empty profile behind.
 	var srcDir string
 	if *from != "" {
+		// Reject a qualified reference before it reaches ParseRefAllowDefault:
+		// that call builds "<agent>:"+*from internally, so "--from codex:new"
+		// becomes the 3-part "codex:codex:new" and fails with a "want
+		// <agent>:<profile>" message that reads as if --from wanted that
+		// format, when the real fix is to drop the agent prefix.
+		if strings.Contains(*from, ":") {
+			return fmt.Errorf("--from %q: profile name only, not agent:profile — agent is already %q", *from, a.Name)
+		}
 		// Validate before building a path from it. Without this, --from is a
 		// traversal: profile.Dir joins and cleans, so "--from ../../../.claude"
 		// resolves outside the profile root and Clone copies the real home.
@@ -861,7 +869,7 @@ func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir
 // linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
 // purely to keep cmdCreate under the project's cyclomatic-complexity gate.
 func linkAndReport(a agent.Agent, dir string, rc *receipt) error {
-	linked, skipped, unshared, orphaned, err := profile.Link(a, dir)
+	linked, skipped, unshared, orphaned, err := profile.Link(a, dir, nil)
 	if err != nil {
 		return err
 	}
@@ -891,9 +899,109 @@ func linkAndReport(a agent.Agent, dir string, rc *receipt) error {
 // link with a real file of its own. One wording, used by both `ap create`'s
 // receipt and `ap run`'s stderr, so the two cannot drift apart.
 func orphanWarning(orphaned []string) string {
-	return fmt.Sprintf("the agent had replaced a shared link with a file of its own: %s\n"+
-		"    sharing is restored; that file is kept in case it held a newer token.\n"+
-		"    Delete it once you are logged in again.", strings.Join(orphaned, " "))
+	return fmt.Sprintf("sharing restored; the profile's own copy is kept as %s\n"+
+		"    (delete it once you are logged in again)", strings.Join(orphaned, " "))
+}
+
+// linkForRun re-asserts the shared links before a run and reports what it took to
+// do it. Agents rewrite their credential files, and a temp-file-plus-rename leaves
+// a real file where our symlink was, silently unsharing auth.
+//
+// Unlike the create path, this one can ask. A file that differs from the shared
+// one may hold the only token that still works, and only the person at the
+// terminal can say whether it should become the machine-wide login — see
+// profile.Promote for why nothing can decide that on its own.
+func linkForRun(a agent.Agent, name, dir string) error {
+	var promoted []string
+	_, _, _, orphaned, err := profile.Link(a, dir, func(c profile.Conflict) profile.Resolution {
+		if askToPromote(a, name, c) != profile.Promote {
+			return profile.Orphan
+		}
+		promoted = append(promoted, fmt.Sprintf("%s updated, previous kept as %s",
+			c.SharedPath, filepath.Base(c.PreviousPath)))
+		return profile.Promote
+	})
+	if err != nil {
+		return err
+	}
+	// Say what happened. Link healed the sharing, but a credential was moved aside
+	// to do it, and a token the agent wrote inside this profile is no longer the
+	// one it will use. Silence here would make a re-login look like it came out of
+	// nowhere. Checked after err, so neither line can claim a write that failed.
+	switch {
+	case len(promoted) > 0:
+		fmt.Fprintf(os.Stderr, "ap: promoted — %s\n", strings.Join(promoted, "; "))
+	case len(orphaned) > 0:
+		fmt.Fprintf(os.Stderr, "ap: warning: %s\n", orphanWarning(orphaned))
+	}
+	return nil
+}
+
+// askToPromote explains a credential conflict and asks what to do about it.
+//
+// Only "1" promotes. Anything else — an empty line, a typo, a terminal that is not
+// one — keeps the shared credential, because that is the answer that changes
+// nothing outside the profile, and the question comes back on the next run.
+// Non-interactive runs are not prompted at all: `ap run` in a script or a CI job
+// has nobody to ask, and guessing "promote" there would write into the user's real
+// config directory unattended.
+func askToPromote(a agent.Agent, name string, c profile.Conflict) profile.Resolution {
+	if !stdinIsTerminal() {
+		return profile.Orphan
+	}
+	const stamp = "2006-01-02 15:04"
+	// Say which way round it actually is. Usually the profile's copy is the newer
+	// one, but a bare agent run after the profile diverged makes the shared one
+	// newer, and promoting is then the wrong answer. Asserting "newer" unchecked
+	// is the same assumption this whole path exists to stop Link making.
+	age := "newer"
+	if c.ProfileTime.Before(c.SharedTime) {
+		age = "older"
+	}
+	fmt.Fprintf(os.Stderr, "\n"+
+		"ap: %s:%s has its own %s, %s than the shared one.\n"+
+		"    %s leaves one here when it refreshes a token or you run /login,\n"+
+		"    and only a promotion can carry it back to the shared credential.\n"+
+		"\n"+
+		"      here %s   ·   shared %s\n"+
+		"\n"+
+		"      1) Promote it — every profile and a bare %s use it from now on\n"+
+		"      2) Ignore it  — this profile goes back to the shared credential\n"+
+		"\n"+
+		"    [2] ",
+		a.Name, name, c.Rel, age,
+		a.Bin,
+		c.ProfileTime.Format(stamp), c.SharedTime.Format(stamp),
+		a.Bin)
+
+	if strings.TrimSpace(readLine(os.Stdin)) == "1" {
+		return profile.Promote
+	}
+	return profile.Orphan
+}
+
+// stdinIsTerminal reports whether there is anyone there to answer a prompt.
+// os.Stdin.Stat rather than x/term because this project is standard library only.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// readLine reads one line from r, one byte at a time.
+//
+// Unbuffered on purpose: bufio reads ahead past the newline, and everything it
+// swallowed would be missing from the stdin the agent inherits moments later at
+// exec.
+func readLine(r io.Reader) string {
+	var line []byte
+	var b [1]byte
+	for {
+		n, err := r.Read(b[:])
+		if n == 0 || err != nil || b[0] == '\n' {
+			return string(line)
+		}
+		line = append(line, b[0])
+	}
 }
 
 // checkCopyInstructions validates that --copy-instructions is usable for a,
@@ -1185,18 +1293,8 @@ func prepare(a agent.Agent, name string) (string, error) {
 
 	dir := profile.Dir(a, name)
 
-	// Re-assert the shared links on every run: agents rewrite their credential
-	// files, and a temp-file-plus-rename would leave a real file where our
-	// symlink was, silently unsharing auth. See internal/profile.Link.
-	_, _, _, orphaned, err := profile.Link(a, dir)
-	if err != nil {
+	if err := linkForRun(a, name, dir); err != nil {
 		return "", err
-	}
-	// Say so. Link healed the sharing, but a credential was moved aside to do it,
-	// and a token the agent wrote inside this profile is no longer the one it will
-	// use. Silence here would make a re-login look like it came out of nowhere.
-	if len(orphaned) > 0 {
-		fmt.Fprintf(os.Stderr, "ap: warning: %s\n", orphanWarning(orphaned))
 	}
 	// Re-assert the config shim too: ~/.config gains entries over time, and a
 	// profile created last month must not hide a tool installed yesterday.

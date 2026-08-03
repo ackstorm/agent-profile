@@ -3,11 +3,14 @@
 package profile
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 )
@@ -16,6 +19,63 @@ import (
 // with a file of its own. Not ".bak": this is a credential, and the name has to
 // say that ap put it there and that nothing reads it any more.
 const orphanSuffix = ".ap-orphan"
+
+// previousSuffix names the shared file a promotion replaced.
+//
+// Kept rather than overwritten in place because promoting is the only thing in
+// this program that writes into the user's real config directory, and ap cannot
+// tell whose account a credential belongs to — the identity lives in
+// .claude.json, which is deliberately not shared. If a promotion turns out to
+// have replaced the machine-wide login with some profile's other account, this
+// file is the only way back.
+const previousSuffix = ".ap-previous"
+
+// tmpSuffix names the scratch file an atomic write renames from. A fixed name,
+// not a random one: a leftover from a crashed run is meant to be overwritten by
+// the next, and it lives beside the file it is about to become.
+const tmpSuffix = ".ap-tmp"
+
+// Resolution is what the caller wants done with a real file found where a
+// share's symlink belongs.
+type Resolution int
+
+const (
+	// Orphan moves the profile's file aside to <rel>.ap-orphan and relinks,
+	// leaving the shared file untouched. A nil resolver means this, so a caller
+	// that passes nothing cannot overwrite the user's real credential by
+	// omission.
+	Orphan Resolution = iota
+
+	// Promote copies the profile's file over the shared one — keeping what it
+	// replaced at <shared>.ap-previous — and then does what Orphan does.
+	//
+	// It exists because a login performed inside a profile can otherwise never
+	// reach the shared credential. claude's temp-file-plus-rename replaces the
+	// symlink, so a refreshed or re-entered token lands in the profile while the
+	// shared file keeps the old one, and the next run relinks the profile back to
+	// it. Measured on the reference machine, claudeAiOauth carries a
+	// refreshTokenExpiresAt roughly 29 days out that only a refresh moves
+	// forward. A shared credential nothing is permitted to update therefore
+	// expires outright, and from then on every profile asks for a login it has
+	// nowhere to store.
+	Promote
+)
+
+// Conflict describes a real file sitting where a share's symlink belongs, so a
+// caller can decide what happens to it.
+//
+// The times are modification times, and nothing here parses either file. That is
+// deliberate: codex's auth.json has the same conflict for the same reason, and a
+// check that understood claude's credential schema would need re-verifying
+// against both agents on every release to say what mtimes already say.
+type Conflict struct {
+	Rel          string // ".credentials.json"
+	ProfilePath  string // <profile>/.credentials.json
+	SharedPath   string // ~/.claude/.credentials.json
+	PreviousPath string // where Promote would keep the file it replaces
+	ProfileTime  time.Time
+	SharedTime   time.Time
+}
 
 // Link points the profile's shared entries at the agent's real state, so
 // sessions, credentials and workspace trust never fork per profile.
@@ -40,10 +100,17 @@ const orphanSuffix = ".ap-orphan"
 // someone moved the file by hand. Doing it automatically is the same operation the
 // error message used to ask for.
 //
+// resolve decides whether that file is merely moved aside or first promoted over
+// the shared one; see Resolution. A nil resolve means Orphan, which is what the
+// whole loop did before promotion existed. It is consulted only when the two files
+// actually differ, because claude rewrites its credential whether or not anything
+// in it changed, and a prompt about a file that would promote to exactly what is
+// already there is pure noise.
+//
 // Link also removes any symlink sitting at a path the registry lists in Unshared —
 // state that used to be common and no longer is. That makes a change to the registry
 // take effect in profiles created before it, instead of only in new ones.
-func Link(a agent.Agent, dir string) (linked, skipped, unshared, orphaned []string, err error) {
+func Link(a agent.Agent, dir string, resolve func(Conflict) Resolution) (linked, skipped, unshared, orphaned []string, err error) {
 	// Inspect and remove through an os.Root confined to the profile directory.
 	// os.Lstat only refuses to follow the FINAL path component: every ancestor is
 	// resolved by the kernel, so with a nested Rel such as "plugins/cache" a
@@ -58,7 +125,8 @@ func Link(a agent.Agent, dir string) (linked, skipped, unshared, orphaned []stri
 	defer func() { _ = root.Close() }()
 
 	for _, s := range a.Shared {
-		if _, err := os.Stat(s.From); err != nil {
+		sfi, err := os.Stat(s.From)
+		if err != nil {
 			// A credential cannot be invented; tell the caller so it can say so.
 			// Staying silent about this was a trap: sharing quietly did not happen,
 			// the agent then wrote its own real file into the profile, and every
@@ -75,11 +143,17 @@ func Link(a agent.Agent, dir string) (linked, skipped, unshared, orphaned []stri
 				return linked, skipped, unshared, orphaned, err
 			}
 		case err == nil:
-			// A real file where the link belongs: the agent rewrote it. Move it
-			// aside rather than removing it — it is a credential, and it may hold a
-			// token newer than the shared one. Renamed through the same os.Root, so
-			// neither name can leave the profile. A previous orphan is overwritten:
-			// it is by definition the staler of the two.
+			// A real file where the link belongs: the agent rewrote it. Whether the
+			// token in it survives is the caller's decision, not this loop's —
+			// promoting writes into the user's real config directory, which nothing
+			// else in this program does.
+			if err := offerPromotion(root, dir, s, fi, sfi, resolve); err != nil {
+				return linked, skipped, unshared, orphaned, err
+			}
+			// Move it aside rather than removing it — it is a credential, and it may
+			// hold a token newer than the shared one. Renamed through the same
+			// os.Root, so neither name can leave the profile. A previous orphan is
+			// overwritten: it is by definition the staler of the two.
 			if err := root.Rename(s.Rel, s.Rel+orphanSuffix); err != nil {
 				return linked, skipped, unshared, orphaned, fmt.Errorf(
 					"cannot move aside the real file at %s: %w",
@@ -121,6 +195,130 @@ func Link(a agent.Agent, dir string) (linked, skipped, unshared, orphaned []stri
 		unshared = append(unshared, rel)
 	}
 	return linked, skipped, unshared, orphaned, nil
+}
+
+// offerPromotion asks resolve what should happen to the real file at s.Rel and,
+// if the answer is Promote, copies it over the shared one before the caller moves
+// it aside.
+//
+// Identical content is not a conflict and resolve never hears about it. claude
+// rewrites its credential on refresh whether or not the tokens changed, and a
+// prompt whose two answers produce the same file is noise that teaches people to
+// dismiss the prompt that matters.
+func offerPromotion(root *os.Root, dir string, s agent.Share, fi, sfi fs.FileInfo, resolve func(Conflict) Resolution) error {
+	if resolve == nil {
+		return nil
+	}
+	// Only a regular file can be promoted. Every share in the registry is a
+	// credential today, but Link is generic over a.Shared and these used to be
+	// directories — projects/, sessions/ — and could be again. Reading a directory
+	// with io.ReadAll fails with EISDIR, which would turn healing into a dead
+	// `ap run`: precisely the failure the healing was written to end.
+	if !fi.Mode().IsRegular() {
+		return nil
+	}
+	mine, err := readIn(root, s.Rel)
+	if err != nil {
+		return fmt.Errorf("cannot read %s in profile: %w", s.Rel, err)
+	}
+	shared, err := os.ReadFile(s.From)
+	if err != nil {
+		return fmt.Errorf("cannot read %s: %w", s.From, err)
+	}
+	if bytes.Equal(mine, shared) {
+		return nil
+	}
+	if resolve(Conflict{
+		Rel:          s.Rel,
+		ProfilePath:  filepath.Join(dir, s.Rel),
+		SharedPath:   s.From,
+		PreviousPath: s.From + previousSuffix,
+		ProfileTime:  fi.ModTime(),
+		SharedTime:   sfi.ModTime(),
+	}) != Promote {
+		return nil
+	}
+	return promote(s.From, mine, shared)
+}
+
+// promote replaces the shared file with the profile's copy, keeping what it
+// replaced at <shared>.ap-previous.
+//
+// This is the only code path in the program that writes outside a profile, and so
+// the only one that could damage configuration ap did not create.
+//
+// The operative guard is the refusal below: a shared path that is itself a symlink
+// is left alone rather than replaced. People symlink their dotfiles, and both
+// outcomes are bad — following the link writes a credential into a directory ap
+// was never pointed at, and replacing it strands the file they actually version.
+// Nothing has been modified when this returns an error, so the run fails with the
+// profile exactly as it was and the same choice is offered on the next one.
+// TestPromoteRefusesASymlinkedSharedPath is what keeps that true.
+//
+// The os.Root below is defence in depth rather than the tested guard: with the
+// refusal in place nothing reaches it with a symlink, and the names it is given
+// are single components that cannot traverse anywhere on their own. It is there so
+// that removing the refusal degrades to replacing a link rather than to writing
+// through one.
+func promote(from string, mine, shared []byte) error {
+	if fi, err := os.Lstat(from); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to promote onto %s: it is a symlink, not a regular file.\n"+
+			"    Resolve it by hand, or re-run and keep the shared credential instead", from)
+	}
+	root, err := os.OpenRoot(filepath.Dir(from))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
+	base := filepath.Base(from)
+	// Back up by copying, not by renaming. A rename would leave the shared path
+	// missing for as long as the second write takes, and a crash in that window
+	// would log out every profile and the bare agent at once.
+	if err := writeIn(root, base+previousSuffix, shared); err != nil {
+		return fmt.Errorf("cannot back up %s: %w", from, err)
+	}
+	if err := writeIn(root, base, mine); err != nil {
+		return fmt.Errorf("cannot promote onto %s: %w", from, err)
+	}
+	return nil
+}
+
+// readIn reads rel through root, so that a symlinked ancestor cannot make this
+// read a file outside the profile.
+func readIn(root *os.Root, rel string) ([]byte, error) {
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
+}
+
+// writeIn writes data to rel through root, atomically: a scratch file beside it,
+// synced, then renamed over the target. A concurrent agent never reads a
+// half-written credential, and a crash leaves the previous one intact.
+func writeIn(root *os.Root, rel string, data []byte) error {
+	tmp := rel + tmpSuffix
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = root.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = root.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = root.Remove(tmp)
+		return err
+	}
+	return root.Rename(tmp, rel)
 }
 
 // Delete removes a profile directory.

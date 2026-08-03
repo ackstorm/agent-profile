@@ -267,9 +267,22 @@ if quiet "$AP" create claude:sbxrun; then
     # file by hand. Asserted on all three of link, orphan and warning — healing
     # by deleting would satisfy the first two, and silence would satisfy all but
     # the third while a token the profile wrote vanished without a word.
+    #
+    # Feed the run a "1" on a pipe, which is the answer that would promote this
+    # profile's credential over the shared one. It must be ignored, and the pipe is
+    # what makes the check mean something: off a terminal ap must not prompt, so
+    # nothing reads that byte. Closing stdin instead would prove nothing — an empty
+    # answer means "keep" too, so the check would stay green with the terminal
+    # guard deleted, which is the one thing it exists to catch.
+    #
+    # The property is not academic. dev.sh passes -it whenever there is a terminal,
+    # so an unguarded prompt would hang this very script; and a user running
+    # `echo … | ap run claude:x -p` has the agent's own prompt on stdin, which ap
+    # must never eat.
     rm -f "$d/.credentials.json"
     echo '{"token":"overwritten-by-the-agent"}' >"$d/.credentials.json"
-    out=$("$AP" run claude:sbxrun -p 2>&1 || true)
+    shared_before=$(cat "$HOME/.claude/.credentials.json")
+    out=$(printf '1\n' | "$AP" run claude:sbxrun -p 2>&1 || true)
     if [ ! -L "$d/.credentials.json" ]; then
         bad heal "ap run left the credential unshared: $out"
     elif [ ! -f "$d/.credentials.json.ap-orphan" ]; then
@@ -278,6 +291,15 @@ if quiet "$AP" create claude:sbxrun; then
         bad heal "healing was silent - a token the profile wrote went missing unannounced"
     else
         pass heal "overwritten share relinked, the old file kept, and said so"
+    fi
+    # Nothing off a terminal may reach the real config directory. Compared by
+    # content, not mtime: promoting writes the profile's bytes over these.
+    if [ "$(cat "$HOME/.claude/.credentials.json")" != "$shared_before" ]; then
+        bad heal "the shared credential was promoted over without anyone being asked"
+    elif [ -e "$HOME/.claude/.credentials.json.ap-previous" ]; then
+        bad heal "a promotion backup exists after a run that had nobody to ask"
+    else
+        pass heal "no terminal, no prompt, no write into the real config directory"
     fi
     rm -f "$d/.credentials.json.ap-orphan"
 

@@ -452,9 +452,30 @@ Created as a symlink by `ap create` and re-asserted on every `ap run`:
 
 The link is re-created on every run because agents rewrite their credential
 files — codex refreshes OAuth tokens into `auth.json` — and a write via
-temp-file-plus-rename would silently replace the symlink with a regular file. If
-`ap` finds real data where a link belongs, it stops and says so instead of
-overwriting it.
+temp-file-plus-rename silently replaces the symlink with a regular file.
+
+When `ap run` finds a real credential where a link belongs, it restores the link
+and keeps the file it moved aside as `<name>.ap-orphan`. If that file differs
+from the shared one it asks first, because that copy may hold the only token that
+still works. It shows you which of the two is the more recent:
+
+```
+ap: claude:plan has its own .credentials.json, newer than the shared one.
+    claude leaves one here when it refreshes a token or you run /login,
+    and only a promotion can carry it back to the shared credential.
+
+      here 2026-08-03 09:00   ·   shared 2026-08-02 11:13
+
+      1) Promote it — every profile and a bare claude use it from now on
+      2) Ignore it  — this profile goes back to the shared credential
+
+    [2]
+```
+
+Promoting keeps the file it replaced as `<name>.ap-previous`, because `ap`
+cannot tell which account either credential belongs to. Anything other than
+`1` keeps the shared one, and a run with no terminal — a script, CI, a pipe —
+is never asked and never promotes.
 
 **History is not shared, and `--from` never copies it either** — `projects/` for
 claude, `sessions/` and `history.jsonl` for codex, `sessions/` for pi. A `plan`
