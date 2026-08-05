@@ -8,10 +8,13 @@ package session
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -157,4 +160,52 @@ func readClaude(path string) (Session, error) {
 		return Session{}, fmt.Errorf("%s: no cwd in the first %d lines", path, maxMetaLines)
 	}
 	return s, nil
+}
+
+// parseOpencode decodes `opencode session list --format json`.
+//
+// Timestamps are milliseconds since the epoch.
+func parseOpencode(b []byte) ([]Session, error) {
+	var rows []struct {
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Updated   int64  `json:"updated"`
+		Directory string `json:"directory"`
+	}
+	if err := json.Unmarshal(b, &rows); err != nil {
+		return nil, fmt.Errorf("opencode session list: %w", err)
+	}
+	out := make([]Session, 0, len(rows))
+	for _, r := range rows {
+		if r.ID == "" {
+			continue
+		}
+		out = append(out, Session{
+			ID:      r.ID,
+			Title:   r.Title,
+			Dir:     r.Directory,
+			Updated: time.UnixMilli(r.Updated),
+			Path:    "opencode.db",
+		})
+	}
+	return out, nil
+}
+
+// opencodeSessions runs opencode's own listing under a profile's environment.
+//
+// Two limits the caller must surface rather than hide:
+//   - opencode groups sessions by git project, so this returns only what belongs
+//     to the current working directory's project. Measured: 93 sessions in the db,
+//     56 listed from /tmp, 0 from a git repo with no opencode history.
+//   - it costs about a second per profile.
+func opencodeSessions(bin string, env []string, max int) ([]Session, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "session", "list", "--format", "json", "-n", strconv.Itoa(max))
+	cmd.Env = env
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("opencode session list: %w", err)
+	}
+	return parseOpencode(out)
 }

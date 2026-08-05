@@ -148,3 +148,31 @@ func TestReadClaudeIgnoresTheDirectoryName(t *testing.T) {
 		t.Errorf("Dir = %q, want the cwd from inside the file", got.Dir)
 	}
 }
+
+// opencode session list --format json, as measured. The parser is tested
+// separately from the subprocess: running opencode needs a login and a network,
+// which belongs in smoke, not in a unit test.
+func TestParseOpencodeSessions(t *testing.T) {
+	body := `[
+	  {"id":"ses_04c349ff8ffeUR9Xu92KuB3fkL","title":"MCP Authentication","updated":1785427932102,"created":1785427877895,"directory":"/tmp/kiko2"},
+	  {"id":"ses_05cf77d8bffeE0v0ND4GOQ1Ya9","title":"Directory listing","updated":1785146677843,"created":1785146600000,"directory":"/home/jcm"}
+	]`
+	got, err := parseOpencode([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d sessions, want 2", len(got))
+	}
+	if got[0].ID != "ses_04c349ff8ffeUR9Xu92KuB3fkL" || got[0].Dir != "/tmp/kiko2" {
+		t.Errorf("got %+v", got[0])
+	}
+	if got[0].Title != "MCP Authentication" {
+		t.Errorf("Title = %q", got[0].Title)
+	}
+	// Milliseconds since the epoch, not seconds. Getting this wrong dates every
+	// opencode session to 1970 and sorts them all to the bottom.
+	if y := got[0].Updated.Year(); y < 2020 || y > 2100 {
+		t.Errorf("Updated = %v, want a plausible year (ms, not s)", got[0].Updated)
+	}
+}
