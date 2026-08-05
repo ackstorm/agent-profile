@@ -47,3 +47,23 @@ func TestReadCodexRejectsAFileWithNoMeta(t *testing.T) {
 		t.Error("readCodex accepted a file with no session_meta")
 	}
 }
+
+// pi writes {"type":"session",...} first, with id, timestamp and cwd. Its
+// directory names encode the cwd too, but with the same hyphen ambiguity claude
+// has, so the file is the only trustworthy source.
+func TestReadPiSession(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "2026-07-23T09-47-18-290Z_019f8e5f-4d92-7906-a769-bb2437e3dfe9.jsonl")
+	body := `{"type":"session","version":3,"id":"019f8e5f-4d92-7906-a769-bb2437e3dfe9","timestamp":"2026-07-23T09:47:18.290Z","cwd":"/home/jcm/.pi/agent"}
+`
+	if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readPi(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "019f8e5f-4d92-7906-a769-bb2437e3dfe9" || got.Dir != "/home/jcm/.pi/agent" {
+		t.Errorf("got %+v", got)
+	}
+}

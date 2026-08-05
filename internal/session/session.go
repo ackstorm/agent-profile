@@ -72,3 +72,32 @@ func readCodex(path string) (Session, error) {
 	s.Updated, _ = time.Parse(time.RFC3339, meta.Timestamp)
 	return s, nil
 }
+
+// readPi reads the session header pi writes as its first line.
+func readPi(path string) (Session, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Session{}, err
+	}
+	defer func() { _ = f.Close() }()
+
+	var meta struct {
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		Timestamp string `json:"timestamp"`
+		Cwd       string `json:"cwd"`
+	}
+	line, err := bufio.NewReaderSize(f, maxMetaBytes).ReadBytes('\n')
+	if err != nil && len(line) == 0 {
+		return Session{}, fmt.Errorf("%s: empty", path)
+	}
+	if err := json.Unmarshal(line, &meta); err != nil {
+		return Session{}, fmt.Errorf("%s: %w", path, err)
+	}
+	if meta.Type != "session" || meta.ID == "" {
+		return Session{}, fmt.Errorf("%s: no session header on the first line", path)
+	}
+	s := Session{ID: meta.ID, Dir: meta.Cwd, Path: path}
+	s.Updated, _ = time.Parse(time.RFC3339, meta.Timestamp)
+	return s, nil
+}
