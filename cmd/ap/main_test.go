@@ -82,7 +82,10 @@ func TestSessionsMarksAMissingDirectory(t *testing.T) {
 // never appended. Same rule as a variant: ap does not infer argv positions for
 // four external CLIs.
 func TestResumeArgvPutsTheIDAtThePlaceholder(t *testing.T) {
-	for _, tc := range []struct{ agent, id string; want []string }{
+	for _, tc := range []struct {
+		agent, id string
+		want      []string
+	}{
 		{"claude", "abc", []string{"--resume", "abc"}},
 		{"codex", "abc", []string{"resume", "abc"}},
 		{"pi", "abc", []string{"--session", "abc"}},

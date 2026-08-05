@@ -656,6 +656,9 @@ func cmdSessions(args []string) error {
 }
 
 func cmdVersion(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: ap version")
+	}
 	fmt.Printf("ap %s (commit %s, built %s, %s/%s, %s)\n",
 		version, commit, date, runtime.GOOS, runtime.GOARCH, runtime.Version())
 	return nil

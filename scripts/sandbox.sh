@@ -378,7 +378,7 @@ if quiet "$AP" create codex:sbxsess; then
     fi
 
     out=$("$AP" sessions --max 1 2>&1 || true)
-    rows=$(printf '%s' "$out" | grep "codex:sbxsess" | wc -l)
+    rows=$(printf '%s' "$out" | grep -c "codex:sbxsess" || true)
     if [ "$rows" -eq 1 ]; then
         pass sessions "ap sessions --max 1 returned 1 row"
     else
@@ -399,7 +399,7 @@ if quiet "$AP" create codex:sbxsess; then
         bad resume "ap resume extra args missing: $out"
     fi
 
-    out=$(cd /tmp && "$AP" resume "$SID" 2>&1 || true)
+    out=$( (cd /tmp && "$AP" resume "$SID") 2>&1 || true)
     if printf '%s' "$out" | grep -qxF "cwd:$SANDBOX/work"; then
         pass resume "ap resume chdirs to session directory before exec"
     else

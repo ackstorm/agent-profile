@@ -433,9 +433,9 @@ func registry() map[string]Agent {
 				// regenerates inside each profile on its own.
 				{Rel: "models.json", From: filepath.Join(h, ".pi", "agent", "models.json")},
 			},
-			Unshared:       []string{"sessions"},
-			State:          []string{"sessions", "models-store.json"},
-			CloneAllow:     []string{"settings.json"},
+			Unshared:   []string{"sessions"},
+			State:      []string{"sessions", "models-store.json"},
+			CloneAllow: []string{"settings.json"},
 			Sessions: &SessionStore{
 				Rel:        "sessions",
 				Layout:     LayoutPiSessions,
