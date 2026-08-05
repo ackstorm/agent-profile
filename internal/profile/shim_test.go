@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/ackstorm/agent-profile/internal/agent"
 )
 
 // fakeConfigBase points ConfigBase at a temporary directory containing the given
@@ -42,10 +44,10 @@ func TestDeleteDoesNotFollowTheConfigShim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shimDir, _, err := Shim(a, dir)
-	if err != nil {
+	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
+	shimDir := filepath.Join(dir, a.Shims[0].Rel)
 	// Prove the link is really there, or the test proves nothing.
 	if _, err := os.Stat(filepath.Join(shimDir, "git", "config")); err != nil {
 		t.Fatalf("shim does not reach the real config, so this test is vacuous: %v", err)
@@ -76,10 +78,11 @@ func TestShimIsolatesTheAgentAndPassesEverythingElseThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shimDir, foundReal, err := Shim(a, dir)
+	foundReal, err := Shim(a, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	shimDir := filepath.Join(dir, a.Shims[0].Rel)
 	if len(foundReal) != 0 {
 		t.Errorf("fresh shim reported real entries: %v", foundReal)
 	}
@@ -126,10 +129,10 @@ func TestShimPicksUpNewEntriesOnEveryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shimDir, _, err := Shim(a, dir)
-	if err != nil {
+	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
+	shimDir := filepath.Join(dir, a.Shims[0].Rel)
 	if _, err := os.Lstat(filepath.Join(shimDir, "installedlater")); err == nil {
 		t.Fatal("entry exists before it was created")
 	}
@@ -137,7 +140,7 @@ func TestShimPicksUpNewEntriesOnEveryRun(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(base, "installedlater"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Shim(a, dir); err != nil {
+	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(shimDir, "installedlater")); err != nil {
@@ -148,7 +151,7 @@ func TestShimPicksUpNewEntriesOnEveryRun(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(base, "installedlater")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Shim(a, dir); err != nil {
+	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(filepath.Join(shimDir, "installedlater")); err == nil {
@@ -166,10 +169,10 @@ func TestShimRepointsAStaleLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shimDir, _, err := Shim(a, dir)
-	if err != nil {
+	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
+	shimDir := filepath.Join(dir, a.Shims[0].Rel)
 
 	// Repoint it somewhere wrong, as a stale shim from an older layout would be.
 	wrong := t.TempDir()
@@ -179,7 +182,7 @@ func TestShimRepointsAStaleLink(t *testing.T) {
 	if err := os.Symlink(wrong, filepath.Join(shimDir, "git")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Shim(a, dir); err != nil {
+	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.Readlink(filepath.Join(shimDir, "git"))
@@ -202,10 +205,10 @@ func TestShimReportsRealEntriesAndDoesNotDeleteThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shimDir, _, err := Shim(a, dir)
-	if err != nil {
+	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
+	shimDir := filepath.Join(dir, a.Shims[0].Rel)
 
 	// brandnewtool has no counterpart in the real config base, so it is only
 	// reachable from inside this profile.
@@ -217,13 +220,13 @@ func TestShimReportsRealEntriesAndDoesNotDeleteThem(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, foundReal, err := Shim(a, dir)
+	foundReal, err := Shim(a, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var reported bool
 	for _, n := range foundReal {
-		if n == "brandnewtool" {
+		if n == filepath.Join(a.Shims[0].Rel, "brandnewtool") {
 			reported = true
 		}
 	}
@@ -254,7 +257,7 @@ func TestShimDoesNotClobberARealAgentEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, foundReal, err := Shim(a, dir)
+	foundReal, err := Shim(a, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +266,7 @@ func TestShimDoesNotClobberARealAgentEntry(t *testing.T) {
 	}
 	var reported bool
 	for _, n := range foundReal {
-		if n == a.Shims[0].Entry {
+		if n == filepath.Join(a.Shims[0].Rel, a.Shims[0].Entry) {
 			reported = true
 		}
 	}
@@ -285,9 +288,9 @@ func TestShimIsANoOpWithoutASpec(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		shimDir, foundReal, err := Shim(a, dir)
-		if err != nil || shimDir != "" || foundReal != nil {
-			t.Errorf("%s: Shim = (%q, %v, %v), want empty", name, shimDir, foundReal, err)
+		foundReal, err := Shim(a, dir)
+		if err != nil || foundReal != nil {
+			t.Errorf("%s: Shim = (%v, %v), want empty", name, foundReal, err)
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -295,6 +298,43 @@ func TestShimIsANoOpWithoutASpec(t *testing.T) {
 		}
 		if len(entries) != 0 {
 			t.Errorf("%s: Shim created %d entries in a profile with no shim spec", name, len(entries))
+		}
+	}
+}
+
+// Every declared shim gets its own directory, each with its own passthrough set.
+// With one shim this is what Shim always did; the test exists so the second one
+// cannot silently share the first one's links.
+func TestShimBuildsOneDirectoryPerSpec(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "dat"))
+	for _, p := range []string{"cfg/opencode", "cfg/git", "dat/opencode", "dat/fonts"} {
+		if err := os.MkdirAll(filepath.Join(home, p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := agent.Agent{Name: "x", Shims: []agent.Shim{
+		{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"},
+		{Env: "XDG_DATA_HOME", Rel: "xdg-data", Entry: "opencode", Fallback: ".local/share"},
+	}}
+	dir := t.TempDir()
+	if _, err := Shim(a, dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ rel, entry, passthrough, absent string }{
+		{"xdg", "opencode", "git", "fonts"},
+		{"xdg-data", "opencode", "fonts", "git"},
+	} {
+		got, err := os.Readlink(filepath.Join(dir, tc.rel, tc.entry))
+		if err != nil || got != dir {
+			t.Errorf("%s/%s -> %q (err %v), want the profile %q", tc.rel, tc.entry, got, err, dir)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, tc.rel, tc.passthrough)); err != nil {
+			t.Errorf("%s: missing passthrough %s: %v", tc.rel, tc.passthrough, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, tc.rel, tc.absent)); err == nil {
+			t.Errorf("%s: has %s, which belongs to the other shim's base", tc.rel, tc.absent)
 		}
 	}
 }

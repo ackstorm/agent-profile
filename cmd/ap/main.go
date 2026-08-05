@@ -1307,7 +1307,7 @@ func prepare(a agent.Agent, name string) (string, error) {
 // shim builds or refreshes the config shim and reports anything a program wrote
 // into it for real, which would otherwise be invisible from outside the profile.
 func shim(a agent.Agent, dir string) error {
-	_, foundReal, err := profile.Shim(a, dir)
+	foundReal, err := profile.Shim(a, dir)
 	if err != nil {
 		return err
 	}

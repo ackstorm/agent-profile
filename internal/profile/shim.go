@@ -26,75 +26,86 @@ func ConfigBase() string {
 	return agent.ConfigBase()
 }
 
-// Shim builds the directory that a.ConfigEnv points at for a shimmed agent, and
-// re-asserts it. Returns the directory, and the names of any entries a program
-// created inside it for real instead of resolving through a passthrough link.
+// Shim builds the directory each of a's shims points at, and re-asserts them.
+// Returns the names of any entries a program created inside one for real instead
+// of resolving through a passthrough link, prefixed by the shim they are in.
 //
-// The contents are:
+// The contents of each are:
 //
 //	<profile>/<Rel>/<Entry>  -> the profile directory
-//	<profile>/<Rel>/<other>  -> the real <ConfigBase>/<other>, for every other entry
+//	<profile>/<Rel>/<other>  -> the real <Base>/<other>, for every other entry
 //
 // The agent finds only the profile under its own name, which is the isolation.
 // Everything else it spawns — git, gh, npm, language servers — follows a
-// passthrough link to its own real config, which is what makes setting a shared
-// variable acceptable here. Without the passthrough this would silently redirect
-// every one of those programs into the profile.
+// passthrough link to its own real directory, which is what makes setting a
+// shared variable acceptable here. Without the passthrough this would silently
+// redirect every one of those programs into the profile.
 //
-// Re-asserted on every run because ~/.config gains entries over time, and a
+// Re-asserted on every run because the real bases gain entries over time, and a
 // profile created last month must not hide a tool installed yesterday.
-func Shim(a agent.Agent, dir string) (shimDir string, foundReal []string, err error) {
-	// TODO(task2/3): iterate
-	if len(a.Shims) == 0 {
-		return "", nil, nil
+func Shim(a agent.Agent, dir string) (foundReal []string, err error) {
+	for _, s := range a.Shims {
+		found, err := shimOne(s, dir, a.Name)
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range found {
+			foundReal = append(foundReal, filepath.Join(s.Rel, n))
+		}
 	}
-	shimDir = filepath.Join(dir, a.Shims[0].Rel)
+	sort.Strings(foundReal)
+	return foundReal, nil
+}
+
+// shimOne builds a single shim directory. This is what Shim's body used to be,
+// with the base taken from the spec instead of hardcoded to ConfigBase.
+func shimOne(s agent.Shim, dir, agentName string) (foundReal []string, err error) {
+	shimDir := filepath.Join(dir, s.Rel)
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	base := ConfigBase()
+	base := s.Base()
 	if base == "" {
-		return "", nil, fmt.Errorf("cannot determine the real config directory for %s", a.Name)
+		return nil, fmt.Errorf("cannot determine the real %s directory for %s", s.Env, agentName)
 	}
-	want, err := shimTargets(a, dir, base)
+	want, err := shimTargets(s, dir, base)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
 	// Everything below goes through a Root confined to the shim, so no link we
 	// write and nothing we remove can land outside it.
 	root, err := os.OpenRoot(shimDir)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	defer func() { _ = root.Close() }()
 
 	linked, err := assertLinks(root, want)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	pruned, err := pruneStale(root, shimDir, want)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 	foundReal = append(linked, pruned...)
 	sort.Strings(foundReal)
-	return shimDir, foundReal, nil
+	return foundReal, nil
 }
 
 // shimTargets maps each name in the shim to what it must point at: the agent's
 // own name to the profile, everything else in the real config base to itself.
-func shimTargets(a agent.Agent, dir, base string) (map[string]string, error) {
-	// TODO(task2/3): iterate
-	want := map[string]string{a.Shims[0].Entry: dir}
+func shimTargets(s agent.Shim, dir, base string) (map[string]string, error) {
+	want := map[string]string{s.Entry: dir}
 	entries, err := os.ReadDir(base)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("cannot read %s: %w", base, err)
 	}
 	for _, e := range entries {
-		if e.Name() == a.Shims[0].Entry {
-			// The agent's own real config: deliberately NOT passed through. This
-			// single omission is the whole isolation.
+		if e.Name() == s.Entry {
+			// The agent's own real directory: deliberately NOT passed through.
+			// This single omission is the whole isolation.
 			continue
 		}
 		want[e.Name()] = filepath.Join(base, e.Name())
