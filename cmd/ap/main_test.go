@@ -2210,3 +2210,26 @@ func TestSessionsOutputShowsHowToResume(t *testing.T) {
 		t.Errorf("no pasteable resume hint:\n%s", out)
 	}
 }
+
+// sessions and resume are one workflow split across two commands: the listing
+// only has a point if you know what to do with an ID, and resume only has a
+// point if you know where IDs come from. Each help must send you to the other.
+func TestSessionsAndResumeHelpPointAtEachOther(t *testing.T) {
+	for _, tc := range []struct{ cmd, wants string }{
+		{"sessions", "ap resume --help"},
+		{"resume", "ap sessions --help"},
+	} {
+		h := helpFor(tc.cmd)
+		if !strings.Contains(h, tc.wants) {
+			t.Errorf("ap %s --help never mentions %q", tc.cmd, tc.wants)
+		}
+		// And an example of the other half, not just a pointer.
+		other := "ap resume 05d8188f"
+		if tc.cmd == "resume" {
+			other = "ap sessions"
+		}
+		if !strings.Contains(h, other) {
+			t.Errorf("ap %s --help shows no example of %q", tc.cmd, other)
+		}
+	}
+}

@@ -112,6 +112,11 @@ Examples:
   ap sessions --here
   ap sessions claude
   ap sessions claude:plan
+
+  ap sessions                    # then take an ID from the first column
+  ap resume 05d8188f             # and hand it back, from anywhere
+
+See also: ap resume --help
 `,
 
 	"resume": `ap resume - resume a past session in its own directory
@@ -135,6 +140,11 @@ Examples:
   ap resume
   ap resume 05d8188f
   ap resume 05d8188f --effort xhigh
+
+  ap sessions                    # where the IDs come from
+  ap resume 05d8188f             # first column of that listing
+
+See also: ap sessions --help
 `,
 
 	"create": `ap create - create a profile and a wrapper you can type as a command
