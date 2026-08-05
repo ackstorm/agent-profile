@@ -190,3 +190,22 @@ func TestEnvOutputIsSorted(t *testing.T) {
 		}
 	}
 }
+
+// Every declared shim contributes its own variable, each pointing at its own
+// subdirectory of the profile. TestEnvOnlySetsPathsInsideTheProfile already
+// guarantees they stay inside; this one guarantees they are all set at all.
+func TestEnvSetsOneVariablePerShim(t *testing.T) {
+	a := agent.Agent{Name: "x", ConfigEnv: "XDG_CONFIG_HOME", Shims: []agent.Shim{
+		{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "x", Fallback: ".config"},
+		{Env: "XDG_DATA_HOME", Rel: "xdg-data", Entry: "x", Fallback: ".local/share"},
+	}}
+	got := envMap(t, Env(a, "/p/x", []string{"XDG_DATA_HOME=/real/share"}))
+	for k, want := range map[string]string{
+		"XDG_CONFIG_HOME": "/p/x/xdg",
+		"XDG_DATA_HOME":   "/p/x/xdg-data",
+	} {
+		if got[k] != want {
+			t.Errorf("%s = %q, want %q", k, got[k], want)
+		}
+	}
+}

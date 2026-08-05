@@ -9,14 +9,25 @@ import (
 	"github.com/ackstorm/agent-profile/internal/agent"
 )
 
-// ConfigDir is the value a.ConfigEnv is set to: the profile itself, or the shim
-// directory inside it for an agent that needs one.
+// ConfigDir is the value a.ConfigEnv is set to: the profile itself, or the
+// matching shim directory inside it for an agent that needs one.
 func ConfigDir(a agent.Agent, dir string) string {
-	// TODO(task2/3): iterate
-	if len(a.Shims) > 0 {
-		return filepath.Join(dir, a.Shims[0].Rel)
+	for _, s := range a.Shims {
+		if s.Env == a.ConfigEnv {
+			return filepath.Join(dir, s.Rel)
+		}
 	}
 	return dir
+}
+
+// shimEnv is every variable a's shims claim, mapped to its directory inside the
+// profile. Empty for an agent with a private config variable.
+func shimEnv(a agent.Agent, dir string) map[string]string {
+	out := make(map[string]string, len(a.Shims))
+	for _, s := range a.Shims {
+		out[s.Env] = filepath.Join(dir, s.Rel)
+	}
+	return out
 }
 
 // Env returns base with the agent's config variable pointed at the profile. base
@@ -36,15 +47,24 @@ func ConfigDir(a agent.Agent, dir string) string {
 // "no override" from dir equaling it here would be one string comparison away
 // from silently breaking the day that directory moves.
 //
-// Nothing under XDG_DATA_HOME, XDG_STATE_HOME or XDG_CACHE_HOME is ever
-// redirected, which is what keeps sessions, credentials and caches shared.
+// XDG_STATE_HOME and XDG_CACHE_HOME are never redirected, and neither is HOME.
+// XDG_DATA_HOME is, for opencode only and only through a shim, because that is
+// where its sessions live and it has no private variable for them. See
+// agent.Shim.
 func Env(a agent.Agent, dir string, base []string) []string {
 	overrides := map[string]string{}
 	if dir != "" {
 		overrides[a.ConfigEnv] = ConfigDir(a, dir)
+		for k, v := range shimEnv(a, dir) {
+			overrides[k] = v
+		}
 	}
 
 	out := make([]string, 0, len(base)+len(overrides))
+	stripped := map[string]bool{a.ConfigEnv: true}
+	for _, s := range a.Shims {
+		stripped[s.Env] = true
+	}
 	for _, e := range base {
 		// a.ConfigEnv is always stripped here, not only when it is about to be
 		// replaced by an override: for dir == "" there is no override, and an
@@ -52,7 +72,7 @@ func Env(a agent.Agent, dir string, base []string) []string {
 		// <agent>:default` run from inside another profile inherited that
 		// profile's config variable and kept using it — Default's whole point
 		// silently failing in exactly the case it exists for.
-		if k, _, ok := strings.Cut(e, "="); ok && k == a.ConfigEnv {
+		if k, _, ok := strings.Cut(e, "="); ok && stripped[k] {
 			continue
 		}
 		out = append(out, e)
