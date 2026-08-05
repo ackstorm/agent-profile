@@ -78,10 +78,14 @@ func TestEnvOnlySetsPathsInsideTheProfile(t *testing.T) {
 	}
 }
 
-// Data, state and cache are never redirected. That is what keeps sessions,
-// credentials and caches shared across every profile, which is the whole point of
-// the tool: shimming the CONFIG directory must not creep into the others.
-func TestEnvNeverRedirectsDataStateOrCache(t *testing.T) {
+// State and cache are never redirected, and neither is HOME. That is what keeps
+// credentials, caches and the user's own home shared across every profile.
+//
+// Data is the one exception, and only for an agent that declares a shim for it:
+// opencode keeps its sessions there with no private variable to point elsewhere.
+// Any agent WITHOUT such a shim must still see data untouched, which is what
+// stops this exception from creeping outward.
+func TestEnvNeverRedirectsStateOrCache(t *testing.T) {
 	base := []string{
 		"XDG_DATA_HOME=/home/x/.local/share",
 		"XDG_STATE_HOME=/home/x/.local/state",
@@ -90,13 +94,39 @@ func TestEnvNeverRedirectsDataStateOrCache(t *testing.T) {
 	}
 	for _, name := range agent.Names() {
 		a, _ := agent.Lookup(name)
+		shimmed := map[string]bool{}
+		for _, s := range a.Shims {
+			shimmed[s.Env] = true
+		}
 		got := envMap(t, Env(a, "/p/x", base))
 		for _, want := range base {
 			k, v, _ := strings.Cut(want, "=")
-			if got[k] != v {
-				t.Errorf("%s: %s = %q, want untouched %q", name, k, got[k], v)
+			if k == "XDG_STATE_HOME" || k == "XDG_CACHE_HOME" || k == "HOME" {
+				if shimmed[k] {
+					t.Errorf("%s shims %s: state, cache and HOME are never redirected", name, k)
+				}
+				if got[k] != v {
+					t.Errorf("%s: %s = %q, want untouched %q", name, k, got[k], v)
+				}
+				continue
+			}
+			if !shimmed[k] && got[k] != v {
+				t.Errorf("%s: %s = %q, want untouched %q (no shim declares it)", name, k, got[k], v)
 			}
 		}
+	}
+}
+
+// opencode's sessions live under XDG_DATA_HOME in a sqlite db, and it has no
+// private variable for them, so ap points that variable at a shim inside the
+// profile. Without this the db is shared with every other profile and with the
+// bare agent — measured: a session created inside `opencode:plan` landed in
+// ~/.local/share/opencode/opencode.db.
+func TestOpencodeRedirectsDataThroughAShim(t *testing.T) {
+	a, _ := agent.Lookup("opencode")
+	got := envMap(t, Env(a, "/p/x", []string{"XDG_DATA_HOME=/real/share"}))
+	if want := "/p/x/xdg-data"; got["XDG_DATA_HOME"] != want {
+		t.Errorf("XDG_DATA_HOME = %q, want %q", got["XDG_DATA_HOME"], want)
 	}
 }
 
@@ -131,14 +161,19 @@ func TestEnvStripsInheritedConfigVarForDefault(t *testing.T) {
 	}
 }
 
-// Exactly one variable per agent. A second one appearing here should be a
-// deliberate decision, not a side effect.
-func TestEnvSetsOnlyTheConfigVar(t *testing.T) {
+// Env sets one variable per declared shim, or one for agents with a private
+// config variable. A second variable appearing for an agent without a shim
+// should be a deliberate decision, not a side effect.
+func TestEnvSetsOnlyTheConfigVars(t *testing.T) {
 	for _, name := range agent.Names() {
 		a, _ := agent.Lookup(name)
 		got := Env(a, "/p/x", nil)
-		if len(got) != 1 {
-			t.Errorf("%s: Env with empty base = %v, want exactly one entry", name, got)
+		wantLen := 1
+		if len(a.Shims) > 0 {
+			wantLen = len(a.Shims)
+		}
+		if len(got) != wantLen {
+			t.Errorf("%s: Env with empty base = %v, want %d entries", name, got, wantLen)
 		}
 	}
 }

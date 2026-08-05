@@ -387,8 +387,20 @@ func registry() map[string]Agent {
 			// safe for every other program in the process tree.
 			ConfigEnv: "XDG_CONFIG_HOME",
 			Mode:      Replace,
+			// Two shared variables, no private alternative for either. Config
+			// comes from XDG_CONFIG_HOME; sessions, credentials and snapshots
+			// come from XDG_DATA_HOME, where opencode keeps opencode.db.
+			//
+			// Both point Entry at the profile itself, so config and data resolve
+			// to one directory. Verified: no name collision, opencode.jsonc and
+			// opencode.db live side by side.
+			//
+			// XDG_STATE_HOME is deliberately NOT shimmed: prompt-history.jsonl,
+			// model.json and locks/ stay shared. Measured — a run never wrote
+			// there — so isolating it would be cost with no observed benefit.
 			Shims: []Shim{
 				{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"},
+				{Env: "XDG_DATA_HOME", Rel: "xdg-data", Entry: "opencode", Fallback: ".local/share"},
 			},
 			// Never node_modules — 62 MB on the reference machine, and reinstalled
 			// by opencode itself.
