@@ -2145,3 +2145,29 @@ func TestShimWarningNamesTheMatchingBase(t *testing.T) {
 		}
 	}
 }
+
+// The caveat is about what was consulted, not about what came back. opencode
+// scopes its listing to the current git project, so it answering with nothing is
+// the normal case — and exactly when the user most needs telling that the listing
+// is incomplete. Deriving this from the returned rows dropped it precisely then.
+func TestSessionsCaveatShowsEvenWithNoOpencodeRows(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "execute", ID: "aaaaaaaa",
+		Dir: t.TempDir(), Updated: time.Now(),
+	}}, true)
+	if !strings.Contains(out, "opencode") {
+		t.Errorf("no opencode caveat with zero opencode rows:\n%s", out)
+	}
+}
+
+// codex and pi parse RFC3339 strings that end in Z, so their timestamps arrive in
+// UTC, while claude's (ModTime) and opencode's (UnixMilli) arrive local. Rendering
+// a UTC time without converting showed pi two hours early and, near midnight, on
+// the wrong day — which makes a correctly ordered list look shuffled.
+func TestFmtTimeIgnoresTheIncomingZone(t *testing.T) {
+	inst := time.Now().Add(-3 * time.Hour)
+	away := inst.In(time.FixedZone("TEST", 5*60*60))
+	if got, want := fmtTime(away), fmtTime(inst.Local()); got != want {
+		t.Errorf("fmtTime depends on the zone it is handed: %q vs %q", got, want)
+	}
+}

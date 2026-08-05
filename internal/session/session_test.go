@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/internal/run"
 )
 
 // codex writes one session_meta line first, carrying the id, the cwd and the
@@ -239,4 +243,150 @@ func TestScanOpensOnlyWhatItPrints(t *testing.T) {
 		t.Errorf("opened %d transcripts to print 5: sort by mtime before reading", opened)
 	}
 	_ = files
+}
+
+// profile.Default is not a profile: it names the agent's real configuration, and
+// reaching it means inheriting the user's environment untouched. Scan used to
+// hand run.Env the directory profile.Dir resolves Default to, which produced a
+// real override pointing at <real config>/xdg-data — a directory that does not
+// exist. Measured: opencode listed nothing for :default and would have created
+// state inside the user's own config directory.
+func TestEnvDirIsEmptyForDefault(t *testing.T) {
+	a, ok := agent.Lookup("opencode")
+	if !ok {
+		t.Fatal("no opencode in the registry")
+	}
+	if got := envDir(a, profile.Default); got != "" {
+		t.Errorf("envDir(default) = %q, want empty so run.Env sets no override", got)
+	}
+	if got := envDir(a, "plan"); got == "" {
+		t.Error("envDir on a real profile is empty: it would inherit instead of isolating")
+	}
+
+	// The property that actually matters, stated against run.Env itself.
+	base := []string{"XDG_DATA_HOME=/real/share", "XDG_CONFIG_HOME=/real/config"}
+	for _, e := range run.Env(a, envDir(a, profile.Default), base) {
+		if strings.HasPrefix(e, "XDG_DATA_HOME=") && e != "XDG_DATA_HOME=/real/share" {
+			t.Errorf("scanning :default rewrote the environment: %s", e)
+		}
+	}
+}
+
+// The cap is the last thing applied, never the first. Filtering after a global
+// cap makes `ap sessions claude:finops` answer "No sessions found" while finops
+// has three, because fifty busier sessions filled the window first.
+func TestDirectoryFilterIsAppliedBeforeTheCap(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	// Ten transcripts; only the oldest belongs to /wanted.
+	for i := 0; i < 10; i++ {
+		want := "/other"
+		if i == 0 {
+			want = "/wanted"
+		}
+		f := filepath.Join(dir, fmt.Sprintf("%08d-0000-0000-0000-000000000000.jsonl", i))
+		body := fmt.Sprintf(`{"type":"user","cwd":%q}`+"\n", want)
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mt := now.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(f, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := scanFileStore(dir, "claude", "x", 3, Filter{Dir: "/wanted"}, readClaude, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d sessions, want the one in /wanted: filtering happens after the cap", len(got))
+	}
+	if got[0].Dir != "/wanted" {
+		t.Errorf("Dir = %q", got[0].Dir)
+	}
+}
+
+// claude's ai-title sits past 64 KiB in most real transcripts: measured between
+// 60,961 and 79,948 bytes across the eight most recent, five of them over. A
+// 64 KiB budget therefore drops the title from the majority of rows while
+// looking like it works.
+func TestReadClaudeFindsATitlePastSixtyFourKilobytes(t *testing.T) {
+	dir := t.TempDir()
+	id := "cccccccc-0000-0000-0000-000000000000"
+	var b strings.Builder
+	b.WriteString(`{"type":"user","cwd":"/tmp/here"}` + "\n")
+	// Eight lines of 10 KB each puts the title at ~80 KB, like the real ones.
+	for i := 0; i < 8; i++ {
+		b.WriteString(`{"type":"assistant","text":"` + strings.Repeat("x", 10000) + `"}` + "\n")
+	}
+	b.WriteString(`{"type":"ai-title","aiTitle":"Found past the old budget"}` + "\n")
+	f := filepath.Join(dir, id+".jsonl")
+	if err := os.WriteFile(f, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readClaude(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "Found past the old budget" {
+		t.Errorf("Title = %q: the byte budget cuts before the title real transcripts carry", got.Title)
+	}
+}
+
+// A single very long line must not lose the whole session. The longest measured
+// first-50 line was 97,988 bytes, which overflows a 64 KiB scanner buffer and
+// makes Scan return "no cwd in the first 50 lines" for a perfectly good session.
+func TestReadClaudeSurvivesAVeryLongLine(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "dddddddd-0000-0000-0000-000000000000.jsonl")
+	body := `{"type":"attachment","content":"` + strings.Repeat("y", 98000) + `"}` + "\n" +
+		`{"type":"user","cwd":"/tmp/survived"}` + "\n"
+	if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readClaude(f)
+	if err != nil {
+		t.Fatalf("a 98 KB line dropped the session: %v", err)
+	}
+	if got.Dir != "/tmp/survived" {
+		t.Errorf("Dir = %q", got.Dir)
+	}
+}
+
+// A stub transcript is not an error worth printing. Three files of ~146 bytes —
+// sessions that died before writing anything — put three warning lines on stderr
+// on every single `ap sessions`, which trains people to ignore warnings.
+func TestAStubTranscriptIsSkippedQuietly(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "eeeeeeee-0000-0000-0000-000000000000.jsonl")
+	body := `{"type":"last-prompt","leafUuid":"x","sessionId":"eeeeeeee-0000-0000-0000-000000000000"}` + "\n"
+	if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warned := 0
+	got, err := scanFileStore(dir, "claude", "x", 10, Filter{}, readClaude, func(error) { warned++ })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d sessions from a stub transcript", len(got))
+	}
+	if warned != 0 {
+		t.Errorf("warned %d times about a transcript that is simply not a session", warned)
+	}
+}
+
+// Measured: opencode prints nothing at all when the current project has no
+// sessions, not "[]". That is the common case, since its listing is project
+// scoped, so treating it as a parse error means a warning on nearly every run.
+func TestParseOpencodeAcceptsEmptyOutput(t *testing.T) {
+	for _, in := range []string{"", "  \n"} {
+		got, err := parseOpencode([]byte(in))
+		if err != nil {
+			t.Errorf("parseOpencode(%q) errored: %v", in, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("parseOpencode(%q) returned %d sessions", in, len(got))
+		}
+	}
 }

@@ -338,6 +338,12 @@ func fmtTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
+	// Timestamps arrive in two zones: claude's come from ModTime and opencode's
+	// from UnixMilli, both local, while codex and pi parse RFC3339 strings ending
+	// in Z and arrive as UTC. Rendering those without converting showed pi two
+	// hours early — and, near midnight, on the wrong day — which makes a
+	// correctly sorted list look shuffled.
+	t = t.Local()
 	now := time.Now()
 	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
 		return t.Format("15:04")
@@ -347,6 +353,11 @@ func fmtTime(t time.Time) string {
 	}
 	return t.Format("2006-01-02")
 }
+
+// opencodeCaveat is printed whenever an opencode store was consulted, including
+// when it returned nothing. opencode scopes its listing to the current git
+// project, so silence means "none in this project", never "none at all".
+const opencodeCaveat = "opencode: only this project's sessions are listed (opencode groups by git project)."
 
 func renderSessions(sessions []session.Session, hasOpencode bool) string {
 	if len(sessions) == 0 {
@@ -417,7 +428,7 @@ func renderSessions(sessions []session.Session, hasOpencode bool) string {
 		}
 	}
 	if hasOpencode {
-		sb.WriteString("\n\nopencode: only this project's sessions are listed (opencode groups by git project).")
+		sb.WriteString("\n\n" + opencodeCaveat)
 	}
 	sb.WriteString("\n")
 	return sb.String()
@@ -454,10 +465,16 @@ func chdirTo(dir string) error {
 	return nil
 }
 
+// findSession resolves an id, or a unique prefix of one, to a session.
+//
+// Scanned with no cap on purpose: a silent limit here would make `ap resume`
+// reject an id that exists, which is worse than the extra work. Readers stop a
+// few lines into each transcript, so this stays about a second even against the
+// hundreds of files a real machine has.
 func findSession(id string) (session.Session, error) {
-	sessions := session.Scan(500, nil)
+	res := session.Scan(0, session.Filter{}, nil)
 	var matches []session.Session
-	for _, s := range sessions {
+	for _, s := range res.Sessions {
 		if s.ID == id {
 			return s, nil
 		}
@@ -546,7 +563,8 @@ func cmdResume(args []string) error {
 		warn := func(err error) {
 			fmt.Fprintf(os.Stderr, "ap: warn: %v\n", err)
 		}
-		sessions := session.Scan(10, warn)
+		res := session.Scan(10, session.Filter{}, warn)
+		sessions := res.Sessions
 		if len(sessions) == 0 {
 			fmt.Println("No sessions found.")
 			return nil
@@ -577,10 +595,12 @@ func cmdResume(args []string) error {
 	}
 
 	argv := resumeArgs(a, s.ID, extra)
-	fmt.Fprintf(os.Stderr, "ap: resuming %s:%s in %s\n", s.Agent, s.Profile, tilde(s.Dir))
+	// Announced only once the move succeeded: saying "resuming in <dir>" and then
+	// failing to enter it reads as if the resume itself broke.
 	if err := chdirTo(s.Dir); err != nil {
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "ap: resuming %s:%s in %s\n", s.Agent, s.Profile, tilde(s.Dir))
 	return run.Exec(a, dir, argv)
 }
 
@@ -606,52 +626,33 @@ func cmdSessions(args []string) error {
 		}
 	}
 
-	cwd, _ := os.Getwd()
-	if cwd != "" {
-		cwd = filepath.Clean(cwd)
-	}
-
 	warn := func(err error) {
 		fmt.Fprintf(os.Stderr, "ap: warn: %v\n", err)
 	}
 
-	scanLimit := *maxFlag
-	if scanLimit < 50 {
-		scanLimit = 50
-	}
-	sessions := session.Scan(scanLimit, warn)
-
-	var filtered []session.Session
-	scannedOpencode := false
-
-	for _, s := range sessions {
-		if s.Agent == "opencode" {
-			scannedOpencode = true
+	filter := session.Filter{Agent: filterAgent, Profile: filterProfile}
+	if *hereFlag {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
 		}
-		if filterAgent != "" && s.Agent != filterAgent {
-			continue
-		}
-		if filterProfile != "" && s.Profile != filterProfile {
-			continue
-		}
-		if *hereFlag && cwd != "" {
-			if filepath.Clean(s.Dir) != cwd {
-				continue
-			}
-		}
-		filtered = append(filtered, s)
+		filter.Dir = cwd
 	}
 
-	if *maxFlag > 0 && len(filtered) > *maxFlag {
-		filtered = filtered[:*maxFlag]
-	}
+	// The filter goes INTO the scan. Applied to its result instead, a cap taken
+	// first would hide a rarely used profile behind busier ones — measured,
+	// `ap sessions claude:finops` answered "No sessions found" with three there.
+	res := session.Scan(*maxFlag, filter, warn)
 
-	if len(filtered) == 0 {
+	if len(res.Sessions) == 0 {
 		fmt.Println("No sessions found.")
+		if res.ConsultedOpencode {
+			fmt.Println(opencodeCaveat)
+		}
 		return nil
 	}
 
-	fmt.Print(renderSessions(filtered, scannedOpencode))
+	fmt.Print(renderSessions(res.Sessions, res.ConsultedOpencode))
 	return nil
 }
 

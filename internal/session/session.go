@@ -8,8 +8,10 @@ package session
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,13 +46,74 @@ type Session struct {
 }
 
 // maxMetaLines and maxMetaBytes bound how far into a transcript a reader will
-// look for metadata. claude puts cwd around line 3 and its title around line 20,
-// but one measured file was 24.9 MB with no title at all — without a bound that
-// file is read whole to learn nothing.
+// look for metadata. Without a bound, one measured file was 24.9 MB with no
+// title at all and would be read whole to learn nothing.
+//
+// The byte budget is 256 KiB because 64 KiB was measured to be just under the
+// data it was meant to reach. Across the eight most recent transcripts on the
+// reference machine the ai-title landed between 60,961 and 79,948 bytes in, five
+// of them past 64 KiB, so that budget silently dropped the title from most rows.
+// The longest single line in the first fifty was 97,988 bytes, which also
+// overflowed a 64 KiB scanner buffer and lost those sessions entirely.
+//
+// 50 lines is the real bound; the byte budget only stops a pathological file.
 const (
 	maxMetaLines = 50
-	maxMetaBytes = 64 << 10
+	maxMetaBytes = 256 << 10
 )
+
+// errNotASession marks a file that is readable but is not a session: a transcript
+// that died before recording anything. Three such files (~146 bytes each) put
+// three warning lines on stderr on every `ap sessions`, which is how people learn
+// to ignore warnings. Skipped quietly instead.
+var errNotASession = errors.New("not a session")
+
+// Filter narrows a scan. Every field is optional; an empty one matches anything.
+//
+// Applied BEFORE the cap, always. Filtering a capped list makes
+// `ap sessions claude:finops` answer "No sessions found" while finops has three,
+// because busier profiles filled the window first.
+type Filter struct {
+	Agent   string
+	Profile string
+	// Dir keeps only sessions belonging to this working directory.
+	Dir string
+}
+
+func (f Filter) matchesStore(agentName, profileName string) bool {
+	if f.Agent != "" && f.Agent != agentName {
+		return false
+	}
+	if f.Profile != "" && f.Profile != profileName {
+		return false
+	}
+	return true
+}
+
+func (f Filter) matches(s Session) bool {
+	if !f.matchesStore(s.Agent, s.Profile) {
+		return false
+	}
+	if f.Dir != "" && filepath.Clean(s.Dir) != filepath.Clean(f.Dir) {
+		return false
+	}
+	return true
+}
+
+// envDir is the directory run.Env should be given for a profile.
+//
+// Empty for profile.Default, which is not a profile at all but the agent's own
+// machine-wide configuration: reaching it means inheriting the environment
+// untouched. Passing profile.Dir's answer instead builds a real override at
+// <real config>/xdg-data, a directory that does not exist — measured, opencode
+// then listed nothing for :default and would have written state into the user's
+// own config directory.
+func envDir(a agent.Agent, profileName string) string {
+	if profileName == profile.Default {
+		return ""
+	}
+	return profile.Dir(a, profileName)
+}
 
 // readCodex reads the session_meta line codex writes first.
 func readCodex(path string) (Session, error) {
@@ -76,7 +139,7 @@ func readCodex(path string) (Session, error) {
 		return Session{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if meta.Type != "session_meta" || meta.Payload.SessionID == "" {
-		return Session{}, fmt.Errorf("%s: no session_meta on the first line", path)
+		return Session{}, fmt.Errorf("%s: no session_meta on the first line: %w", path, errNotASession)
 	}
 	s := Session{ID: meta.Payload.SessionID, Dir: meta.Payload.Cwd, Path: path}
 	s.Updated, _ = time.Parse(time.RFC3339, meta.Timestamp)
@@ -105,7 +168,7 @@ func readPi(path string) (Session, error) {
 		return Session{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if meta.Type != "session" || meta.ID == "" {
-		return Session{}, fmt.Errorf("%s: no session header on the first line", path)
+		return Session{}, fmt.Errorf("%s: no session header on the first line: %w", path, errNotASession)
 	}
 	s := Session{ID: meta.ID, Dir: meta.Cwd, Path: path}
 	s.Updated, _ = time.Parse(time.RFC3339, meta.Timestamp)
@@ -162,7 +225,7 @@ func readClaude(path string) (Session, error) {
 		}
 	}
 	if s.Dir == "" {
-		return Session{}, fmt.Errorf("%s: no cwd in the first %d lines", path, maxMetaLines)
+		return Session{}, fmt.Errorf("%s: no cwd in the first %d lines: %w", path, maxMetaLines, errNotASession)
 	}
 	return s, nil
 }
@@ -171,6 +234,13 @@ func readClaude(path string) (Session, error) {
 //
 // Timestamps are milliseconds since the epoch.
 func parseOpencode(b []byte) ([]Session, error) {
+	// Measured: with no sessions in the current project opencode prints NOTHING,
+	// not "[]". Treating that as a parse error puts "unexpected end of JSON input"
+	// on stderr for every profile that simply has no history here, which is the
+	// common case given the listing is project-scoped.
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil
+	}
 	var rows []struct {
 		ID        string `json:"id"`
 		Title     string `json:"title"`
@@ -222,7 +292,7 @@ type candidate struct {
 	mtime time.Time
 }
 
-func scanFileStore(storeDir, agentName, profileName string, max int, read readerFunc, warn func(error)) ([]Session, error) {
+func scanFileStore(storeDir, agentName, profileName string, max int, f Filter, read readerFunc, warn func(error)) ([]Session, error) {
 	var candidates []candidate
 	err := filepath.WalkDir(storeDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -255,16 +325,18 @@ func scanFileStore(storeDir, agentName, profileName string, max int, read reader
 		return 0
 	})
 
-	limit := len(candidates)
-	if max > 0 && limit > max {
-		limit = max
-	}
-
+	// Newest first, reading only until max have PASSED the filter. Capping the
+	// candidate list first and filtering afterwards is what made a rarely used
+	// profile invisible behind fifty busier sessions.
 	var out []Session
-	for i := 0; i < limit; i++ {
-		s, err := read(candidates[i].path)
+	for _, c := range candidates {
+		if max > 0 && len(out) >= max {
+			break
+		}
+		s, err := read(c.path)
 		if err != nil {
-			if warn != nil {
+			// A file that is simply not a session is not worth a warning.
+			if warn != nil && !errors.Is(err, errNotASession) {
 				warn(err)
 			}
 			continue
@@ -272,7 +344,10 @@ func scanFileStore(storeDir, agentName, profileName string, max int, read reader
 		s.Agent = agentName
 		s.Profile = profileName
 		if s.Updated.IsZero() {
-			s.Updated = candidates[i].mtime
+			s.Updated = c.mtime
+		}
+		if !f.matches(s) {
+			continue
 		}
 		out = append(out, s)
 	}
@@ -280,7 +355,7 @@ func scanFileStore(storeDir, agentName, profileName string, max int, read reader
 }
 
 func scanClaude(storeDir, agentName, profileName string, max int, read readerFunc) ([]Session, error) {
-	return scanFileStore(storeDir, agentName, profileName, max, read, nil)
+	return scanFileStore(storeDir, agentName, profileName, max, Filter{}, read, nil)
 }
 
 func sortAndCap(sessions []Session, max int) []Session {
@@ -299,17 +374,29 @@ func sortAndCap(sessions []Session, max int) []Session {
 	return sessions
 }
 
-// Scan returns the most recent sessions across every agent and profile,
-// newest first.
+// Result is what a scan found, plus what it had to do to find it.
+type Result struct {
+	Sessions []Session
+	// ConsultedOpencode reports whether any opencode store was asked, whether or
+	// not it answered with rows. The caller must say so: opencode's listing is
+	// scoped to the current git project, so an empty answer means "none in this
+	// project", never "none at all". Deciding this from the returned rows instead
+	// hides the caveat in exactly the case where it matters most.
+	ConsultedOpencode bool
+}
+
+// Scan returns the most recent sessions matching f across every agent and
+// profile, newest first.
 //
-// Per-store it stats first and reads only the newest max files: the transcripts
-// are large and there are hundreds of them.
+// Per-store it stats first and reads only as far as it must: the transcripts are
+// large and there are hundreds of them. The filter is applied before the cap, so
+// a rarely used profile cannot be hidden by busier ones.
 //
 // Errors from one profile never fail the whole scan — a profile with an
 // unreadable store is reported through warn and the rest still list. A listing
 // that aborts because one directory is odd is a listing nobody trusts.
-func Scan(max int, warn func(error)) []Session {
-	var all []Session
+func Scan(max int, f Filter, warn func(error)) Result {
+	var res Result
 	for _, name := range agent.Names() {
 		a, ok := agent.Lookup(name)
 		if !ok || a.Sessions == nil {
@@ -323,13 +410,18 @@ func Scan(max int, warn func(error)) []Session {
 			continue
 		}
 		for _, p := range profs {
+			if !f.matchesStore(a.Name, p) {
+				continue
+			}
 			pDir := profile.Dir(a, p)
 			if a.Sessions.Layout == agent.LayoutExec {
 				bin, err := exec.LookPath(a.Bin)
 				if err != nil {
 					continue
 				}
-				env := run.Env(a, pDir, os.Environ())
+				res.ConsultedOpencode = true
+				// envDir, not pDir: :default must inherit the environment.
+				env := run.Env(a, envDir(a, p), os.Environ())
 				sessions, err := opencodeSessions(bin, env, max)
 				if err != nil {
 					if warn != nil {
@@ -341,7 +433,11 @@ func Scan(max int, warn func(error)) []Session {
 					sessions[i].Agent = a.Name
 					sessions[i].Profile = p
 				}
-				all = append(all, sessions...)
+				for _, s := range sessions {
+					if f.matches(s) {
+						res.Sessions = append(res.Sessions, s)
+					}
+				}
 			} else {
 				storeDir := filepath.Join(pDir, a.Sessions.Rel)
 				var reader readerFunc
@@ -355,16 +451,17 @@ func Scan(max int, warn func(error)) []Session {
 				default:
 					continue
 				}
-				sessions, err := scanFileStore(storeDir, a.Name, p, max, reader, warn)
+				sessions, err := scanFileStore(storeDir, a.Name, p, max, f, reader, warn)
 				if err != nil {
 					if warn != nil {
 						warn(err)
 					}
 					continue
 				}
-				all = append(all, sessions...)
+				res.Sessions = append(res.Sessions, sessions...)
 			}
 		}
 	}
-	return sortAndCap(all, max)
+	res.Sessions = sortAndCap(res.Sessions, max)
+	return res
 }
