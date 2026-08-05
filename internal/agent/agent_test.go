@@ -243,6 +243,32 @@ func TestSharedEntries(t *testing.T) {
 	}
 }
 
+// A clone must not carry another profile's sessions. opencode keeps them in a
+// sqlite db inside the profile now, so the db and its sidecars are State — a
+// clone that copied them would let you resume, inside the clone, a conversation
+// that used tools the clone does not have.
+func TestOpencodeSessionStateIsNotCloned(t *testing.T) {
+	oc, _ := Lookup("opencode")
+	state := map[string]bool{}
+	for _, p := range oc.State {
+		state[p] = true
+	}
+	for _, want := range []string{"opencode.db", "opencode.db-wal", "opencode.db-shm", "snapshot", "log"} {
+		if !state[want] {
+			t.Errorf("opencode State is missing %q: ap create --from would copy it", want)
+		}
+	}
+	allow := map[string]bool{}
+	for _, p := range oc.CloneAllow {
+		allow[p] = true
+	}
+	for p := range state {
+		if allow[p] {
+			t.Errorf("%q is both State and CloneAllow: the allowlist wins and the session is cloned anyway", p)
+		}
+	}
+}
+
 // A profile is a separate environment: the credential is the only thing it
 // inherits from the machine. A regression here silently makes something common
 // to every profile again.

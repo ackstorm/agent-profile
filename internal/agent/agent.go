@@ -429,8 +429,15 @@ func registry() map[string]Agent {
 				{Rel: "account.json", From: filepath.Join(dataBase(), "opencode", "account.json")},
 				{Rel: "mcp-auth.json", From: filepath.Join(dataBase(), "opencode", "mcp-auth.json")},
 			},
-			// State is nil for the same reason: its sessions are outside the profile
-			// entirely, so a clone cannot carry them.
+			// What the profile accumulates by being used, now that data is
+			// shimmed: the session db and its sqlite sidecars, the git snapshots
+			// opencode takes to support revert, and the logs. Skipped by
+			// `ap create --from`, which copies configuration and never history.
+			//
+			// The -wal and -shm sidecars are listed explicitly. Copying the db
+			// without its WAL yields a db missing whatever had not been
+			// checkpointed, which is worse than not copying it at all.
+			State: []string{"opencode.db", "opencode.db-wal", "opencode.db-shm", "snapshot", "log", "repos"},
 			Setup: "ap run %s providers   (a custom provider means editing opencode.json inside the profile)",
 		},
 	}
