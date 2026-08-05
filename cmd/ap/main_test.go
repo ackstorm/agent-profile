@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -74,6 +75,48 @@ func TestSessionsMarksAMissingDirectory(t *testing.T) {
 	}
 	if !strings.Contains(out, "missing") {
 		t.Error("a session pointing at a deleted directory is not marked")
+	}
+}
+
+// The id goes where the agent's grammar puts it, stated by the {} placeholder,
+// never appended. Same rule as a variant: ap does not infer argv positions for
+// four external CLIs.
+func TestResumeArgvPutsTheIDAtThePlaceholder(t *testing.T) {
+	for _, tc := range []struct{ agent, id string; want []string }{
+		{"claude", "abc", []string{"--resume", "abc"}},
+		{"codex", "abc", []string{"resume", "abc"}},
+		{"pi", "abc", []string{"--session", "abc"}},
+		{"opencode", "abc", []string{"-s", "abc"}},
+	} {
+		a, _ := agent.Lookup(tc.agent)
+		got := resumeArgs(a, tc.id, nil)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.agent, got, tc.want)
+		}
+	}
+}
+
+// Extra arguments follow the resume flag, so `ap resume <id> --model opus`
+// reaches the agent. Same passthrough rule as `ap run`.
+func TestResumePassesExtraArgsThrough(t *testing.T) {
+	a, _ := agent.Lookup("claude")
+	got := resumeArgs(a, "abc", []string{"--model", "opus"})
+	want := []string{"--resume", "abc", "--model", "opus"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// A session whose directory is gone must fail before exec, with the path in the
+// message. Without the chdir claude answers "No conversation found" — on stdout,
+// exit 0 — which reads like an ap bug.
+func TestResumeRefusesAMissingDirectory(t *testing.T) {
+	err := chdirTo(filepath.Join(t.TempDir(), "not-there"))
+	if err == nil {
+		t.Fatal("chdirTo accepted a directory that does not exist")
+	}
+	if !strings.Contains(err.Error(), "not-there") {
+		t.Errorf("error does not name the directory: %v", err)
 	}
 }
 

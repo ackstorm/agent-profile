@@ -34,6 +34,7 @@ Usage:
 Commands:
   list      List profiles and variants, or just one agent's
   sessions  List recent sessions across agents and profiles
+  resume    Resume a past session in its directory
   create    Create a profile and a wrapper you can type as a command
   variant   Name a set of launch arguments over an existing profile
             (over one that exists it asks first; --yes answers)
@@ -127,6 +128,8 @@ func dispatch(args []string) error {
 		return cmdList(args[1:])
 	case "sessions":
 		return cmdSessions(args[1:])
+	case "resume":
+		return cmdResume(args[1:])
 	case "create":
 		return cmdCreate(args[1:])
 	case "variant":
@@ -409,6 +412,97 @@ func renderSessions(sessions []session.Session, hasOpencode bool) string {
 	}
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// resumeArgs substitutes the session id into the agent's stated resume argv, then
+// appends whatever the caller passed. The placeholder is "{}", exactly as in a
+// variant: the registry states where the id goes, ap never infers it.
+func resumeArgs(a agent.Agent, id string, extra []string) []string {
+	out := make([]string, 0, len(a.Sessions.ResumeArgs)+len(extra))
+	for _, arg := range a.Sessions.ResumeArgs {
+		if arg == "{}" {
+			out = append(out, id)
+			continue
+		}
+		out = append(out, arg)
+	}
+	return append(out, extra...)
+}
+
+// chdirTo moves to a session's directory before exec.
+//
+// This is the one place ap does not exec in the caller's cwd, and it is not
+// optional: measured, claude cannot find a session from anywhere else, pi refuses
+// and prompts, and codex resumes happily against whatever tree it was started in —
+// which is the worst of the three, because it looks like it worked.
+func chdirTo(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("the session records no directory, so there is nowhere to resume it")
+	}
+	if err := os.Chdir(dir); err != nil {
+		return fmt.Errorf("cannot enter %s: %w", dir, err)
+	}
+	return nil
+}
+
+func findSession(id string) (session.Session, error) {
+	sessions := session.Scan(500, nil)
+	var matches []session.Session
+	for _, s := range sessions {
+		if s.ID == id {
+			return s, nil
+		}
+		if strings.HasPrefix(s.ID, id) {
+			matches = append(matches, s)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		var cand []string
+		for _, m := range matches {
+			cand = append(cand, fmt.Sprintf("%s (%s:%s)", m.ID[:min(8, len(m.ID))], m.Agent, m.Profile))
+		}
+		return session.Session{}, fmt.Errorf("ambiguous session ID prefix %q matches: %s", id, strings.Join(cand, ", "))
+	}
+	return session.Session{}, fmt.Errorf("no session found matching %q", id)
+}
+
+func cmdResume(args []string) error {
+	fs := flagSet("resume")
+	stop, err := parse(fs, args)
+	if stop {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: ap resume <id> [args...]")
+	}
+	id := rest[0]
+	extra := rest[1:]
+
+	s, err := findSession(id)
+	if err != nil {
+		return err
+	}
+
+	a, ok := agent.Lookup(s.Agent)
+	if !ok {
+		return fmt.Errorf("unknown agent %q for session %s", s.Agent, s.ID)
+	}
+
+	dir, err := prepare(a, s.Profile)
+	if err != nil {
+		return err
+	}
+
+	argv := resumeArgs(a, s.ID, extra)
+	fmt.Fprintf(os.Stderr, "ap: resuming %s:%s in %s\n", s.Agent, s.Profile, tilde(s.Dir))
+	if err := chdirTo(s.Dir); err != nil {
+		return err
+	}
+	return run.Exec(a, dir, argv)
 }
 
 func cmdSessions(args []string) error {
