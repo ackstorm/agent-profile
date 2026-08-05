@@ -269,6 +269,44 @@ func TestOpencodeSessionStateIsNotCloned(t *testing.T) {
 	}
 }
 
+// pi keeps its provider configuration in models.json: baseUrl, api and the custom
+// model list. A profile without it has no usable model at all, which is the same
+// failure as starting logged out. models-store.json is deliberately NOT shared —
+// it is a downloaded catalogue pi regenerates on its own.
+func TestPiSharesItsProviderConfig(t *testing.T) {
+	p, _ := Lookup("pi")
+	got := map[string]bool{}
+	for _, s := range p.Shared {
+		got[s.Rel] = true
+	}
+	if !got["models.json"] {
+		t.Error("pi does not share models.json: a fresh profile has no providers and no usable model")
+	}
+	if got["models-store.json"] {
+		t.Error("pi shares models-store.json: it is a downloaded catalogue pi regenerates per profile")
+	}
+}
+
+// A path that is both shared and cloned is a contradiction: the clone writes a
+// real file where Link then wants a symlink, and Link moves it aside to
+// <rel>.ap-orphan. The user sees a spurious orphan warning on a profile that did
+// nothing wrong.
+func TestNoPathIsBothSharedAndCloned(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		allow := map[string]bool{}
+		for _, p := range a.CloneAllow {
+			allow[p] = true
+		}
+		for _, s := range a.Shared {
+			if allow[s.Rel] {
+				t.Errorf("%s: %q is both Shared and CloneAllow: a clone would leave a real file where the symlink belongs",
+					name, s.Rel)
+			}
+		}
+	}
+}
+
 // A profile is a separate environment: the credential is the only thing it
 // inherits from the machine. A regression here silently makes something common
 // to every profile again.
@@ -276,7 +314,7 @@ func TestEveryAgentSharesOnlyItsCredential(t *testing.T) {
 	want := map[string][]string{
 		"claude":   {".credentials.json"},
 		"codex":    {"auth.json"},
-		"pi":       {"auth.json"},
+		"pi":       {"auth.json", "models.json"},
 		"opencode": {"account.json", "auth.json", "mcp-auth.json"},
 	}
 	for _, name := range Names() {

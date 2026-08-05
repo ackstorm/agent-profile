@@ -446,8 +446,8 @@ Created as a symlink by `ap create` and re-asserted on every `ap run`:
 |---|---|
 | claude | `.credentials.json` |
 | codex | `auth.json` |
-| pi | `auth.json` |
-| opencode | nothing — see the asymmetry below |
+| pi | `auth.json`, `models.json` |
+| opencode | `auth.json`, `account.json`, `mcp-auth.json` |
 
 The link is re-created on every run because agents rewrite their credential
 files — codex refreshes OAuth tokens into `auth.json` — and a write via

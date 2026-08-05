@@ -372,11 +372,19 @@ func registry() map[string]Agent {
 				// vars, which the child inherits anyway. Linked because it costs nothing
 				// and covers the case where keys are stored here.
 				{Rel: "auth.json", From: filepath.Join(h, ".pi", "agent", "auth.json")},
+				// Where pi's providers actually live: baseUrl, api and the custom model
+				// list. Without it a fresh profile has no usable model — the same failure
+				// as starting logged out, which is what Share is for. Verified: it holds
+				// an $ENV reference, never a literal key.
+				//
+				// models-store.json is NOT shared: 72 KB of downloaded catalogue that pi
+				// regenerates inside each profile on its own.
+				{Rel: "models.json", From: filepath.Join(h, ".pi", "agent", "models.json")},
 			},
-			Unshared:       []string{"sessions"},
-			State:          []string{"sessions"},
-			CloneAllow:     []string{"settings.json", "models.json"},
-			Setup:          "ap run %s config",
+			Unshared:   []string{"sessions"},
+			State:      []string{"sessions", "models-store.json"},
+			CloneAllow: []string{"settings.json"},
+			Setup:      "ap run %s config",
 			Settings:       "settings.json",
 			SettingsFormat: JSON,
 		},
