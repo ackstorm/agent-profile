@@ -24,9 +24,8 @@ import (
 const usage = `ap - per-agent profile launcher
 
 Run claude, codex, opencode or pi under a named profile, so each one has its
-own settings, skills, agents and MCP servers. Your login and your session
-history stay shared with the agent you already had: a profile separates
-configuration, nothing else.
+own settings, skills, agents and MCP servers. Your login stays shared with the
+agent you already had: a profile separates configuration, nothing else.
 
 Usage:
   ap <command> <agent>:<profile>[:<variant>] [args...]
@@ -37,7 +36,6 @@ Commands:
   resume    Resume a past session in its directory
   create    Create a profile and a wrapper you can type as a command
   variant   Name a set of launch arguments over an existing profile
-            (over one that exists it asks first; --yes answers)
   which     Print the profile directory
   env       Print the environment override, or run a command under it
   run       Run the agent with that profile
@@ -46,79 +44,256 @@ Commands:
   link      Write the wrapper back
   version   Print version, commit and build date
 
+Run "ap <command> --help" for that command's flags, rules and examples.
+
 There is no active profile: every command names one explicitly.
 
-"ap list" prints a tree: an agent per line, its profiles under it, and each
-profile's variants under that, with a variant's arguments after its name so a
-name that disables every permission prompt is never invisible. Every reference
-is qualified, so any line is pasteable after "ap run". "ap list --raw" is the
-same listing for scripts: one tab-separated line per reference, the reference
-in field 1 and one argument per field after it, no tree and no padding.
+Examples:
+  ap create claude:plan
+  ap run claude:plan --effort xhigh
+  ap sessions
+  ap resume 05d8188f
+`
 
-"ap sessions" lists recent sessions across all agents and profiles, newest first,
-showing the session ID, timestamp, profile reference, working directory and title.
-Flags: --max N (default 10) and --here (filter to current directory).
+// commandHelp is what "ap <command> --help" prints. One entry per command, so
+// asking about one thing does not answer with the whole manual — which is what
+// a single shared usage string did, and it made the help unreadable.
+//
+// A command with no entry falls back to usage, which is correct for "ap help"
+// itself and for an unknown name.
+var commandHelp = map[string]string{
+	"list": `ap list - list profiles and variants
 
-"ap resume <id>" resumes a session by ID or prefix, automatically entering its
-working directory first. Running "ap resume" without an ID on an interactive
-terminal presents a numbered list to choose from. Session IDs are stable handles;
-numbering in "ap sessions" is for display only.
+Usage:
+  ap list [<agent>] [--raw]
 
-"ap create" takes --from <profile> to clone an existing profile,
---only-settings <key> (repeatable) to narrow that clone to a few keys of the
-agent's settings file instead of everything --from would normally carry, and
---copy-instructions to seed it with your global instructions file. --from
-copies configuration only, never sessions or credentials, and "default" names
-the agent you already had, outside any profile. It has nothing to pass
-through, so every flag works on either side of the reference, and after it
-reads better because the agent is already stated: "ap create claude:review
---from plan" clones claude:plan.
+Prints a tree: an agent per line, its profiles under it, and each profile's
+variants under that, with a variant's arguments after its name so a name that
+disables every permission prompt is never invisible.
 
-"ap run" parses no flags of its own. Everything after the reference goes to the
-agent verbatim, which lets you write "ap run claude:plan --effort xhigh"
-without ap trying to interpret --effort. "ap env" with a command behaves the
-same way, for the same reason.
+Every reference is qualified, so any line is pasteable after "ap run".
 
-A variant is a named set of launch arguments over a profile, so "ap variant
-claude:review:opus -- --effort xhigh" then "ap run claude:review:opus" runs
-those arguments first and yours after. It has no directory of its own: "ap
-which" and "ap env" answer for the parent, and "ap env" never passes a
-variant's arguments to the command it runs.
+Flags:
+  --raw   one tab-separated line per reference, for scripts: the reference in
+          field 1 and one argument per field after it, no tree and no padding
 
-A variant may leave "{}" where your arguments should go, spelled the way
-"xargs -I{}" spells it. They are joined with a space and substituted there,
-reaching the agent as one argument rather than appended as a new one, which is
-how a variant becomes a prompt prefix: "ap variant claude:plan:exec --
-'/superpowers:executing-plans {}'" then "ap run claude:plan:exec plan.md". A
-variant that does not mention "{}" composes exactly as before.
+Examples:
+  ap list
+  ap list claude
+  ap list --raw
+`,
 
-"ap delete" asks before it removes a profile, and --yes is how a script
-answers. Deleting a variant goes without asking, since the profile it varies
-is untouched — but writing OVER one asks, and shows both argument lists while
-it does, because a variant's arguments are the part you wrote once and have
-not read since. --yes answers that too. "ap link" writes a wrapper back;
-create already does this, so link is for profiles made before it did, or after
-an unlink.
+	"sessions": `ap sessions - list recent sessions across agents and profiles
+
+Usage:
+  ap sessions [<agent>[:<profile>]] [--max N] [--here]
+
+Lists the most recent sessions of every agent and every profile, newest first:
+session ID, time, the reference it belongs to, its working directory and its
+title. "default" is the agent you already had, outside any profile.
+
+Flags:
+  --max N   how many to list (default 10)
+  --here    only sessions whose working directory is the current one
+
+The ID is the handle — "ap resume <id>" takes it, and a unique prefix is
+enough. Nothing on screen is numbered for later use: a position would move as
+soon as another session is written.
+
+A directory shown as (missing) no longer exists, so that session cannot be
+resumed until it is back.
+
+opencode groups sessions by git project, so its rows cover the current project
+only; the other three agents are listed in full.
+
+Examples:
+  ap sessions
+  ap sessions --max 25
+  ap sessions --here
+  ap sessions claude
+  ap sessions claude:plan
+`,
+
+	"resume": `ap resume - resume a past session in its own directory
+
+Usage:
+  ap resume [<id>] [args...]
+
+Enters the session's working directory, then starts the agent there. That move
+is the whole point: claude cannot find a session from anywhere else, pi refuses
+and asks whether to fork, and codex resumes happily against whatever tree it
+was started in — which is the quietest way to be wrong.
+
+The ID comes from "ap sessions"; a unique prefix is enough. Everything after it
+goes to the agent verbatim.
+
+Without an ID, on an interactive terminal, it lists the ten most recent and
+asks which one. Those numbers exist only for that question and are never
+accepted on the command line.
+
+Examples:
+  ap resume
+  ap resume 05d8188f
+  ap resume 05d8188f --effort xhigh
+`,
+
+	"create": `ap create - create a profile and a wrapper you can type as a command
+
+Usage:
+  ap create <agent>:<profile> [--from <profile>] [--only-settings <key>]...
+            [--copy-instructions]
+
+Flags:
+  --from <profile>        clone an existing profile of the same agent.
+                          "default" names the agent you already had, outside
+                          any profile. Copies configuration only — never
+                          sessions, never credentials.
+  --only-settings <key>   narrow that clone to a few keys of the agent's
+                          settings file instead of everything --from carries.
+                          Repeatable; requires --from.
+  --copy-instructions     seed the profile with your global instructions file.
+
+create has nothing to pass through, so every flag works on either side of the
+reference — and after it reads better, because the agent is already stated.
 
 Examples:
   ap create claude:plan
   ap create claude:review --from plan
-  ap create claude:review --from default    # from the agent you already had
+  ap create claude:review --from default
   ap create claude:work --copy-instructions
   ap create claude:new --from default \
       --only-settings statusLine --only-settings theme
+`,
+
+	"variant": `ap variant - name a set of launch arguments over a profile
+
+Usage:
+  ap variant <agent>:<profile>:<variant> [--yes] -- <args...>
+
+"ap run" on a variant runs those arguments first and yours after.
+
+A variant has no directory of its own: "ap which" and "ap env" answer for the
+parent profile, and "ap env" never passes a variant's arguments to the command
+it runs.
+
+A variant may leave "{}" where your arguments should go, spelled the way
+"xargs -I{}" spells it. They are joined with a space and substituted there,
+reaching the agent as ONE argument rather than appended as a new one — which is
+how a variant becomes a prompt prefix. A variant that never mentions "{}"
+composes exactly as before.
+
+Writing over an existing variant asks first, and shows both argument lists
+while it does, because a variant's arguments are the part you wrote once and
+have not read since.
+
+Flags:
+  --yes, -y   answer that question
+
+Examples:
   ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
-  ap run claude:review:opus         # those arguments, then yours
+  ap run claude:review:opus
   ap variant claude:review:on -- '/code-review {}'
-  ap run claude:review:on src/auth.go   # runs "/code-review src/auth.go"
-  ap variant claude:review:on --yes -- '/code-review {} --fix'   # overwrite it
-  ap run claude:plan plugin install caveman@caveman
+  ap run claude:review:on src/auth.go
+  ap variant claude:review:on --yes -- '/code-review {} --fix'
+`,
+
+	"run": `ap run - run the agent with that profile
+
+Usage:
+  ap run <agent>:<profile>[:<variant>] [args...]
+
+run parses no flags of its own. Everything after the reference goes to the
+agent verbatim, which is what lets you write "ap run claude:plan --effort
+xhigh" without ap trying to interpret --effort.
+
+Examples:
   ap run claude:plan
   ap run claude:plan --effort xhigh
+  ap run claude:plan plugin install caveman@caveman
   ap run opencode:review --model anthropic/claude-sonnet-4-5
+`,
+
+	"env": `ap env - print the environment override, or run a command under it
+
+Usage:
+  ap env <agent>:<profile>[:<variant>] [command...]
+
+With no command it prints the variables ap would set, one per line, sorted.
+With a command it runs that command under them.
+
+Like run, it parses no flags of its own once the reference is given, and it
+never passes a variant's arguments to the command it runs.
+
+Examples:
+  ap env claude:plan
   ap env claude:plan npx skills add vercel-labs/agent-skills \
       --skill web-design-guidelines -g -a claude-code
-`
+`,
+
+	"which": `ap which - print the profile directory
+
+Usage:
+  ap which <agent>:<profile>[:<variant>]
+
+A variant has no directory of its own, so it answers for the parent profile.
+
+Examples:
+  ap which claude:plan
+`,
+
+	"delete": `ap delete - delete a profile and its wrapper
+
+Usage:
+  ap delete <agent>:<profile>[:<variant>] [--yes]
+
+Asks before removing a profile. Deleting a variant goes without asking, since
+the profile it varies is untouched.
+
+Never follows a symlink out of the profile: the shared credential, the session
+transcripts and your real config directory are all reachable from inside one,
+and none of them is ap's to remove.
+
+Flags:
+  --yes, -y   answer the question, for scripts
+
+Examples:
+  ap delete claude:plan
+  ap delete claude:review:opus
+  ap delete claude:plan --yes
+`,
+
+	"link": `ap link - write the profile's wrapper back
+
+Usage:
+  ap link <agent>:<profile>
+
+create already writes the wrapper, so link is for profiles made before it did,
+or after an unlink.
+
+Examples:
+  ap link claude:plan
+`,
+
+	"unlink": `ap unlink - remove the wrapper, keep the profile
+
+Usage:
+  ap unlink <agent>:<profile>
+
+The profile, its settings and its sessions stay exactly where they are; only
+the command you could type disappears.
+
+Examples:
+  ap unlink claude:plan
+`,
+}
+
+// helpFor is the text -h should print for a command.
+func helpFor(name string) string {
+	if h, ok := commandHelp[name]; ok {
+		return h
+	}
+	return usage
+}
 
 func main() {
 	if err := dispatch(os.Args[1:]); err != nil {
@@ -130,6 +305,14 @@ func main() {
 func dispatch(args []string) error {
 	if len(args) == 0 {
 		fmt.Print(usage)
+		return nil
+	}
+	// Asked for its own help, and only as the FIRST argument after the command:
+	// `ap run claude:plan --help` is the agent's help, not ap's, and passthrough
+	// is the whole contract of run and env. This also reaches the commands that
+	// parse no flags at all, which a FlagSet never would.
+	if rest := args[1:]; len(rest) > 0 && (rest[0] == "-h" || rest[0] == "--help") {
+		fmt.Print(helpFor(args[0]))
 		return nil
 	}
 	switch args[0] {
@@ -178,7 +361,7 @@ func flagSet(name string) *flag.FlagSet {
 func parse(fs *flag.FlagSet, args []string) (stop bool, err error) {
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Print(usage)
+			fmt.Print(helpFor(fs.Name()))
 			return true, nil
 		}
 		return true, err
@@ -427,8 +610,13 @@ func renderSessions(sessions []session.Session, hasOpencode bool) string {
 			sb.WriteString(r.title)
 		}
 	}
+	// A listing whose whole purpose is to be acted on has to say how. Built from
+	// the first row rather than a placeholder, so it is a line you can paste.
+	if len(rows) > 0 {
+		sb.WriteString("\n\nresume with: ap resume " + rows[0].id)
+	}
 	if hasOpencode {
-		sb.WriteString("\n\n" + opencodeCaveat)
+		sb.WriteString("\n" + opencodeCaveat)
 	}
 	sb.WriteString("\n")
 	return sb.String()

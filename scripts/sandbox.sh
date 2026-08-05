@@ -227,6 +227,17 @@ if quiet "$AP" create claude:sbxrun; then
         pass run "argv verbatim, CLAUDE_CONFIG_DIR inside the profile"
     fi
 
+    # --help AFTER the reference belongs to the agent. ap grew per-command help,
+    # and the obvious way to wire it — intercept -h anywhere — would swallow this
+    # and break the one contract run exists for. Asserted on arg:, not argv:,
+    # because "$*" cannot tell one argument from two.
+    out=$("$AP" run claude:sbxrun --help 2>&1 || true)
+    if ! printf '%s' "$out" | grep -qx 'arg:\[--help\]'; then
+        bad help "ap answered --help itself instead of passing it to the agent: $out"
+    else
+        pass help "--help after a reference still reaches the agent"
+    fi
+
     # A variant's stored arguments run first and the user's after, so the later
     # one wins wherever the agent takes the last flag.
     if quiet "$AP" variant claude:sbxrun:sbxv -- --model haiku -p; then

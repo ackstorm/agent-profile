@@ -2171,3 +2171,42 @@ func TestFmtTimeIgnoresTheIncomingZone(t *testing.T) {
 		t.Errorf("fmtTime depends on the zone it is handed: %q vs %q", got, want)
 	}
 }
+
+// Asking one command for help must answer about that command, not print the
+// whole manual. A single shared usage string did the latter and made the help
+// unusable.
+func TestEachCommandHasItsOwnHelp(t *testing.T) {
+	for _, name := range []string{"list", "sessions", "resume", "create", "variant", "run", "env", "which", "delete", "link", "unlink"} {
+		h := helpFor(name)
+		if h == usage {
+			t.Errorf("ap %s --help prints the global usage instead of its own", name)
+			continue
+		}
+		if !strings.HasPrefix(h, "ap "+name+" - ") {
+			t.Errorf("ap %s --help does not open by naming the command: %.40q", name, h)
+		}
+		if !strings.Contains(h, "Usage:") || !strings.Contains(h, "Examples:") {
+			t.Errorf("ap %s --help has no Usage or Examples section", name)
+		}
+	}
+}
+
+// An unknown command still gets the manual, which is the only thing that can
+// help someone who mistyped.
+func TestHelpForAnUnknownCommandFallsBackToUsage(t *testing.T) {
+	if helpFor("nonesuch") != usage {
+		t.Error("an unknown command does not fall back to the global usage")
+	}
+}
+
+// The listing says how to act on itself, with a real id rather than a
+// placeholder, so the line can be pasted.
+func TestSessionsOutputShowsHowToResume(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "plan", ID: "05d8188f-1111-2222-3333-444444444444",
+		Dir: t.TempDir(), Updated: time.Now(),
+	}}, false)
+	if !strings.Contains(out, "ap resume 05d8188f") {
+		t.Errorf("no pasteable resume hint:\n%s", out)
+	}
+}
