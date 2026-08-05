@@ -58,6 +58,8 @@ exactly that reason — see "`default`" below.
 | Command | What it does |
 |---|---|
 | `ap list [--raw] [agent]` | your profiles and their variants, as a tree — always includes `default`, and every supported agent. `--raw` prints the same listing tab-separated, for scripts |
+| `ap sessions [--max N] [--here] [agent[:profile]]` | list recent sessions across all agents and profiles, ordered newest first |
+| `ap resume [<id>] [args...]` | resume a session by full ID or prefix, changing to its directory first; when no ID is given on a terminal, prompts with a numbered list |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant [--yes] <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it. May leave `{}` where your run-time arguments should be substituted, which is how a variant becomes a prompt prefix. Over a variant that exists it asks first, showing both argument lists; `--yes` answers |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |

@@ -370,6 +370,29 @@ symptom: reading one wrong produced two contradictory diagnoses in a row here.
 `--from` once skipped it and became a path traversal that copied the user's real
 `~/.claude` into a profile. `profile.Dir` joins and cleans, so `..` escapes.
 
+## Session storage and `ap resume`
+
+- **`ap resume` chdirs before exec, for all four agents.** Measured: `claude` hard-scopes
+  session ids to directory (`No conversation found` from elsewhere); `codex` is not
+  scoped and silently resumes against the wrong tree; `pi` prompts to fork into current
+  dir; `opencode` groups by git project. Chdiring first is required for all four.
+- **Never decode claude's directory names.** Both `/` and `.` encode to `-`, making
+  paths ambiguous (e.g. `-home-jcm--claude` vs `-home-jcm-Projects-agent-profile`).
+  Read `cwd` from inside the transcript file instead.
+- **Bounded scan for session metadata.** `readClaude` bounds line scan to 50 lines /
+  64 KB because transcripts can be huge (e.g. 24.9 MB with no `ai-title` at all).
+- **No positional index survives an invocation.** `ap sessions` prints session ids and
+  `ap resume <id>` takes an id prefix or full id. Numbering in `ap sessions` is for
+  display only. The interactive picker in `ap resume` (when run without arguments on a
+  terminal) is the exception because listing and selection occur in the same invocation.
+- **opencode's listing is project-scoped and costs a subprocess.** opencode sessions live
+  in sqlite (`opencode.db`) and are read by shelling out to `opencode session list --format json`
+  under the profile environment. `ap sessions` output includes a caveat note that
+  opencode listings are project-scoped.
+- **`ap sessions` and `ap resume` parse their own flags; `run` still does not.**
+  `ap resume <id> --model opus` passes extra flags through to the agent, maintaining
+  passthrough discipline.
+
 ## Deliberately absent — do not add
 
 - **`ap use` / `ap shell` / an active profile.** A "current profile" that a bare

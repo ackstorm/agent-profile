@@ -55,6 +55,15 @@ is qualified, so any line is pasteable after "ap run". "ap list --raw" is the
 same listing for scripts: one tab-separated line per reference, the reference
 in field 1 and one argument per field after it, no tree and no padding.
 
+"ap sessions" lists recent sessions across all agents and profiles, newest first,
+showing the session ID, timestamp, profile reference, working directory and title.
+Flags: --max N (default 10) and --here (filter to current directory).
+
+"ap resume <id>" resumes a session by ID or prefix, automatically entering its
+working directory first. Running "ap resume" without an ID on an interactive
+terminal presents a numbered list to choose from. Session IDs are stable handles;
+numbering in "ap sessions" is for display only.
+
 "ap create" takes --from <profile> to clone an existing profile,
 --only-settings <key> (repeatable) to narrow that clone to a few keys of the
 agent's settings file instead of everything --from would normally carry, and
