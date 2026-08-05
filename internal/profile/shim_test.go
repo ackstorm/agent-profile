@@ -24,18 +24,30 @@ func fakeConfigBase(t *testing.T, entries ...string) string {
 	return base
 }
 
-// THE canary for the shim. It links to every entry of the user's real config
-// directory, which makes a Delete that followed those links the most destructive
-// thing this program could do — worse than the session-history case, because
-// ~/.config holds the configuration of every application on the machine.
+// THE canary for the shim. It links to every entry of the user's real config and
+// data directories, which makes a Delete that followed those links the most
+// destructive thing this program could do — worse than the session-history case,
+// because ~/.config and ~/.local/share hold the configuration and state of every
+// application on the machine.
 //
 // os.RemoveAll lstats each entry and unlinks symlinks rather than descending.
 // This test is what keeps that true. Do not delete or weaken it.
 func TestDeleteDoesNotFollowTheConfigShim(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	base := fakeConfigBase(t, "git", "gh", "nvim")
-	canary := filepath.Join(base, "git", "config")
-	if err := os.WriteFile(canary, []byte("[user]\n\tname = do not lose me\n"), 0o600); err != nil {
+	dataBase := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataBase)
+	for _, p := range []string{"opencode", "fonts", "applications"} {
+		if err := os.MkdirAll(filepath.Join(dataBase, p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dataCanary := filepath.Join(dataBase, "fonts", "font.ttf")
+	if err := os.WriteFile(dataCanary, []byte("fontdata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgBase := fakeConfigBase(t, "git", "gh", "nvim")
+	cfgCanary := filepath.Join(cfgBase, "git", "config")
+	if err := os.WriteFile(cfgCanary, []byte("[user]\n\tname = do not lose me\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -47,24 +59,43 @@ func TestDeleteDoesNotFollowTheConfigShim(t *testing.T) {
 	if _, err := Shim(a, dir); err != nil {
 		t.Fatal(err)
 	}
-	shimDir := filepath.Join(dir, a.Shims[0].Rel)
-	// Prove the link is really there, or the test proves nothing.
-	if _, err := os.Stat(filepath.Join(shimDir, "git", "config")); err != nil {
-		t.Fatalf("shim does not reach the real config, so this test is vacuous: %v", err)
+	for _, s := range a.Shims {
+		shimDir := filepath.Join(dir, s.Rel)
+		passthrough := "git"
+		target := cfgCanary
+		if s.Env == "XDG_DATA_HOME" {
+			passthrough = "fonts"
+			target = dataCanary
+		}
+		if _, err := os.Stat(filepath.Join(shimDir, passthrough)); err != nil {
+			t.Fatalf("shim %s does not reach the real target, so this test is vacuous: %v", s.Rel, err)
+		}
+		_ = target
 	}
 
 	if err := Delete(a, "canary"); err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range []string{"git", "gh", "nvim"} {
-		if _, err := os.Stat(filepath.Join(base, e)); err != nil {
+		if _, err := os.Stat(filepath.Join(cfgBase, e)); err != nil {
 			t.Errorf("Delete destroyed the real config entry %s: %v", e, err)
 		}
 	}
-	if b, err := os.ReadFile(canary); err != nil {
+	if b, err := os.ReadFile(cfgCanary); err != nil {
 		t.Fatalf("Delete followed the shim into the real config: %v", err)
 	} else if len(b) == 0 {
-		t.Fatal("canary emptied")
+		t.Fatal("cfg canary emptied")
+	}
+
+	for _, e := range []string{"opencode", "fonts", "applications"} {
+		if _, err := os.Stat(filepath.Join(dataBase, e)); err != nil {
+			t.Errorf("Delete destroyed the real data entry %s: %v", e, err)
+		}
+	}
+	if b, err := os.ReadFile(dataCanary); err != nil {
+		t.Fatalf("Delete followed the shim into the real data dir: %v", err)
+	} else if len(b) == 0 {
+		t.Fatal("data canary emptied")
 	}
 }
 

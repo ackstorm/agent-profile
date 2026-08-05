@@ -322,6 +322,20 @@ if command -v opencode >/dev/null 2>&1; then
   else
     skip opencode
   fi
+  # A session created inside the profile must not land in the shared db. Seed the
+  # shared one so "profile has its own" can actually fail.
+  mkdir -p "$HOME/.local/share/opencode"
+  : > "$HOME/.local/share/opencode/opencode.db"
+  before=$(sha256sum "$HOME/.local/share/opencode/opencode.db" | cut -d' ' -f1)
+  timeout 180 "$AP" run opencode:apsmoke run "Reply with exactly: SMOKEOK" >/dev/null 2>&1 || true
+  after=$(sha256sum "$HOME/.local/share/opencode/opencode.db" | cut -d' ' -f1)
+  if [ ! -f "$d/opencode.db" ]; then
+    bad opencode "the profile has no opencode.db: XDG_DATA_HOME is not reaching it"
+  elif [ "$before" != "$after" ]; then
+    bad opencode "the shared opencode.db changed: the profile wrote through the shim"
+  else
+    pass opencode "sessions stay inside the profile"
+  fi
 else
   skip opencode
 fi
@@ -679,9 +693,15 @@ for ag in $(agents); do
   while IFS='=' read -r k v; do
     [ -n "$k" ] || continue
     case "$k" in
-      HOME | XDG_DATA_HOME | XDG_STATE_HOME | XDG_CACHE_HOME)
+      HOME | XDG_STATE_HOME | XDG_CACHE_HOME)
         bad "$ag" "ap env redirects $k, which must stay shared"
         leak=1
+        ;;
+      XDG_DATA_HOME)
+        if [ "$ag" != "opencode" ]; then
+          bad "$ag" "ap env redirects XDG_DATA_HOME, which must stay shared for $ag"
+          leak=1
+        fi
         ;;
     esac
     case "$v" in

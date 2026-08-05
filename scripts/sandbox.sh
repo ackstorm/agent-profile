@@ -333,6 +333,31 @@ else
     bad shim "could not create opencode:sbxshim"
 fi
 
+# The data shim, checked the same way as the config one. Sessions are the reason
+# it exists: without it opencode writes opencode.db into the shared data dir and
+# every profile sees every other profile's history.
+mkdir -p "$HOME/.local/share"/{opencode,fonts,applications}
+if quiet "$AP" create opencode:sbxdata; then
+    d=$("$AP" which opencode:sbxdata)
+    xdgdata=$("$AP" env opencode:sbxdata | sed -n 's/^XDG_DATA_HOME=//p')
+    if [ -z "$xdgdata" ]; then
+        bad datashim "opencode sets no XDG_DATA_HOME"
+    elif [ "$xdgdata" != "$d/xdg-data" ]; then
+        bad datashim "XDG_DATA_HOME=$xdgdata, want $d/xdg-data"
+    elif [ "$(readlink -f "$xdgdata/opencode")" != "$(readlink -f "$d")" ]; then
+        bad datashim "xdg-data/opencode does not resolve to the profile"
+    elif [ ! -L "$xdgdata/fonts" ]; then
+        bad datashim "no passthrough for fonts: every program reading XDG_DATA_HOME would be redirected into the profile"
+    elif [ -d "$xdgdata/opencode" ] && [ -L "$xdgdata/applications" ]; then
+        pass datashim "XDG_DATA_HOME shimmed with passthrough"
+    else
+        bad datashim "unexpected shim shape"
+    fi
+    quiet "$AP" delete --yes opencode:sbxdata
+else
+    bad datashim "could not create opencode:sbxdata"
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     echo "all checks passed — this is ap's own side only; make smoke is still the registry's"
