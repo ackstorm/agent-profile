@@ -1,10 +1,12 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // codex writes one session_meta line first, carrying the id, the cwd and the
@@ -175,4 +177,66 @@ func TestParseOpencodeSessions(t *testing.T) {
 	if y := got[0].Updated.Year(); y < 2020 || y > 2100 {
 		t.Errorf("Updated = %v, want a plausible year (ms, not s)", got[0].Updated)
 	}
+}
+
+func mixedSessions() []Session {
+	t1 := time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 8, 5, 11, 0, 0, 0, time.UTC)
+	return []Session{
+		{ID: "s1", Updated: t1},
+		{ID: "s2", Updated: t2},
+		{ID: "s3", Updated: t3},
+	}
+}
+
+// Sessions come back newest first, across agents and profiles, capped at max.
+func TestScanOrdersNewestFirstAndCaps(t *testing.T) {
+	got := sortAndCap(mixedSessions(), 2)
+	if len(got) != 2 {
+		t.Fatalf("got %d, want 2", len(got))
+	}
+	if !got[0].Updated.After(got[1].Updated) {
+		t.Errorf("not ordered newest first: %v then %v", got[0].Updated, got[1].Updated)
+	}
+	if got[0].ID != "s2" || got[1].ID != "s3" {
+		t.Errorf("got ids %s, %s; want s2, s3", got[0].ID, got[1].ID)
+	}
+}
+
+func manyClaudeTranscripts(t *testing.T, count int) (string, []string) {
+	dir := t.TempDir()
+	files := make([]string, 0, count)
+	now := time.Now()
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("%08d-0000-0000-0000-000000000000", i)
+		f := filepath.Join(dir, id+".jsonl")
+		body := fmt.Sprintf(`{"type":"user","cwd":"/project/%d"}`+"\n", i)
+		if err := os.WriteFile(f, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Set mod time so ordering is deterministic
+		mt := now.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(f, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	return dir, files
+}
+
+// Only the files that will be printed are opened. There are 351 transcripts and
+// 427 MB under ~/.claude/projects on the reference machine; opening all of them to
+// print ten is the difference between an instant command and a slow one.
+func TestScanOpensOnlyWhatItPrints(t *testing.T) {
+	dir, files := manyClaudeTranscripts(t, 50)
+	opened := 0
+	countingOpen := func(p string) (Session, error) { opened++; return readClaude(p) }
+	if _, err := scanClaude(dir, "claude", "execute", 5, countingOpen); err != nil {
+		t.Fatal(err)
+	}
+	if opened > 5 {
+		t.Errorf("opened %d transcripts to print 5: sort by mtime before reading", opened)
+	}
+	_ = files
 }

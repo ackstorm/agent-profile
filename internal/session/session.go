@@ -14,9 +14,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/internal/run"
 )
 
 // Session is one resumable conversation, in the only terms every agent shares.
@@ -208,4 +213,158 @@ func opencodeSessions(bin string, env []string, max int) ([]Session, error) {
 		return nil, fmt.Errorf("opencode session list: %w", err)
 	}
 	return parseOpencode(out)
+}
+
+type readerFunc func(path string) (Session, error)
+
+type candidate struct {
+	path  string
+	mtime time.Time
+}
+
+func scanFileStore(storeDir, agentName, profileName string, max int, read readerFunc, warn func(error)) ([]Session, error) {
+	var candidates []candidate
+	err := filepath.WalkDir(storeDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".jsonl") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		candidates = append(candidates, candidate{path: path, mtime: info.ModTime()})
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	slices.SortFunc(candidates, func(a, b candidate) int {
+		if a.mtime.After(b.mtime) {
+			return -1
+		}
+		if a.mtime.Before(b.mtime) {
+			return 1
+		}
+		return 0
+	})
+
+	limit := len(candidates)
+	if max > 0 && limit > max {
+		limit = max
+	}
+
+	var out []Session
+	for i := 0; i < limit; i++ {
+		s, err := read(candidates[i].path)
+		if err != nil {
+			if warn != nil {
+				warn(err)
+			}
+			continue
+		}
+		s.Agent = agentName
+		s.Profile = profileName
+		if s.Updated.IsZero() {
+			s.Updated = candidates[i].mtime
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func scanClaude(storeDir, agentName, profileName string, max int, read readerFunc) ([]Session, error) {
+	return scanFileStore(storeDir, agentName, profileName, max, read, nil)
+}
+
+func sortAndCap(sessions []Session, max int) []Session {
+	slices.SortFunc(sessions, func(a, b Session) int {
+		if a.Updated.After(b.Updated) {
+			return -1
+		}
+		if a.Updated.Before(b.Updated) {
+			return 1
+		}
+		return 0
+	})
+	if max > 0 && len(sessions) > max {
+		return sessions[:max]
+	}
+	return sessions
+}
+
+// Scan returns the most recent sessions across every agent and profile,
+// newest first.
+//
+// Per-store it stats first and reads only the newest max files: the transcripts
+// are large and there are hundreds of them.
+//
+// Errors from one profile never fail the whole scan — a profile with an
+// unreadable store is reported through warn and the rest still list. A listing
+// that aborts because one directory is odd is a listing nobody trusts.
+func Scan(max int, warn func(error)) []Session {
+	var all []Session
+	for _, name := range agent.Names() {
+		a, ok := agent.Lookup(name)
+		if !ok || a.Sessions == nil {
+			continue
+		}
+		profs, err := profile.List(a)
+		if err != nil {
+			if warn != nil {
+				warn(err)
+			}
+			continue
+		}
+		for _, p := range profs {
+			pDir := profile.Dir(a, p)
+			if a.Sessions.Layout == agent.LayoutExec {
+				bin, err := exec.LookPath(a.Bin)
+				if err != nil {
+					continue
+				}
+				env := run.Env(a, pDir, os.Environ())
+				sessions, err := opencodeSessions(bin, env, max)
+				if err != nil {
+					if warn != nil {
+						warn(err)
+					}
+					continue
+				}
+				for i := range sessions {
+					sessions[i].Agent = a.Name
+					sessions[i].Profile = p
+				}
+				all = append(all, sessions...)
+			} else {
+				storeDir := filepath.Join(pDir, a.Sessions.Rel)
+				var reader readerFunc
+				switch a.Sessions.Layout {
+				case agent.LayoutClaudeProjects:
+					reader = readClaude
+				case agent.LayoutCodexRollouts:
+					reader = readCodex
+				case agent.LayoutPiSessions:
+					reader = readPi
+				default:
+					continue
+				}
+				sessions, err := scanFileStore(storeDir, a.Name, p, max, reader, warn)
+				if err != nil {
+					if warn != nil {
+						warn(err)
+					}
+					continue
+				}
+				all = append(all, sessions...)
+			}
+		}
+	}
+	return sortAndCap(all, max)
 }
