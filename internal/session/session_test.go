@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +66,85 @@ func TestReadPiSession(t *testing.T) {
 	}
 	if got.ID != "019f8e5f-4d92-7906-a769-bb2437e3dfe9" || got.Dir != "/home/jcm/.pi/agent" {
 		t.Errorf("got %+v", got)
+	}
+}
+
+// claude's first lines are bookkeeping; cwd appears a few lines in and the
+// ai-title around line 20. The id is the filename.
+func TestReadClaudeSession(t *testing.T) {
+	dir := t.TempDir()
+	id := "db5b0ec4-e90d-4f0e-8ebd-28bfe677f5a2"
+	var b strings.Builder
+	b.WriteString(`{"type":"last-prompt","sessionId":"` + id + `"}` + "\n")
+	b.WriteString(`{"type":"mode","mode":"normal"}` + "\n")
+	b.WriteString(`{"type":"user","cwd":"/home/jcm/Projects/agent-profile"}` + "\n")
+	b.WriteString(`{"type":"ai-title","aiTitle":"Designing a command"}` + "\n")
+	f := filepath.Join(dir, id+".jsonl")
+	if err := os.WriteFile(f, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readClaude(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != id {
+		t.Errorf("ID = %q, want %q", got.ID, id)
+	}
+	if got.Dir != "/home/jcm/Projects/agent-profile" {
+		t.Errorf("Dir = %q", got.Dir)
+	}
+	if got.Title != "Designing a command" {
+		t.Errorf("Title = %q", got.Title)
+	}
+}
+
+// A transcript with no ai-title is normal — one measured file was 24.9 MB and had
+// none. The reader must stop early and still return the cwd, rather than reading
+// megabytes to find something that is not there.
+func TestReadClaudeStopsAtTheBound(t *testing.T) {
+	dir := t.TempDir()
+	id := "aaaaaaaa-0000-0000-0000-000000000000"
+	var b strings.Builder
+	b.WriteString(`{"type":"user","cwd":"/tmp/here"}` + "\n")
+	for i := 0; i < maxMetaLines*4; i++ {
+		b.WriteString(`{"type":"assistant","text":"` + strings.Repeat("x", 2000) + `"}` + "\n")
+	}
+	// Past the bound on purpose: if this is found, the reader did not stop.
+	b.WriteString(`{"type":"ai-title","aiTitle":"TOO LATE"}` + "\n")
+	f := filepath.Join(dir, id+".jsonl")
+	if err := os.WriteFile(f, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readClaude(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Dir != "/tmp/here" {
+		t.Errorf("Dir = %q, want /tmp/here", got.Dir)
+	}
+	if got.Title == "TOO LATE" {
+		t.Error("reader went past the bound: a 25 MB transcript would be read whole")
+	}
+}
+
+// The directory name is NOT the cwd. `/` and `.` both encode to `-`, so
+// -home-jcm--claude is /home/jcm/.claude and -home-jcm-Projects-agent-profile is
+// indistinguishable from /home/jcm/Projects/agent/profile. A reader that decoded
+// it would chdir somewhere that does not exist, or worse, somewhere that does.
+func TestReadClaudeIgnoresTheDirectoryName(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "-home-jcm-Projects-agent-profile")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(dir, "bbbbbbbb-0000-0000-0000-000000000000.jsonl")
+	if err := os.WriteFile(f, []byte(`{"type":"user","cwd":"/real/place"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readClaude(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Dir != "/real/place" {
+		t.Errorf("Dir = %q, want the cwd from inside the file", got.Dir)
 	}
 }

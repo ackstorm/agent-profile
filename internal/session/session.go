@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -99,5 +101,60 @@ func readPi(path string) (Session, error) {
 	}
 	s := Session{ID: meta.ID, Dir: meta.Cwd, Path: path}
 	s.Updated, _ = time.Parse(time.RFC3339, meta.Timestamp)
+	return s, nil
+}
+
+// readClaude scans the head of a transcript for the cwd and the title.
+//
+// The id is the filename: claude names each transcript <uuid>.jsonl. The cwd is
+// NOT the directory name — see TestReadClaudeIgnoresTheDirectoryName.
+//
+// Bounded on purpose. Measured, the cwd lands around line 3 and the ai-title
+// around line 20, but a transcript need not have a title at all and the largest
+// on the reference machine is 24.9 MB.
+func readClaude(path string) (Session, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Session{}, err
+	}
+	defer func() { _ = f.Close() }()
+
+	s := Session{
+		ID:   strings.TrimSuffix(filepath.Base(path), ".jsonl"),
+		Path: path,
+	}
+	if fi, err := f.Stat(); err == nil {
+		s.Updated = fi.ModTime()
+	}
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64<<10), maxMetaBytes)
+	read := 0
+	for i := 0; i < maxMetaLines && sc.Scan(); i++ {
+		read += len(sc.Bytes())
+		if read > maxMetaBytes {
+			break
+		}
+		var e struct {
+			Type    string `json:"type"`
+			Cwd     string `json:"cwd"`
+			AiTitle string `json:"aiTitle"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			continue // a long or malformed line is not a reason to drop the session
+		}
+		if s.Dir == "" && e.Cwd != "" {
+			s.Dir = e.Cwd
+		}
+		if s.Title == "" && e.AiTitle != "" {
+			s.Title = e.AiTitle
+		}
+		if s.Dir != "" && s.Title != "" {
+			break
+		}
+	}
+	if s.Dir == "" {
+		return Session{}, fmt.Errorf("%s: no cwd in the first %d lines", path, maxMetaLines)
+	}
 	return s, nil
 }
