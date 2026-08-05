@@ -12,28 +12,30 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
+	"github.com/ackstorm/agent-profile/internal/session"
 )
 
 const usage = `ap - per-agent profile launcher
 
 Run claude, codex, opencode or pi under a named profile, so each one has its
-own settings, skills, agents and MCP servers. Your login and your session
-history stay shared with the agent you already had: a profile separates
-configuration, nothing else.
+own settings, skills, agents and MCP servers. Your login stays shared with the
+agent you already had: a profile separates configuration, nothing else.
 
 Usage:
   ap <command> <agent>:<profile>[:<variant>] [args...]
 
 Commands:
   list      List profiles and variants, or just one agent's
+  sessions  List recent sessions across agents and profiles
+  resume    Resume a past session in its directory
   create    Create a profile and a wrapper you can type as a command
   variant   Name a set of launch arguments over an existing profile
-            (over one that exists it asks first; --yes answers)
   which     Print the profile directory
   env       Print the environment override, or run a command under it
   run       Run the agent with that profile
@@ -42,70 +44,266 @@ Commands:
   link      Write the wrapper back
   version   Print version, commit and build date
 
+Run "ap <command> --help" for that command's flags, rules and examples.
+
 There is no active profile: every command names one explicitly.
 
-"ap list" prints a tree: an agent per line, its profiles under it, and each
-profile's variants under that, with a variant's arguments after its name so a
-name that disables every permission prompt is never invisible. Every reference
-is qualified, so any line is pasteable after "ap run". "ap list --raw" is the
-same listing for scripts: one tab-separated line per reference, the reference
-in field 1 and one argument per field after it, no tree and no padding.
+Examples:
+  ap create claude:plan
+  ap run claude:plan --effort xhigh
+  ap sessions
+  ap resume 05d8188f
+`
 
-"ap create" takes --from <profile> to clone an existing profile,
---only-settings <key> (repeatable) to narrow that clone to a few keys of the
-agent's settings file instead of everything --from would normally carry, and
---copy-instructions to seed it with your global instructions file. --from
-copies configuration only, never sessions or credentials, and "default" names
-the agent you already had, outside any profile. It has nothing to pass
-through, so every flag works on either side of the reference, and after it
-reads better because the agent is already stated: "ap create claude:review
---from plan" clones claude:plan.
+// commandHelp is what "ap <command> --help" prints. One entry per command, so
+// asking about one thing does not answer with the whole manual — which is what
+// a single shared usage string did, and it made the help unreadable.
+//
+// A command with no entry falls back to usage, which is correct for "ap help"
+// itself and for an unknown name.
+var commandHelp = map[string]string{
+	"list": `ap list - list profiles and variants
 
-"ap run" parses no flags of its own. Everything after the reference goes to the
-agent verbatim, which lets you write "ap run claude:plan --effort xhigh"
-without ap trying to interpret --effort. "ap env" with a command behaves the
-same way, for the same reason.
+Usage:
+  ap list [<agent>] [--raw]
 
-A variant is a named set of launch arguments over a profile, so "ap variant
-claude:review:opus -- --effort xhigh" then "ap run claude:review:opus" runs
-those arguments first and yours after. It has no directory of its own: "ap
-which" and "ap env" answer for the parent, and "ap env" never passes a
-variant's arguments to the command it runs.
+Prints a tree: an agent per line, its profiles under it, and each profile's
+variants under that, with a variant's arguments after its name so a name that
+disables every permission prompt is never invisible.
 
-A variant may leave "{}" where your arguments should go, spelled the way
-"xargs -I{}" spells it. They are joined with a space and substituted there,
-reaching the agent as one argument rather than appended as a new one, which is
-how a variant becomes a prompt prefix: "ap variant claude:plan:exec --
-'/superpowers:executing-plans {}'" then "ap run claude:plan:exec plan.md". A
-variant that does not mention "{}" composes exactly as before.
+Every reference is qualified, so any line is pasteable after "ap run".
 
-"ap delete" asks before it removes a profile, and --yes is how a script
-answers. Deleting a variant goes without asking, since the profile it varies
-is untouched — but writing OVER one asks, and shows both argument lists while
-it does, because a variant's arguments are the part you wrote once and have
-not read since. --yes answers that too. "ap link" writes a wrapper back;
-create already does this, so link is for profiles made before it did, or after
-an unlink.
+Flags:
+  --raw   one tab-separated line per reference, for scripts: the reference in
+          field 1 and one argument per field after it, no tree and no padding
+
+Examples:
+  ap list
+  ap list claude
+  ap list --raw
+`,
+
+	"sessions": `ap sessions - list recent sessions across agents and profiles
+
+Usage:
+  ap sessions [<agent>[:<profile>]] [--max N] [--here]
+
+Lists the most recent sessions of every agent and every profile, newest first:
+session ID, time, the reference it belongs to, its working directory and its
+title. "default" is the agent you already had, outside any profile.
+
+Flags:
+  --max N   how many to list (default 10)
+  --here    only sessions whose working directory is the current one
+
+The ID is the handle — "ap resume <id>" takes it, and a unique prefix is
+enough. Nothing on screen is numbered for later use: a position would move as
+soon as another session is written.
+
+A directory shown as (missing) no longer exists, so that session cannot be
+resumed until it is back.
+
+opencode groups sessions by git project, so its rows cover the current project
+only; the other three agents are listed in full.
+
+Examples:
+  ap sessions
+  ap sessions --max 25
+  ap sessions --here
+  ap sessions claude
+  ap sessions claude:plan
+
+  ap sessions                    # then take an ID from the first column
+  ap resume 05d8188f             # and hand it back, from anywhere
+
+See also: ap resume --help
+`,
+
+	"resume": `ap resume - resume a past session in its own directory
+
+Usage:
+  ap resume [<id>] [args...]
+
+Enters the session's working directory, then starts the agent there. That move
+is the whole point: claude cannot find a session from anywhere else, pi refuses
+and asks whether to fork, and codex resumes happily against whatever tree it
+was started in — which is the quietest way to be wrong.
+
+The ID comes from "ap sessions"; a unique prefix is enough. Everything after it
+goes to the agent verbatim.
+
+Without an ID, on an interactive terminal, it lists the ten most recent and
+asks which one. Those numbers exist only for that question and are never
+accepted on the command line.
+
+Examples:
+  ap resume
+  ap resume 05d8188f
+  ap resume 05d8188f --effort xhigh
+
+  ap sessions                    # where the IDs come from
+  ap resume 05d8188f             # first column of that listing
+
+See also: ap sessions --help
+`,
+
+	"create": `ap create - create a profile and a wrapper you can type as a command
+
+Usage:
+  ap create <agent>:<profile> [--from <profile>] [--only-settings <key>]...
+            [--copy-instructions]
+
+Flags:
+  --from <profile>        clone an existing profile of the same agent.
+                          "default" names the agent you already had, outside
+                          any profile. Copies configuration only — never
+                          sessions, never credentials.
+  --only-settings <key>   narrow that clone to a few keys of the agent's
+                          settings file instead of everything --from carries.
+                          Repeatable; requires --from.
+  --copy-instructions     seed the profile with your global instructions file.
+
+create has nothing to pass through, so every flag works on either side of the
+reference — and after it reads better, because the agent is already stated.
 
 Examples:
   ap create claude:plan
   ap create claude:review --from plan
-  ap create claude:review --from default    # from the agent you already had
+  ap create claude:review --from default
   ap create claude:work --copy-instructions
   ap create claude:new --from default \
       --only-settings statusLine --only-settings theme
+`,
+
+	"variant": `ap variant - name a set of launch arguments over a profile
+
+Usage:
+  ap variant <agent>:<profile>:<variant> [--yes] -- <args...>
+
+"ap run" on a variant runs those arguments first and yours after.
+
+A variant has no directory of its own: "ap which" and "ap env" answer for the
+parent profile, and "ap env" never passes a variant's arguments to the command
+it runs.
+
+A variant may leave "{}" where your arguments should go, spelled the way
+"xargs -I{}" spells it. They are joined with a space and substituted there,
+reaching the agent as ONE argument rather than appended as a new one — which is
+how a variant becomes a prompt prefix. A variant that never mentions "{}"
+composes exactly as before.
+
+Writing over an existing variant asks first, and shows both argument lists
+while it does, because a variant's arguments are the part you wrote once and
+have not read since.
+
+Flags:
+  --yes, -y   answer that question
+
+Examples:
   ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
-  ap run claude:review:opus         # those arguments, then yours
+  ap run claude:review:opus
   ap variant claude:review:on -- '/code-review {}'
-  ap run claude:review:on src/auth.go   # runs "/code-review src/auth.go"
-  ap variant claude:review:on --yes -- '/code-review {} --fix'   # overwrite it
-  ap run claude:plan plugin install caveman@caveman
+  ap run claude:review:on src/auth.go
+  ap variant claude:review:on --yes -- '/code-review {} --fix'
+`,
+
+	"run": `ap run - run the agent with that profile
+
+Usage:
+  ap run <agent>:<profile>[:<variant>] [args...]
+
+run parses no flags of its own. Everything after the reference goes to the
+agent verbatim, which is what lets you write "ap run claude:plan --effort
+xhigh" without ap trying to interpret --effort.
+
+Examples:
   ap run claude:plan
   ap run claude:plan --effort xhigh
+  ap run claude:plan plugin install caveman@caveman
   ap run opencode:review --model anthropic/claude-sonnet-4-5
+`,
+
+	"env": `ap env - print the environment override, or run a command under it
+
+Usage:
+  ap env <agent>:<profile>[:<variant>] [command...]
+
+With no command it prints the variables ap would set, one per line, sorted.
+With a command it runs that command under them.
+
+Like run, it parses no flags of its own once the reference is given, and it
+never passes a variant's arguments to the command it runs.
+
+Examples:
+  ap env claude:plan
   ap env claude:plan npx skills add vercel-labs/agent-skills \
       --skill web-design-guidelines -g -a claude-code
-`
+`,
+
+	"which": `ap which - print the profile directory
+
+Usage:
+  ap which <agent>:<profile>[:<variant>]
+
+A variant has no directory of its own, so it answers for the parent profile.
+
+Examples:
+  ap which claude:plan
+`,
+
+	"delete": `ap delete - delete a profile and its wrapper
+
+Usage:
+  ap delete <agent>:<profile>[:<variant>] [--yes]
+
+Asks before removing a profile. Deleting a variant goes without asking, since
+the profile it varies is untouched.
+
+Never follows a symlink out of the profile: the shared credential, the session
+transcripts and your real config directory are all reachable from inside one,
+and none of them is ap's to remove.
+
+Flags:
+  --yes, -y   answer the question, for scripts
+
+Examples:
+  ap delete claude:plan
+  ap delete claude:review:opus
+  ap delete claude:plan --yes
+`,
+
+	"link": `ap link - write the profile's wrapper back
+
+Usage:
+  ap link <agent>:<profile>
+
+create already writes the wrapper, so link is for profiles made before it did,
+or after an unlink.
+
+Examples:
+  ap link claude:plan
+`,
+
+	"unlink": `ap unlink - remove the wrapper, keep the profile
+
+Usage:
+  ap unlink <agent>:<profile>
+
+The profile, its settings and its sessions stay exactly where they are; only
+the command you could type disappears.
+
+Examples:
+  ap unlink claude:plan
+`,
+}
+
+// helpFor is the text -h should print for a command.
+func helpFor(name string) string {
+	if h, ok := commandHelp[name]; ok {
+		return h
+	}
+	return usage
+}
 
 func main() {
 	if err := dispatch(os.Args[1:]); err != nil {
@@ -119,9 +317,21 @@ func dispatch(args []string) error {
 		fmt.Print(usage)
 		return nil
 	}
+	// Asked for its own help, and only as the FIRST argument after the command:
+	// `ap run claude:plan --help` is the agent's help, not ap's, and passthrough
+	// is the whole contract of run and env. This also reaches the commands that
+	// parse no flags at all, which a FlagSet never would.
+	if rest := args[1:]; len(rest) > 0 && (rest[0] == "-h" || rest[0] == "--help") {
+		fmt.Print(helpFor(args[0]))
+		return nil
+	}
 	switch args[0] {
 	case "list", "ls":
 		return cmdList(args[1:])
+	case "sessions":
+		return cmdSessions(args[1:])
+	case "resume":
+		return cmdResume(args[1:])
 	case "create":
 		return cmdCreate(args[1:])
 	case "variant":
@@ -161,7 +371,7 @@ func flagSet(name string) *flag.FlagSet {
 func parse(fs *flag.FlagSet, args []string) (stop bool, err error) {
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Print(usage)
+			fmt.Print(helpFor(fs.Name()))
 			return true, nil
 		}
 		return true, err
@@ -316,6 +526,333 @@ var (
 	commit  = "none"
 	date    = "unknown"
 )
+
+func fmtTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	// Timestamps arrive in two zones: claude's come from ModTime and opencode's
+	// from UnixMilli, both local, while codex and pi parse RFC3339 strings ending
+	// in Z and arrive as UTC. Rendering those without converting showed pi two
+	// hours early — and, near midnight, on the wrong day — which makes a
+	// correctly sorted list look shuffled.
+	t = t.Local()
+	now := time.Now()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	if t.Year() == now.Year() {
+		return t.Format("01-02 15:04")
+	}
+	return t.Format("2006-01-02")
+}
+
+// opencodeCaveat is printed whenever an opencode store was consulted, including
+// when it returned nothing. opencode scopes its listing to the current git
+// project, so silence means "none in this project", never "none at all".
+const opencodeCaveat = "opencode: only this project's sessions are listed (opencode groups by git project)."
+
+func renderSessions(sessions []session.Session, hasOpencode bool) string {
+	if len(sessions) == 0 {
+		return ""
+	}
+	type row struct {
+		id    string
+		time  string
+		ref   string
+		dir   string
+		title string
+	}
+	rows := make([]row, 0, len(sessions))
+	wID, wTime, wRef, wDir := 0, 0, 0, 0
+
+	for _, s := range sessions {
+		id := s.ID
+		if len(id) >= 8 {
+			id = id[:8]
+		}
+		tStr := fmtTime(s.Updated)
+		refStr := s.Agent + ":" + s.Profile
+		dirStr := tilde(s.Dir)
+		if s.Dir != "" {
+			if _, err := os.Stat(s.Dir); err != nil {
+				dirStr += " (missing)"
+			}
+		}
+
+		if len(id) > wID {
+			wID = len(id)
+		}
+		if len(tStr) > wTime {
+			wTime = len(tStr)
+		}
+		if len(refStr) > wRef {
+			wRef = len(refStr)
+		}
+		if len(dirStr) > wDir {
+			wDir = len(dirStr)
+		}
+
+		rows = append(rows, row{
+			id:    id,
+			time:  tStr,
+			ref:   refStr,
+			dir:   dirStr,
+			title: s.Title,
+		})
+	}
+
+	var sb strings.Builder
+	for i, r := range rows {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("  ")
+		sb.WriteString(r.id)
+		sb.WriteString(strings.Repeat(" ", wID-len(r.id)+2))
+		sb.WriteString(r.time)
+		sb.WriteString(strings.Repeat(" ", wTime-len(r.time)+2))
+		sb.WriteString(r.ref)
+		sb.WriteString(strings.Repeat(" ", wRef-len(r.ref)+3))
+		sb.WriteString(r.dir)
+		if r.title != "" {
+			sb.WriteString(strings.Repeat(" ", wDir-len(r.dir)+3))
+			sb.WriteString(r.title)
+		}
+	}
+	// A listing whose whole purpose is to be acted on has to say how. Built from
+	// the first row rather than a placeholder, so it is a line you can paste.
+	if len(rows) > 0 {
+		sb.WriteString("\n\nresume with: ap resume " + rows[0].id)
+	}
+	if hasOpencode {
+		sb.WriteString("\n" + opencodeCaveat)
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// resumeArgs substitutes the session id into the agent's stated resume argv, then
+// appends whatever the caller passed. The placeholder is "{}", exactly as in a
+// variant: the registry states where the id goes, ap never infers it.
+func resumeArgs(a agent.Agent, id string, extra []string) []string {
+	out := make([]string, 0, len(a.Sessions.ResumeArgs)+len(extra))
+	for _, arg := range a.Sessions.ResumeArgs {
+		if arg == "{}" {
+			out = append(out, id)
+			continue
+		}
+		out = append(out, arg)
+	}
+	return append(out, extra...)
+}
+
+// chdirTo moves to a session's directory before exec.
+//
+// This is the one place ap does not exec in the caller's cwd, and it is not
+// optional: measured, claude cannot find a session from anywhere else, pi refuses
+// and prompts, and codex resumes happily against whatever tree it was started in —
+// which is the worst of the three, because it looks like it worked.
+func chdirTo(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("the session records no directory, so there is nowhere to resume it")
+	}
+	if err := os.Chdir(dir); err != nil {
+		return fmt.Errorf("cannot enter %s: %w", dir, err)
+	}
+	return nil
+}
+
+// findSession resolves an id, or a unique prefix of one, to a session.
+//
+// Scanned with no cap on purpose: a silent limit here would make `ap resume`
+// reject an id that exists, which is worse than the extra work. Readers stop a
+// few lines into each transcript, so this stays about a second even against the
+// hundreds of files a real machine has.
+func findSession(id string) (session.Session, error) {
+	res := session.Scan(0, session.Filter{}, nil)
+	var matches []session.Session
+	for _, s := range res.Sessions {
+		if s.ID == id {
+			return s, nil
+		}
+		if strings.HasPrefix(s.ID, id) {
+			matches = append(matches, s)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		var cand []string
+		for _, m := range matches {
+			cand = append(cand, fmt.Sprintf("%s (%s:%s)", m.ID[:min(8, len(m.ID))], m.Agent, m.Profile))
+		}
+		return session.Session{}, fmt.Errorf("ambiguous session ID prefix %q matches: %s", id, strings.Join(cand, ", "))
+	}
+	return session.Session{}, fmt.Errorf("no session found matching %q", id)
+}
+
+// askToResume prints the list and reads one number. The index is meaningful only
+// inside this call: the list was produced a few milliseconds earlier by this same
+// command, so nothing can have shifted under it. Returns -1 for "do not resume".
+//
+// os.Stdin.Stat with ModeCharDevice, not x/term — this repository is stdlib only.
+func askToResume(in *os.File, list []session.Session) int {
+	if in == nil {
+		return -1
+	}
+	fi, err := in.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return -1
+	}
+
+	for i, s := range list {
+		numStr := fmt.Sprintf("[%d]", i+1)
+		id := s.ID
+		if len(id) >= 8 {
+			id = id[:8]
+		}
+		tStr := fmtTime(s.Updated)
+		refStr := s.Agent + ":" + s.Profile
+		dirStr := tilde(s.Dir)
+		if s.Dir != "" {
+			if _, err := os.Stat(s.Dir); err != nil {
+				dirStr += " (missing)"
+			}
+		}
+		title := s.Title
+		fmt.Printf("%4s  %s  %s  %-16s  %s", numStr, id, tStr, refStr, dirStr)
+		if title != "" {
+			fmt.Printf("  %s", title)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("\nSelect a session to resume (1-%d, or Enter to cancel): ", len(list))
+	reader := bufio.NewReader(in)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return -1
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return -1
+	}
+	var n int
+	if _, err := fmt.Sscanf(line, "%d", &n); err != nil || n < 1 || n > len(list) {
+		return -1
+	}
+	return n - 1
+}
+
+func cmdResume(args []string) error {
+	fs := flagSet("resume")
+	stop, err := parse(fs, args)
+	if stop {
+		return err
+	}
+	rest := fs.Args()
+
+	var s session.Session
+	var extra []string
+
+	if len(rest) == 0 {
+		warn := func(err error) {
+			fmt.Fprintf(os.Stderr, "ap: warn: %v\n", err)
+		}
+		res := session.Scan(10, session.Filter{}, warn)
+		sessions := res.Sessions
+		if len(sessions) == 0 {
+			fmt.Println("No sessions found.")
+			return nil
+		}
+		idx := askToResume(os.Stdin, sessions)
+		if idx < 0 {
+			return nil
+		}
+		s = sessions[idx]
+	} else {
+		id := rest[0]
+		extra = rest[1:]
+		var err error
+		s, err = findSession(id)
+		if err != nil {
+			return err
+		}
+	}
+
+	a, ok := agent.Lookup(s.Agent)
+	if !ok {
+		return fmt.Errorf("unknown agent %q for session %s", s.Agent, s.ID)
+	}
+
+	dir, err := prepare(a, s.Profile)
+	if err != nil {
+		return err
+	}
+
+	argv := resumeArgs(a, s.ID, extra)
+	// Announced only once the move succeeded: saying "resuming in <dir>" and then
+	// failing to enter it reads as if the resume itself broke.
+	if err := chdirTo(s.Dir); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "ap: resuming %s:%s in %s\n", s.Agent, s.Profile, tilde(s.Dir))
+	return run.Exec(a, dir, argv)
+}
+
+func cmdSessions(args []string) error {
+	fs := flagSet("sessions")
+	maxFlag := fs.Int("max", 10, "maximum number of sessions to list")
+	hereFlag := fs.Bool("here", false, "only list sessions belonging to current working directory")
+	stop, err := parse(fs, args)
+	if stop {
+		return err
+	}
+	rest := fs.Args()
+
+	var filterAgent, filterProfile string
+	if len(rest) > 0 {
+		ref := rest[0]
+		if strings.Contains(ref, ":") {
+			parts := strings.SplitN(ref, ":", 2)
+			filterAgent = parts[0]
+			filterProfile = parts[1]
+		} else {
+			filterAgent = ref
+		}
+	}
+
+	warn := func(err error) {
+		fmt.Fprintf(os.Stderr, "ap: warn: %v\n", err)
+	}
+
+	filter := session.Filter{Agent: filterAgent, Profile: filterProfile}
+	if *hereFlag {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		filter.Dir = cwd
+	}
+
+	// The filter goes INTO the scan. Applied to its result instead, a cap taken
+	// first would hide a rarely used profile behind busier ones — measured,
+	// `ap sessions claude:finops` answered "No sessions found" with three there.
+	res := session.Scan(*maxFlag, filter, warn)
+
+	if len(res.Sessions) == 0 {
+		fmt.Println("No sessions found.")
+		if res.ConsultedOpencode {
+			fmt.Println(opencodeCaveat)
+		}
+		return nil
+	}
+
+	fmt.Print(renderSessions(res.Sessions, res.ConsultedOpencode))
+	return nil
+}
 
 func cmdVersion(args []string) error {
 	if len(args) != 0 {
@@ -1304,19 +1841,42 @@ func prepare(a agent.Agent, name string) (string, error) {
 	return dir, nil
 }
 
+// shimWarning reports entries a program wrote into a shim for real, each pointed
+// at the base directory it should be moved to. The base differs per shim, so the
+// entries are grouped by the Rel they came back under.
+func shimWarning(a agent.Agent, foundReal []string) string {
+	byRel := map[string][]string{}
+	for _, p := range foundReal {
+		rel, name, ok := strings.Cut(p, string(filepath.Separator))
+		if !ok {
+			rel, name = "", p
+		}
+		byRel[rel] = append(byRel[rel], name)
+	}
+	var b strings.Builder
+	for _, s := range a.Shims {
+		names := byRel[s.Rel]
+		if len(names) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b,
+			"ap: warning: real files inside the profile %s shim: %s\n"+
+				"    a program wrote there instead of following a passthrough link, so it is\n"+
+				"    invisible outside this profile. Move it to %s/ to share it.\n",
+			s.Env, strings.Join(names, " "), s.Base())
+	}
+	return b.String()
+}
+
 // shim builds or refreshes the config shim and reports anything a program wrote
 // into it for real, which would otherwise be invisible from outside the profile.
 func shim(a agent.Agent, dir string) error {
-	_, foundReal, err := profile.Shim(a, dir)
+	foundReal, err := profile.Shim(a, dir)
 	if err != nil {
 		return err
 	}
-	if len(foundReal) > 0 {
-		fmt.Fprintf(os.Stderr,
-			"ap: warning: real config inside the profile shim: %s\n"+
-				"    a program wrote there instead of following a passthrough link, so it is\n"+
-				"    invisible outside this profile. Move it to %s/ to share it.\n",
-			strings.Join(foundReal, " "), profile.ConfigBase())
+	if msg := shimWarning(a, foundReal); msg != "" {
+		fmt.Fprint(os.Stderr, msg)
 	}
 	return nil
 }

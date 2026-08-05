@@ -104,22 +104,87 @@ type FirstRun struct {
 	Keys []string
 }
 
-// Shim describes an agent that has no config-directory variable of its own, so
-// isolating it means setting a variable other programs also read.
+// Shim describes an agent that has no private variable for some part of its
+// state, so isolating it means setting a variable other programs also read.
 //
-// The profile then carries a directory, Rel, that is safe to point that variable
-// at: it holds Entry (a link to the profile itself, which is what the agent
-// looks for) plus one passthrough link per entry of the real config base, so
-// every other program the agent spawns still resolves to its own real config.
-// profile.Shim builds it and re-asserts it on every run.
+// The profile then carries a directory, Rel, that is safe to point Env at: it
+// holds Entry (a link to the profile itself, which is what the agent looks for)
+// plus one passthrough link per entry of the real base, so every other program
+// the agent spawns still resolves to its own real directory. profile.Shim builds
+// it and re-asserts it on every run.
 //
-// Only reach for this when the agent genuinely has no private variable. Verify
-// by reading the code that computes its config path, not the documentation.
+// An agent may need more than one: opencode's config comes from XDG_CONFIG_HOME
+// and its sessions from XDG_DATA_HOME, and neither has a private alternative.
+//
+// Only reach for this when the agent genuinely has no private variable. Verify by
+// reading the code that computes the path, not the documentation.
 type Shim struct {
-	// Rel is the subdirectory of the profile that ConfigEnv points at.
+	// Env is the shared variable this shim makes safe to set.
+	Env string
+	// Rel is the subdirectory of the profile that Env points at. Unique per
+	// agent: two shims at one Rel would overwrite each other's links.
 	Rel string
 	// Entry is the name the agent looks for inside it, linked to the profile.
 	Entry string
+	// Fallback is the path under $HOME that Env resolves to when it is unset,
+	// e.g. ".config" or ".local/share".
+	Fallback string
+}
+
+// Layout says how an agent's session store is walked and where the metadata is.
+// Four agents, four answers; none of them is a documented interface.
+type Layout int
+
+const (
+	// LayoutClaudeProjects: projects/<encoded-cwd>/<uuid>.jsonl. The id is the
+	// filename and the cwd is inside the file — the directory name encodes both
+	// '/' and '.' as '-' and cannot be reversed.
+	LayoutClaudeProjects Layout = iota
+	// LayoutCodexRollouts: sessions/YYYY/MM/DD/rollout-<ISO>-<uuid>.jsonl, with a
+	// session_meta object on the first line.
+	LayoutCodexRollouts
+	// LayoutPiSessions: sessions/<encoded-cwd>/<ISO>_<uuid>.jsonl, with a session
+	// header on the first line.
+	LayoutPiSessions
+	// LayoutExec: not a file layout at all. opencode keeps sessions in sqlite,
+	// which this repository cannot read without a dependency, so its own CLI is
+	// asked instead.
+	LayoutExec
+)
+
+// SessionStore says where an agent keeps past conversations and how to resume one.
+//
+// Verified by reading the real files and by running each binary's resume path.
+// See docs/plans/2026-08-05-ap-sessions.md for the measurements.
+type SessionStore struct {
+	// Rel is the directory under the config dir holding sessions. Empty for
+	// LayoutExec, which has no directory to walk.
+	Rel string
+	// Layout is how to read it.
+	Layout Layout
+	// ResumeArgs is the argv that resumes a session, with exactly one "{}" where
+	// the id goes — the same placeholder a variant uses, and for the same reason:
+	// the position is stated, never inferred.
+	//
+	// claude: --resume <id>   codex: resume <id>
+	// pi:     --session <id>  opencode: -s <id>
+	ResumeArgs []string
+}
+
+// Base is the directory Env normally resolves to, read exactly the way a
+// freedesktop-following program reads it: Env when set, otherwise $HOME/Fallback.
+//
+// This must be evaluated against the environment ap inherited, before ap sets
+// anything, or the shim would end up pointing at itself.
+func (s Shim) Base() string {
+	if d := os.Getenv(s.Env); d != "" {
+		return d
+	}
+	h := home()
+	if h == "" {
+		return ""
+	}
+	return filepath.Join(h, s.Fallback)
 }
 
 // Agent is one supported CLI.
@@ -205,8 +270,9 @@ type Agent struct {
 	// Hardcoded here for now. These belong in a user config file, so cases like a hook
 	// script living somewhere unusual can be declared per machine.
 	CloneAllow []string
-	// Shim is non-nil only for an agent whose isolation needs a shared variable.
-	Shim *Shim
+	// Shims lists every shared variable this agent needs made safe. Empty for an
+	// agent with a private config variable, which is three of the four.
+	Shims []Shim
 	// Settings is the agent's settings file, relative to its config directory:
 	// the one file `ap create --only-settings` slices. Always also a CloneAllow
 	// entry, so a narrowed clone can never reach a path the unfiltered clone
@@ -218,6 +284,8 @@ type Agent struct {
 	Settings string
 	// SettingsFormat says how Settings is sliced.
 	SettingsFormat Format
+	// Sessions says where this agent keeps its past conversations and how to resume one.
+	Sessions *SessionStore
 }
 
 func home() string {
@@ -229,27 +297,17 @@ func home() string {
 }
 
 // ConfigBase is the directory freedesktop-config-following programs resolve
-// their config root against, read exactly the way they read it: XDG_CONFIG_HOME
-// when set, otherwise ~/.config.
+// their config root against: XDG_CONFIG_HOME when set, otherwise ~/.config.
 //
-// The one definition, used by opencode's Config below and by
-// profile.ConfigBase — which delegates here rather than keeping its own copy,
-// since agent has no dependency on profile and can be the single source
-// without an import cycle. Before this was one function, opencode's Config
-// hardcoded ~/.config/opencode while profile.ConfigBase() (and
-// scripts/smoke.sh, independently, in shell) already honoured
-// XDG_CONFIG_HOME — a three-way disagreement that made `ap create --from
-// default` and `ap run opencode:default` silently target the wrong directory
-// on any machine that sets XDG_CONFIG_HOME.
+// Used by opencode's Config below and by profile.ConfigBase.
 func ConfigBase() string {
-	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
-		return d
-	}
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(h, ".config")
+	return Shim{Env: "XDG_CONFIG_HOME", Fallback: ".config"}.Base()
+}
+
+// dataBase is the directory freedesktop-following programs resolve their data
+// root against: XDG_DATA_HOME when set, otherwise ~/.local/share.
+func dataBase() string {
+	return Shim{Env: "XDG_DATA_HOME", Fallback: ".local/share"}.Base()
 }
 
 func registry() map[string]Agent {
@@ -301,6 +359,11 @@ func registry() map[string]Agent {
 				Source: filepath.Join(h, ".claude.json"),
 				Keys:   []string{"hasCompletedOnboarding"},
 			},
+			Sessions: &SessionStore{
+				Rel:        "projects",
+				Layout:     LayoutClaudeProjects,
+				ResumeArgs: []string{"--resume", "{}"},
+			},
 			Setup: "ap run %s plugin install <plugin>",
 		},
 		"codex": {
@@ -335,6 +398,11 @@ func registry() map[string]Agent {
 			// error — codex falls back to its own default model provider.
 			Settings:       "config.toml",
 			SettingsFormat: TOML,
+			Sessions: &SessionStore{
+				Rel:        "sessions",
+				Layout:     LayoutCodexRollouts,
+				ResumeArgs: []string{"resume", "{}"},
+			},
 			// Instructions is nil on purpose. The AGENTS.md convention is documented
 			// upstream for codex, opencode and pi, but no global file exists on the
 			// reference machine, so none of them has been watched reading one. Verify
@@ -356,10 +424,23 @@ func registry() map[string]Agent {
 				// vars, which the child inherits anyway. Linked because it costs nothing
 				// and covers the case where keys are stored here.
 				{Rel: "auth.json", From: filepath.Join(h, ".pi", "agent", "auth.json")},
+				// Where pi's providers actually live: baseUrl, api and the custom model
+				// list. Without it a fresh profile has no usable model — the same failure
+				// as starting logged out, which is what Share is for. Verified: it holds
+				// an $ENV reference, never a literal key.
+				//
+				// models-store.json is NOT shared: 72 KB of downloaded catalogue that pi
+				// regenerates inside each profile on its own.
+				{Rel: "models.json", From: filepath.Join(h, ".pi", "agent", "models.json")},
 			},
-			Unshared:       []string{"sessions"},
-			State:          []string{"sessions"},
-			CloneAllow:     []string{"settings.json", "models.json"},
+			Unshared:   []string{"sessions"},
+			State:      []string{"sessions", "models-store.json"},
+			CloneAllow: []string{"settings.json"},
+			Sessions: &SessionStore{
+				Rel:        "sessions",
+				Layout:     LayoutPiSessions,
+				ResumeArgs: []string{"--session", "{}"},
+			},
 			Setup:          "ap run %s config",
 			Settings:       "settings.json",
 			SettingsFormat: JSON,
@@ -377,7 +458,21 @@ func registry() map[string]Agent {
 			// safe for every other program in the process tree.
 			ConfigEnv: "XDG_CONFIG_HOME",
 			Mode:      Replace,
-			Shim:      &Shim{Rel: "xdg", Entry: "opencode"},
+			// Two shared variables, no private alternative for either. Config
+			// comes from XDG_CONFIG_HOME; sessions, credentials and snapshots
+			// come from XDG_DATA_HOME, where opencode keeps opencode.db.
+			//
+			// Both point Entry at the profile itself, so config and data resolve
+			// to one directory. Verified: no name collision, opencode.jsonc and
+			// opencode.db live side by side.
+			//
+			// XDG_STATE_HOME is deliberately NOT shimmed: prompt-history.jsonl,
+			// model.json and locks/ stay shared. Measured — a run never wrote
+			// there — so isolating it would be cost with no observed benefit.
+			Shims: []Shim{
+				{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"},
+				{Env: "XDG_DATA_HOME", Rel: "xdg-data", Entry: "opencode", Fallback: ".local/share"},
+			},
 			// Never node_modules — 62 MB on the reference machine, and reinstalled
 			// by opencode itself.
 			CloneAllow:     []string{"opencode.json", "agents", "command", "skills"},
@@ -388,9 +483,30 @@ func registry() map[string]Agent {
 			// avoid doing to every other program in the tree. So opencode cannot honour
 			// the one-credential rule: its sessions stay global across profiles. Known
 			// asymmetry, documented in the README, not worth a second shim.
-			Shared: nil,
-			// State is nil for the same reason: its sessions are outside the profile
-			// entirely, so a clone cannot carry them.
+			// opencode's credentials live under the data directory, which is now
+			// shimmed, so they must be linked back or every profile starts logged
+			// out. Measured: a run through these symlinks left all three files
+			// byte-identical — opencode does not do claude's temp-file-plus-rename,
+			// so none of this needs the Promote/orphan path Link has for
+			// .credentials.json. If that ever changes, the machinery is already there.
+			Shared: []Share{
+				{Rel: "auth.json", From: filepath.Join(dataBase(), "opencode", "auth.json")},
+				{Rel: "account.json", From: filepath.Join(dataBase(), "opencode", "account.json")},
+				{Rel: "mcp-auth.json", From: filepath.Join(dataBase(), "opencode", "mcp-auth.json")},
+			},
+			// What the profile accumulates by being used, now that data is
+			// shimmed: the session db and its sqlite sidecars, the git snapshots
+			// opencode takes to support revert, and the logs. Skipped by
+			// `ap create --from`, which copies configuration and never history.
+			//
+			// The -wal and -shm sidecars are listed explicitly. Copying the db
+			// without its WAL yields a db missing whatever had not been
+			// checkpointed, which is worse than not copying it at all.
+			State: []string{"opencode.db", "opencode.db-wal", "opencode.db-shm", "snapshot", "log", "repos"},
+			Sessions: &SessionStore{
+				Layout:     LayoutExec,
+				ResumeArgs: []string{"-s", "{}"},
+			},
 			Setup: "ap run %s providers   (a custom provider means editing opencode.json inside the profile)",
 		},
 	}

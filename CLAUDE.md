@@ -184,12 +184,18 @@ it and re-asserts it on every run.
 
 Rules that follow:
 
-- Never point a shared variable at a raw profile directory.
-  `TestOnlySharedConfigVarsAreShimmed` fails if an agent has one without a shim.
+- One variable per declared shim, and nothing else. Three agents have a private
+  variable and declare no shim. opencode declares two: XDG_CONFIG_HOME for its
+  config and XDG_DATA_HOME for its sessions, neither of which it has a private
+  alternative for.
+- `XDG_STATE_HOME`, `XDG_CACHE_HOME` and `HOME` are never redirected. opencode's
+  prompt history, selected model and locks stay shared, deliberately: a run was
+  measured never to write there, so isolating them is cost with no benefit.
+- Never point a shared variable at a raw profile directory, with or without a
+  shim. `TestOnlySharedConfigVarsAreShimmed` fails if an agent sets one without a
+  matching shim, and `TestEnvOnlySetsPathsInsideTheProfile` fails if any variable
+  lands outside the profile.
 - Never shim a private variable: pointless indirection, same test catches it.
-- `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` and `HOME` are never
-  redirected at all. That is what keeps sessions, logins and caches shared, which
-  is the entire point of the tool.
 - The passthrough is not optional. Without it this is the bug the old blanket ban
   existed to prevent.
 
@@ -198,6 +204,14 @@ re-litigate without new measurements: `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG` a
 `OPENCODE_CONFIG_CONTENT` are all additive; `OPENCODE_TEST_HOME` moves `home` but
 not `config`; there is no config-level switch. All 82 `OPENCODE_*` variables in
 the binary were enumerated.
+
+opencode keeps its session database (`opencode.db`) under `XDG_DATA_HOME/opencode`.
+`XDG_DATA_HOME` is shimmed for opencode to `<profile>/xdg-data` so profiles get
+isolated sessions. The three credentials under data (`auth.json`, `account.json`,
+`mcp-auth.json`) are linked back as `Shared`. Both shims point `Entry` at the
+profile itself (`<profile>/xdg` and `<profile>/xdg-data`), resolving config and
+data into one directory with no name collisions (`opencode.jsonc` vs `opencode.db`).
+Existing sessions in the global db are not migrated.
 
 ## The registry describes other people's software
 
@@ -355,6 +369,29 @@ symptom: reading one wrong produced two contradictory diagnoses in a row here.
 
 `--from` once skipped it and became a path traversal that copied the user's real
 `~/.claude` into a profile. `profile.Dir` joins and cleans, so `..` escapes.
+
+## Session storage and `ap resume`
+
+- **`ap resume` chdirs before exec, for all four agents.** Measured: `claude` hard-scopes
+  session ids to directory (`No conversation found` from elsewhere); `codex` is not
+  scoped and silently resumes against the wrong tree; `pi` prompts to fork into current
+  dir; `opencode` groups by git project. Chdiring first is required for all four.
+- **Never decode claude's directory names.** Both `/` and `.` encode to `-`, making
+  paths ambiguous (e.g. `-home-jcm--claude` vs `-home-jcm-Projects-agent-profile`).
+  Read `cwd` from inside the transcript file instead.
+- **Bounded scan for session metadata.** `readClaude` bounds line scan to 50 lines /
+  64 KB because transcripts can be huge (e.g. 24.9 MB with no `ai-title` at all).
+- **No positional index survives an invocation.** `ap sessions` prints session ids and
+  `ap resume <id>` takes an id prefix or full id. Numbering in `ap sessions` is for
+  display only. The interactive picker in `ap resume` (when run without arguments on a
+  terminal) is the exception because listing and selection occur in the same invocation.
+- **opencode's listing is project-scoped and costs a subprocess.** opencode sessions live
+  in sqlite (`opencode.db`) and are read by shelling out to `opencode session list --format json`
+  under the profile environment. `ap sessions` output includes a caveat note that
+  opencode listings are project-scoped.
+- **`ap sessions` and `ap resume` parse their own flags; `run` still does not.**
+  `ap resume <id> --model opus` passes extra flags through to the agent, maintaining
+  passthrough discipline.
 
 ## Deliberately absent — do not add
 

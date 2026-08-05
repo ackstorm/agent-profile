@@ -44,14 +44,19 @@ func TestOpencodeConfigHonoursXDGConfigHome(t *testing.T) {
 }
 
 // Config must agree with what Shared already claims about the real home, or the two
-// would describe different machines.
+// would describe different machines. For opencode, credentials live under dataBase()
+// rather than Config.
 func TestConfigAgreesWithSharedSources(t *testing.T) {
 	for _, name := range Names() {
 		a, _ := Lookup(name)
 		for _, s := range a.Shared {
-			if !strings.HasPrefix(s.From, a.Config+string(os.PathSeparator)) {
-				t.Errorf("%s: shared %q lives at %q, outside Config %q", name, s.Rel, s.From, a.Config)
+			if strings.HasPrefix(s.From, a.Config+string(os.PathSeparator)) {
+				continue
 			}
+			if strings.HasPrefix(s.From, filepath.Join(dataBase(), name)+string(os.PathSeparator)) {
+				continue
+			}
+			t.Errorf("%s: shared %q lives at %q, outside Config %q and data base", name, s.Rel, s.From, a.Config)
 		}
 	}
 }
@@ -139,6 +144,32 @@ func TestEveryAgentSaysHowToSetUpAProfile(t *testing.T) {
 	}
 }
 
+// Every agent must say where its sessions are and how to resume one, or
+// `ap sessions` silently skips it — a listing that claims to be "all agents"
+// while quietly omitting one is worse than not having the command.
+func TestEveryAgentDeclaresItsSessionStore(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if a.Sessions == nil {
+			t.Errorf("%s declares no SessionStore", name)
+			continue
+		}
+		if len(a.Sessions.ResumeArgs) == 0 {
+			t.Errorf("%s has no ResumeArgs: nothing could resume it", name)
+		}
+		n := 0
+		for _, arg := range a.Sessions.ResumeArgs {
+			if arg == "{}" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s ResumeArgs has %d {} placeholders, want exactly 1: %v",
+				name, n, a.Sessions.ResumeArgs)
+		}
+	}
+}
+
 func TestLookupKnownAgents(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "opencode", "pi"} {
 		a, ok := Lookup(name)
@@ -174,10 +205,8 @@ func TestModes(t *testing.T) {
 	}
 }
 
-// A shim is only ever acceptable for an agent whose config variable is shared
-// with other programs. Setting a private variable through a shim would be a
-// pointless indirection, and an agent with a SHARED variable and NO shim would
-// redirect every process it spawns.
+// A shared variable may only be set through a shim; a private one must never
+// have the indirection. Now per-shim, because an agent may declare more than one.
 func TestOnlySharedConfigVarsAreShimmed(t *testing.T) {
 	shared := map[string]bool{
 		"XDG_CONFIG_HOME": true,
@@ -188,30 +217,118 @@ func TestOnlySharedConfigVarsAreShimmed(t *testing.T) {
 	}
 	for _, name := range Names() {
 		a, _ := Lookup(name)
-		switch {
-		case shared[a.ConfigEnv] && a.Shim == nil:
+		if shared[a.ConfigEnv] && len(a.Shims) == 0 {
 			t.Errorf("%s sets the shared variable %s with no shim: every process it spawns would be redirected into the profile",
 				name, a.ConfigEnv)
-		case !shared[a.ConfigEnv] && a.Shim != nil:
+		}
+		if !shared[a.ConfigEnv] && len(a.Shims) > 0 {
 			t.Errorf("%s has a private variable %s but also a shim: drop the indirection", name, a.ConfigEnv)
 		}
-		if a.Shim != nil && (a.Shim.Rel == "" || a.Shim.Entry == "") {
-			t.Errorf("%s has an incomplete shim spec %+v", name, *a.Shim)
+		seen := map[string]bool{}
+		for _, s := range a.Shims {
+			if s.Env == "" || s.Rel == "" || s.Entry == "" || s.Fallback == "" {
+				t.Errorf("%s has an incomplete shim spec %+v", name, s)
+			}
+			if !shared[s.Env] {
+				t.Errorf("%s shims %s, which is not a shared variable: a private one needs no shim", name, s.Env)
+			}
+			if seen[s.Rel] {
+				t.Errorf("%s has two shims at the same Rel %q: they would overwrite each other", name, s.Rel)
+			}
+			seen[s.Rel] = true
+			if s.Base() == "" {
+				t.Errorf("%s: shim %s cannot resolve its base directory", name, s.Env)
+			}
 		}
 	}
 }
 
-// A Replace-mode agent forks auth and history unless we link them back.
-// An Additive one keeps its data outside the config root, so it needs nothing.
+// Every Replace-mode agent forks auth unless we link it back. opencode's
+// credentials live under XDG_DATA_HOME, which it now shims, so it needs shares
+// exactly like the others — it did not before, when data was global.
 func TestSharedEntries(t *testing.T) {
 	oc, _ := Lookup("opencode")
-	if len(oc.Shared) != 0 {
-		t.Errorf("opencode Shared = %v, want empty (data dir is already separate)", oc.Shared)
+	want := map[string]bool{"auth.json": true, "account.json": true, "mcp-auth.json": true}
+	got := map[string]bool{}
+	for _, s := range oc.Shared {
+		got[s.Rel] = true
+		if !filepath.IsAbs(s.From) {
+			t.Errorf("opencode share %s: From %q is not absolute", s.Rel, s.From)
+		}
+	}
+	for rel := range want {
+		if !got[rel] {
+			t.Errorf("opencode does not share %s: profiles would start logged out", rel)
+		}
 	}
 	for _, name := range []string{"claude", "codex", "pi"} {
 		a, _ := Lookup(name)
 		if len(a.Shared) == 0 {
 			t.Errorf("%s has no Shared entries; sessions and auth would fork", name)
+		}
+	}
+}
+
+// A clone must not carry another profile's sessions. opencode keeps them in a
+// sqlite db inside the profile now, so the db and its sidecars are State — a
+// clone that copied them would let you resume, inside the clone, a conversation
+// that used tools the clone does not have.
+func TestOpencodeSessionStateIsNotCloned(t *testing.T) {
+	oc, _ := Lookup("opencode")
+	state := map[string]bool{}
+	for _, p := range oc.State {
+		state[p] = true
+	}
+	for _, want := range []string{"opencode.db", "opencode.db-wal", "opencode.db-shm", "snapshot", "log"} {
+		if !state[want] {
+			t.Errorf("opencode State is missing %q: ap create --from would copy it", want)
+		}
+	}
+	allow := map[string]bool{}
+	for _, p := range oc.CloneAllow {
+		allow[p] = true
+	}
+	for p := range state {
+		if allow[p] {
+			t.Errorf("%q is both State and CloneAllow: the allowlist wins and the session is cloned anyway", p)
+		}
+	}
+}
+
+// pi keeps its provider configuration in models.json: baseUrl, api and the custom
+// model list. A profile without it has no usable model at all, which is the same
+// failure as starting logged out. models-store.json is deliberately NOT shared —
+// it is a downloaded catalogue pi regenerates on its own.
+func TestPiSharesItsProviderConfig(t *testing.T) {
+	p, _ := Lookup("pi")
+	got := map[string]bool{}
+	for _, s := range p.Shared {
+		got[s.Rel] = true
+	}
+	if !got["models.json"] {
+		t.Error("pi does not share models.json: a fresh profile has no providers and no usable model")
+	}
+	if got["models-store.json"] {
+		t.Error("pi shares models-store.json: it is a downloaded catalogue pi regenerates per profile")
+	}
+}
+
+// A path that is both shared and cloned is a contradiction: the clone writes a
+// real file where Link then wants a symlink, and Link moves it aside to
+// <rel>.ap-orphan. The user sees a spurious orphan warning on a profile that did
+// nothing wrong.
+func TestNoPathIsBothSharedAndCloned(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		allow := map[string]bool{}
+		for _, p := range a.CloneAllow {
+			allow[p] = true
+		}
+		for _, s := range a.Shared {
+			if allow[s.Rel] {
+				t.Errorf("%s: %q is both Shared and CloneAllow: a clone would leave a real file where the symlink belongs",
+					name, s.Rel)
+			}
 		}
 	}
 }
@@ -223,8 +340,8 @@ func TestEveryAgentSharesOnlyItsCredential(t *testing.T) {
 	want := map[string][]string{
 		"claude":   {".credentials.json"},
 		"codex":    {"auth.json"},
-		"pi":       {"auth.json"},
-		"opencode": nil, // its auth lives under XDG_DATA_HOME, which ap never redirects
+		"pi":       {"auth.json", "models.json"},
+		"opencode": {"account.json", "auth.json", "mcp-auth.json"},
 	}
 	for _, name := range Names() {
 		a, _ := Lookup(name)

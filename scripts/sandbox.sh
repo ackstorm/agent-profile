@@ -91,6 +91,7 @@ seed() {
     cat >"$SANDBOX/bin/stub" <<'STUB'
 #!/bin/sh
 echo "argv:$*"
+echo "cwd:$(pwd)"
 # And again with the element boundaries visible. "$*" joins with a space, so a
 # check written against it alone cannot tell one argument from two - which is
 # precisely the property `ap run`'s {} placeholder exists to produce, since a
@@ -226,6 +227,17 @@ if quiet "$AP" create claude:sbxrun; then
         pass run "argv verbatim, CLAUDE_CONFIG_DIR inside the profile"
     fi
 
+    # --help AFTER the reference belongs to the agent. ap grew per-command help,
+    # and the obvious way to wire it — intercept -h anywhere — would swallow this
+    # and break the one contract run exists for. Asserted on arg:, not argv:,
+    # because "$*" cannot tell one argument from two.
+    out=$("$AP" run claude:sbxrun --help 2>&1 || true)
+    if ! printf '%s' "$out" | grep -qx 'arg:\[--help\]'; then
+        bad help "ap answered --help itself instead of passing it to the agent: $out"
+    else
+        pass help "--help after a reference still reaches the agent"
+    fi
+
     # A variant's stored arguments run first and the user's after, so the later
     # one wins wherever the agent takes the last flag.
     if quiet "$AP" variant claude:sbxrun:sbxv -- --model haiku -p; then
@@ -331,6 +343,100 @@ if quiet "$AP" create opencode:sbxshim; then
     quiet "$AP" delete --yes opencode:sbxshim
 else
     bad shim "could not create opencode:sbxshim"
+fi
+
+# The data shim, checked the same way as the config one. Sessions are the reason
+# it exists: without it opencode writes opencode.db into the shared data dir and
+# every profile sees every other profile's history.
+mkdir -p "$HOME/.local/share"/{opencode,fonts,applications}
+if quiet "$AP" create opencode:sbxdata; then
+    d=$("$AP" which opencode:sbxdata)
+    xdgdata=$("$AP" env opencode:sbxdata | sed -n 's/^XDG_DATA_HOME=//p')
+    if [ -z "$xdgdata" ]; then
+        bad datashim "opencode sets no XDG_DATA_HOME"
+    elif [ "$xdgdata" != "$d/xdg-data" ]; then
+        bad datashim "XDG_DATA_HOME=$xdgdata, want $d/xdg-data"
+    elif [ "$(readlink -f "$xdgdata/opencode")" != "$(readlink -f "$d")" ]; then
+        bad datashim "xdg-data/opencode does not resolve to the profile"
+    elif [ ! -L "$xdgdata/fonts" ]; then
+        bad datashim "no passthrough for fonts: every program reading XDG_DATA_HOME would be redirected into the profile"
+    elif [ -d "$xdgdata/opencode" ] && [ -L "$xdgdata/applications" ]; then
+        pass datashim "XDG_DATA_HOME shimmed with passthrough"
+    else
+        bad datashim "unexpected shim shape"
+    fi
+    quiet "$AP" delete --yes opencode:sbxdata
+else
+    bad datashim "could not create opencode:sbxdata"
+fi
+
+# --- sessions and resume: listing, resume argv and the chdir --------------
+if quiet "$AP" create codex:sbxsess; then
+    d=$("$AP" which codex:sbxsess)
+    SID="019ef8e0-060c-7ef0-b878-63c558abbb23"
+    SID2="019ef8e0-060c-7ef0-b878-63c558abbb24"
+    mkdir -p "$d/sessions/2026/08/05" "$SANDBOX/work"
+    printf '{"timestamp":"2026-08-05T10:00:00.000Z","type":"session_meta","payload":{"session_id":"%s","cwd":"%s"}}\n' \
+        "$SID" "$SANDBOX/work" > "$d/sessions/2026/08/05/rollout-2026-08-05T10-00-00-$SID.jsonl"
+    printf '{"timestamp":"2026-08-05T11:00:00.000Z","type":"session_meta","payload":{"session_id":"%s","cwd":"%s"}}\n' \
+        "$SID2" "$SANDBOX/work" > "$d/sessions/2026/08/05/rollout-2026-08-05T11-00-00-$SID2.jsonl"
+
+    out=$("$AP" sessions 2>&1 || true)
+    if printf '%s' "$out" | grep -q "${SID:0:8}" && printf '%s' "$out" | grep -q "codex:sbxsess"; then
+        pass sessions "ap sessions lists seeded session with profile"
+    else
+        bad sessions "ap sessions output missing seeded session: $out"
+    fi
+
+    out=$("$AP" sessions --max 1 2>&1 || true)
+    rows=$(printf '%s' "$out" | grep -c "codex:sbxsess" || true)
+    if [ "$rows" -eq 1 ]; then
+        pass sessions "ap sessions --max 1 returned 1 row"
+    else
+        bad sessions "ap sessions --max 1 returned $rows rows"
+    fi
+
+    out=$("$AP" resume "$SID" 2>&1 || true)
+    if printf '%s' "$out" | grep -qxF "arg:[resume]" && printf '%s' "$out" | grep -qxF "arg:[$SID]" && ! printf '%s' "$out" | grep -qxF 'arg:[{}]'; then
+        pass resume "ap resume argv puts id at placeholder"
+    else
+        bad resume "ap resume argv missing resume or id: $out"
+    fi
+
+    out=$("$AP" resume "$SID" --model x 2>&1 || true)
+    if printf '%s' "$out" | grep -qxF "arg:[--model]" && printf '%s' "$out" | grep -qxF "arg:[x]"; then
+        pass resume "ap resume passes extra args through"
+    else
+        bad resume "ap resume extra args missing: $out"
+    fi
+
+    out=$( (cd /tmp && "$AP" resume "$SID") 2>&1 || true)
+    if printf '%s' "$out" | grep -qxF "cwd:$SANDBOX/work"; then
+        pass resume "ap resume chdirs to session directory before exec"
+    else
+        bad resume "ap resume did not chdir: $out"
+    fi
+
+    out=$(printf '1\n' | "$AP" resume 2>&1 || true)
+    if printf '%s' "$out" | grep -q "argv:"; then
+        bad resume "echo 1 | ap resume execed the agent off a pipe"
+    else
+        pass resume "echo 1 | ap resume did not exec off a pipe"
+    fi
+
+    SID_GONE="019ef8e0-060c-7ef0-b878-missingdir00"
+    printf '{"timestamp":"2026-08-05T12:00:00.000Z","type":"session_meta","payload":{"session_id":"%s","cwd":"%s"}}\n' \
+        "$SID_GONE" "$SANDBOX/missing_dir_for_test" > "$d/sessions/2026/08/05/rollout-2026-08-05T12-00-00-$SID_GONE.jsonl"
+    out=$("$AP" resume "$SID_GONE" 2>&1 || true)
+    if printf '%s' "$out" | grep -q "missing_dir_for_test" && ! printf '%s' "$out" | grep -q "argv:"; then
+        pass resume "ap resume refuses missing directory and execs nothing"
+    else
+        bad resume "ap resume on missing directory failed check: $out"
+    fi
+
+    quiet "$AP" delete --yes codex:sbxsess
+else
+    bad sessions "could not create codex:sbxsess"
 fi
 
 echo

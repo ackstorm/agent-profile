@@ -58,6 +58,8 @@ exactly that reason — see "`default`" below.
 | Command | What it does |
 |---|---|
 | `ap list [--raw] [agent]` | your profiles and their variants, as a tree — always includes `default`, and every supported agent. `--raw` prints the same listing tab-separated, for scripts |
+| `ap sessions [--max N] [--here] [agent[:profile]]` | list recent sessions across all agents and profiles, ordered newest first |
+| `ap resume [<id>] [args...]` | resume a session by full ID or prefix, changing to its directory first; when no ID is given on a terminal, prompts with a numbered list |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant [--yes] <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it. May leave `{}` where your run-time arguments should be substituted, which is how a variant becomes a prompt prefix. Over a variant that exists it asks first, showing both argument lists; `--yes` answers |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
@@ -391,14 +393,13 @@ behave exactly as if you had typed the agent's name.
 | claude | `CLAUDE_CONFIG_DIR` | the profile |
 | codex | `CODEX_HOME` | the profile |
 | pi | `PI_CODING_AGENT_DIR` | the profile |
-| opencode | `XDG_CONFIG_HOME` | the profile's config shim |
+| opencode | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | the profile's config and data shims |
 
 All four replace their config root, so a profile loads exactly what you put in
-it — including, for claude, codex and pi, their session history: it lives inside
-that same config root, so replacing it is what makes each profile's history its
-own. `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` are never redirected
-at all; that is what keeps opencode's sessions, auth and caches global across
-profiles, since its own data lives under those instead of under its config root.
+it — including their session history: it lives inside that profile (under
+`xdg-data` for opencode), so each profile's history is its own. `XDG_STATE_HOME`
+and `XDG_CACHE_HOME` are never redirected at all; prompt history and model
+selections stay shared across profiles.
 
 ### opencode needs a config shim
 
@@ -447,8 +448,8 @@ Created as a symlink by `ap create` and re-asserted on every `ap run`:
 |---|---|
 | claude | `.credentials.json` |
 | codex | `auth.json` |
-| pi | `auth.json` |
-| opencode | nothing — see the asymmetry below |
+| pi | `auth.json`, `models.json` |
+| opencode | `auth.json`, `account.json`, `mcp-auth.json` |
 
 The link is re-created on every run because agents rewrite their credential
 files — codex refreshes OAuth tokens into `auth.json` — and a write via
@@ -501,13 +502,13 @@ profile has none. So `ap create` copies that one flag —
 into the new profile, once, at create. Everything else in there is session
 state, per-project trust and prompt history, and stays where it is.
 
-**The opencode asymmetry.** opencode's sessions, auth and account state all live
-under `XDG_DATA_HOME`, which `ap` deliberately never redirects — redirecting it is
-exactly what the config shim exists to avoid doing to every other program in the
-process tree (see above). So opencode gets auth and account sharing **for free**,
-with no code for it, but its *sessions* stay global across profiles too, which
-the one-credential rule would rather they were not. Known, not worth a second
-shim.
+**opencode sessions.** opencode's sessions live under `XDG_DATA_HOME/opencode` in
+a sqlite database. `ap` shims `XDG_DATA_HOME` to `<profile>/xdg-data` so every
+profile gets its own session database, while linking back the three credential
+files (`auth.json`, `account.json`, `mcp-auth.json`) so your login stays shared.
+Prompt history under `XDG_STATE_HOME` remains shared across profiles. Existing
+sessions in the global database are not migrated and stay accessible from bare
+`opencode`.
 
 A direct consequence: **a new profile starts completely empty**, and populating
 it is real work, different per agent. `ap create` prints the next step for a

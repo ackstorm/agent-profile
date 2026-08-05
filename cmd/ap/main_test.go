@@ -7,12 +7,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/internal/session"
 )
 
 // dispatch is where user input becomes a filesystem path, and it had no tests at
@@ -40,6 +43,95 @@ func TestMain(m *testing.M) {
 func TestDispatchUnknownCommand(t *testing.T) {
 	if err := dispatch([]string{"frobnicate"}); err == nil {
 		t.Error("unknown command = nil error, want error")
+	}
+}
+
+// The listing prints the id, because the id is what `ap resume` takes. A row
+// whose only handle is its position would make `ap resume 2` resolve against a
+// list that no longer exists.
+func TestSessionsOutputCarriesTheID(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "execute", ID: "db5b0ec4-e90d-4f0e-8ebd-28bfe677f5a2",
+		Dir: "/home/jcm/Projects/agent-profile", Title: "Designing a command",
+		Updated: time.Date(2026, 8, 5, 10, 22, 0, 0, time.UTC),
+	}}, false)
+	for _, want := range []string{"db5b0ec4", "claude:execute", "Designing a command"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A session whose directory is gone is marked, not hidden. 47 of 93 opencode
+// sessions on the reference machine name a directory that no longer exists;
+// dropping them silently makes the listing look wrong.
+func TestSessionsMarksAMissingDirectory(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "execute", ID: "aaaaaaaa",
+		Dir: "/gone/for/good", Updated: time.Now(),
+	}}, false)
+	if !strings.Contains(out, "/gone/for/good") {
+		t.Error("the missing directory is not shown")
+	}
+	if !strings.Contains(out, "missing") {
+		t.Error("a session pointing at a deleted directory is not marked")
+	}
+}
+
+// The id goes where the agent's grammar puts it, stated by the {} placeholder,
+// never appended. Same rule as a variant: ap does not infer argv positions for
+// four external CLIs.
+func TestResumeArgvPutsTheIDAtThePlaceholder(t *testing.T) {
+	for _, tc := range []struct {
+		agent, id string
+		want      []string
+	}{
+		{"claude", "abc", []string{"--resume", "abc"}},
+		{"codex", "abc", []string{"resume", "abc"}},
+		{"pi", "abc", []string{"--session", "abc"}},
+		{"opencode", "abc", []string{"-s", "abc"}},
+	} {
+		a, _ := agent.Lookup(tc.agent)
+		got := resumeArgs(a, tc.id, nil)
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: got %v, want %v", tc.agent, got, tc.want)
+		}
+	}
+}
+
+// Extra arguments follow the resume flag, so `ap resume <id> --model opus`
+// reaches the agent. Same passthrough rule as `ap run`.
+func TestResumePassesExtraArgsThrough(t *testing.T) {
+	a, _ := agent.Lookup("claude")
+	got := resumeArgs(a, "abc", []string{"--model", "opus"})
+	want := []string{"--resume", "abc", "--model", "opus"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// A session whose directory is gone must fail before exec, with the path in the
+// message. Without the chdir claude answers "No conversation found" — on stdout,
+// exit 0 — which reads like an ap bug.
+func TestResumeRefusesAMissingDirectory(t *testing.T) {
+	err := chdirTo(filepath.Join(t.TempDir(), "not-there"))
+	if err == nil {
+		t.Fatal("chdirTo accepted a directory that does not exist")
+	}
+	if !strings.Contains(err.Error(), "not-there") {
+		t.Errorf("error does not name the directory: %v", err)
+	}
+}
+
+// Off a terminal ap never asks and never resumes. `ap resume` in a script would
+// otherwise block forever, and dev.sh runs with -it, so an unguarded prompt hangs
+// make sandbox itself.
+func TestResumeNeverPromptsOffATerminal(t *testing.T) {
+	r, w, _ := os.Pipe()
+	_, _ = w.WriteString("1\n")
+	_ = w.Close()
+	if got := askToResume(r, []session.Session{{ID: "a"}, {ID: "b"}}); got != -1 {
+		t.Errorf("picked %d from a pipe: off a terminal it must not choose", got)
 	}
 }
 
@@ -2030,5 +2122,114 @@ func TestOnlySettingsIsRepeatableNotCommaSeparated(t *testing.T) {
 	}
 	if strings.Join(got, "|") != "a|b,c" {
 		t.Errorf("repeatedFlag = %q, want the values verbatim", got)
+	}
+}
+
+// The warning names the base a real entry should be moved to. With two shims,
+// naming the config base for a data-shim entry sends the user to the wrong
+// directory.
+func TestShimWarningNamesTheMatchingBase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "dat"))
+
+	a, _ := agent.Lookup("opencode")
+	for _, tc := range []struct{ found, wantBase string }{
+		{filepath.Join("xdg", "git"), filepath.Join(home, "cfg")},
+		{filepath.Join("xdg-data", "fonts"), filepath.Join(home, "dat")},
+	} {
+		got := shimWarning(a, []string{tc.found})
+		if !strings.Contains(got, tc.wantBase) {
+			t.Errorf("warning for %q = %q, want it to name %q", tc.found, got, tc.wantBase)
+		}
+	}
+}
+
+// The caveat is about what was consulted, not about what came back. opencode
+// scopes its listing to the current git project, so it answering with nothing is
+// the normal case — and exactly when the user most needs telling that the listing
+// is incomplete. Deriving this from the returned rows dropped it precisely then.
+func TestSessionsCaveatShowsEvenWithNoOpencodeRows(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "execute", ID: "aaaaaaaa",
+		Dir: t.TempDir(), Updated: time.Now(),
+	}}, true)
+	if !strings.Contains(out, "opencode") {
+		t.Errorf("no opencode caveat with zero opencode rows:\n%s", out)
+	}
+}
+
+// codex and pi parse RFC3339 strings that end in Z, so their timestamps arrive in
+// UTC, while claude's (ModTime) and opencode's (UnixMilli) arrive local. Rendering
+// a UTC time without converting showed pi two hours early and, near midnight, on
+// the wrong day — which makes a correctly ordered list look shuffled.
+func TestFmtTimeIgnoresTheIncomingZone(t *testing.T) {
+	inst := time.Now().Add(-3 * time.Hour)
+	away := inst.In(time.FixedZone("TEST", 5*60*60))
+	if got, want := fmtTime(away), fmtTime(inst.Local()); got != want {
+		t.Errorf("fmtTime depends on the zone it is handed: %q vs %q", got, want)
+	}
+}
+
+// Asking one command for help must answer about that command, not print the
+// whole manual. A single shared usage string did the latter and made the help
+// unusable.
+func TestEachCommandHasItsOwnHelp(t *testing.T) {
+	for _, name := range []string{"list", "sessions", "resume", "create", "variant", "run", "env", "which", "delete", "link", "unlink"} {
+		h := helpFor(name)
+		if h == usage {
+			t.Errorf("ap %s --help prints the global usage instead of its own", name)
+			continue
+		}
+		if !strings.HasPrefix(h, "ap "+name+" - ") {
+			t.Errorf("ap %s --help does not open by naming the command: %.40q", name, h)
+		}
+		if !strings.Contains(h, "Usage:") || !strings.Contains(h, "Examples:") {
+			t.Errorf("ap %s --help has no Usage or Examples section", name)
+		}
+	}
+}
+
+// An unknown command still gets the manual, which is the only thing that can
+// help someone who mistyped.
+func TestHelpForAnUnknownCommandFallsBackToUsage(t *testing.T) {
+	if helpFor("nonesuch") != usage {
+		t.Error("an unknown command does not fall back to the global usage")
+	}
+}
+
+// The listing says how to act on itself, with a real id rather than a
+// placeholder, so the line can be pasted.
+func TestSessionsOutputShowsHowToResume(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "plan", ID: "05d8188f-1111-2222-3333-444444444444",
+		Dir: t.TempDir(), Updated: time.Now(),
+	}}, false)
+	if !strings.Contains(out, "ap resume 05d8188f") {
+		t.Errorf("no pasteable resume hint:\n%s", out)
+	}
+}
+
+// sessions and resume are one workflow split across two commands: the listing
+// only has a point if you know what to do with an ID, and resume only has a
+// point if you know where IDs come from. Each help must send you to the other.
+func TestSessionsAndResumeHelpPointAtEachOther(t *testing.T) {
+	for _, tc := range []struct{ cmd, wants string }{
+		{"sessions", "ap resume --help"},
+		{"resume", "ap sessions --help"},
+	} {
+		h := helpFor(tc.cmd)
+		if !strings.Contains(h, tc.wants) {
+			t.Errorf("ap %s --help never mentions %q", tc.cmd, tc.wants)
+		}
+		// And an example of the other half, not just a pointer.
+		other := "ap resume 05d8188f"
+		if tc.cmd == "resume" {
+			other = "ap sessions"
+		}
+		if !strings.Contains(h, other) {
+			t.Errorf("ap %s --help shows no example of %q", tc.cmd, other)
+		}
 	}
 }
