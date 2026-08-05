@@ -131,6 +131,46 @@ type Shim struct {
 	Fallback string
 }
 
+// Layout says how an agent's session store is walked and where the metadata is.
+// Four agents, four answers; none of them is a documented interface.
+type Layout int
+
+const (
+	// LayoutClaudeProjects: projects/<encoded-cwd>/<uuid>.jsonl. The id is the
+	// filename and the cwd is inside the file — the directory name encodes both
+	// '/' and '.' as '-' and cannot be reversed.
+	LayoutClaudeProjects Layout = iota
+	// LayoutCodexRollouts: sessions/YYYY/MM/DD/rollout-<ISO>-<uuid>.jsonl, with a
+	// session_meta object on the first line.
+	LayoutCodexRollouts
+	// LayoutPiSessions: sessions/<encoded-cwd>/<ISO>_<uuid>.jsonl, with a session
+	// header on the first line.
+	LayoutPiSessions
+	// LayoutExec: not a file layout at all. opencode keeps sessions in sqlite,
+	// which this repository cannot read without a dependency, so its own CLI is
+	// asked instead.
+	LayoutExec
+)
+
+// SessionStore says where an agent keeps past conversations and how to resume one.
+//
+// Verified by reading the real files and by running each binary's resume path.
+// See docs/plans/2026-08-05-ap-sessions.md for the measurements.
+type SessionStore struct {
+	// Rel is the directory under the config dir holding sessions. Empty for
+	// LayoutExec, which has no directory to walk.
+	Rel string
+	// Layout is how to read it.
+	Layout Layout
+	// ResumeArgs is the argv that resumes a session, with exactly one "{}" where
+	// the id goes — the same placeholder a variant uses, and for the same reason:
+	// the position is stated, never inferred.
+	//
+	// claude: --resume <id>   codex: resume <id>
+	// pi:     --session <id>  opencode: -s <id>
+	ResumeArgs []string
+}
+
 // Base is the directory Env normally resolves to, read exactly the way a
 // freedesktop-following program reads it: Env when set, otherwise $HOME/Fallback.
 //
@@ -244,6 +284,8 @@ type Agent struct {
 	Settings string
 	// SettingsFormat says how Settings is sliced.
 	SettingsFormat Format
+	// Sessions says where this agent keeps its past conversations and how to resume one.
+	Sessions *SessionStore
 }
 
 func home() string {
@@ -317,6 +359,11 @@ func registry() map[string]Agent {
 				Source: filepath.Join(h, ".claude.json"),
 				Keys:   []string{"hasCompletedOnboarding"},
 			},
+			Sessions: &SessionStore{
+				Rel:        "projects",
+				Layout:     LayoutClaudeProjects,
+				ResumeArgs: []string{"--resume", "{}"},
+			},
 			Setup: "ap run %s plugin install <plugin>",
 		},
 		"codex": {
@@ -351,6 +398,11 @@ func registry() map[string]Agent {
 			// error — codex falls back to its own default model provider.
 			Settings:       "config.toml",
 			SettingsFormat: TOML,
+			Sessions: &SessionStore{
+				Rel:        "sessions",
+				Layout:     LayoutCodexRollouts,
+				ResumeArgs: []string{"resume", "{}"},
+			},
 			// Instructions is nil on purpose. The AGENTS.md convention is documented
 			// upstream for codex, opencode and pi, but no global file exists on the
 			// reference machine, so none of them has been watched reading one. Verify
@@ -384,6 +436,11 @@ func registry() map[string]Agent {
 			Unshared:       []string{"sessions"},
 			State:          []string{"sessions", "models-store.json"},
 			CloneAllow:     []string{"settings.json"},
+			Sessions: &SessionStore{
+				Rel:        "sessions",
+				Layout:     LayoutPiSessions,
+				ResumeArgs: []string{"--session", "{}"},
+			},
 			Setup:          "ap run %s config",
 			Settings:       "settings.json",
 			SettingsFormat: JSON,
@@ -446,6 +503,10 @@ func registry() map[string]Agent {
 			// without its WAL yields a db missing whatever had not been
 			// checkpointed, which is worse than not copying it at all.
 			State: []string{"opencode.db", "opencode.db-wal", "opencode.db-shm", "snapshot", "log", "repos"},
+			Sessions: &SessionStore{
+				Layout:     LayoutExec,
+				ResumeArgs: []string{"-s", "{}"},
+			},
 			Setup: "ap run %s providers   (a custom provider means editing opencode.json inside the profile)",
 		},
 	}

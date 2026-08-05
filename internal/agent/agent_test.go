@@ -144,6 +144,32 @@ func TestEveryAgentSaysHowToSetUpAProfile(t *testing.T) {
 	}
 }
 
+// Every agent must say where its sessions are and how to resume one, or
+// `ap sessions` silently skips it — a listing that claims to be "all agents"
+// while quietly omitting one is worse than not having the command.
+func TestEveryAgentDeclaresItsSessionStore(t *testing.T) {
+	for _, name := range Names() {
+		a, _ := Lookup(name)
+		if a.Sessions == nil {
+			t.Errorf("%s declares no SessionStore", name)
+			continue
+		}
+		if len(a.Sessions.ResumeArgs) == 0 {
+			t.Errorf("%s has no ResumeArgs: nothing could resume it", name)
+		}
+		n := 0
+		for _, arg := range a.Sessions.ResumeArgs {
+			if arg == "{}" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s ResumeArgs has %d {} placeholders, want exactly 1: %v",
+				name, n, a.Sessions.ResumeArgs)
+		}
+	}
+}
+
 func TestLookupKnownAgents(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "opencode", "pi"} {
 		a, ok := Lookup(name)
