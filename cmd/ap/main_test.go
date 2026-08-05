@@ -10,9 +10,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/internal/session"
 )
 
 // dispatch is where user input becomes a filesystem path, and it had no tests at
@@ -40,6 +42,38 @@ func TestMain(m *testing.M) {
 func TestDispatchUnknownCommand(t *testing.T) {
 	if err := dispatch([]string{"frobnicate"}); err == nil {
 		t.Error("unknown command = nil error, want error")
+	}
+}
+
+// The listing prints the id, because the id is what `ap resume` takes. A row
+// whose only handle is its position would make `ap resume 2` resolve against a
+// list that no longer exists.
+func TestSessionsOutputCarriesTheID(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "execute", ID: "db5b0ec4-e90d-4f0e-8ebd-28bfe677f5a2",
+		Dir: "/home/jcm/Projects/agent-profile", Title: "Designing a command",
+		Updated: time.Date(2026, 8, 5, 10, 22, 0, 0, time.UTC),
+	}}, false)
+	for _, want := range []string{"db5b0ec4", "claude:execute", "Designing a command"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A session whose directory is gone is marked, not hidden. 47 of 93 opencode
+// sessions on the reference machine name a directory that no longer exists;
+// dropping them silently makes the listing look wrong.
+func TestSessionsMarksAMissingDirectory(t *testing.T) {
+	out := renderSessions([]session.Session{{
+		Agent: "claude", Profile: "execute", ID: "aaaaaaaa",
+		Dir: "/gone/for/good", Updated: time.Now(),
+	}}, false)
+	if !strings.Contains(out, "/gone/for/good") {
+		t.Error("the missing directory is not shown")
+	}
+	if !strings.Contains(out, "missing") {
+		t.Error("a session pointing at a deleted directory is not marked")
 	}
 }
 

@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
+	"github.com/ackstorm/agent-profile/internal/session"
 )
 
 const usage = `ap - per-agent profile launcher
@@ -31,6 +33,7 @@ Usage:
 
 Commands:
   list      List profiles and variants, or just one agent's
+  sessions  List recent sessions across agents and profiles
   create    Create a profile and a wrapper you can type as a command
   variant   Name a set of launch arguments over an existing profile
             (over one that exists it asks first; --yes answers)
@@ -122,6 +125,8 @@ func dispatch(args []string) error {
 	switch args[0] {
 	case "list", "ls":
 		return cmdList(args[1:])
+	case "sessions":
+		return cmdSessions(args[1:])
 	case "create":
 		return cmdCreate(args[1:])
 	case "variant":
@@ -317,10 +322,167 @@ var (
 	date    = "unknown"
 )
 
-func cmdVersion(args []string) error {
-	if len(args) != 0 {
-		return fmt.Errorf("usage: ap version")
+func fmtTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
 	}
+	now := time.Now()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	if t.Year() == now.Year() {
+		return t.Format("01-02 15:04")
+	}
+	return t.Format("2006-01-02")
+}
+
+func renderSessions(sessions []session.Session, hasOpencode bool) string {
+	if len(sessions) == 0 {
+		return ""
+	}
+	type row struct {
+		id    string
+		time  string
+		ref   string
+		dir   string
+		title string
+	}
+	rows := make([]row, 0, len(sessions))
+	wID, wTime, wRef, wDir := 0, 0, 0, 0
+
+	for _, s := range sessions {
+		id := s.ID
+		if len(id) >= 8 {
+			id = id[:8]
+		}
+		tStr := fmtTime(s.Updated)
+		refStr := s.Agent + ":" + s.Profile
+		dirStr := tilde(s.Dir)
+		if s.Dir != "" {
+			if _, err := os.Stat(s.Dir); err != nil {
+				dirStr += " (missing)"
+			}
+		}
+
+		if len(id) > wID {
+			wID = len(id)
+		}
+		if len(tStr) > wTime {
+			wTime = len(tStr)
+		}
+		if len(refStr) > wRef {
+			wRef = len(refStr)
+		}
+		if len(dirStr) > wDir {
+			wDir = len(dirStr)
+		}
+
+		rows = append(rows, row{
+			id:    id,
+			time:  tStr,
+			ref:   refStr,
+			dir:   dirStr,
+			title: s.Title,
+		})
+	}
+
+	var sb strings.Builder
+	for i, r := range rows {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("  ")
+		sb.WriteString(r.id)
+		sb.WriteString(strings.Repeat(" ", wID-len(r.id)+2))
+		sb.WriteString(r.time)
+		sb.WriteString(strings.Repeat(" ", wTime-len(r.time)+2))
+		sb.WriteString(r.ref)
+		sb.WriteString(strings.Repeat(" ", wRef-len(r.ref)+3))
+		sb.WriteString(r.dir)
+		if r.title != "" {
+			sb.WriteString(strings.Repeat(" ", wDir-len(r.dir)+3))
+			sb.WriteString(r.title)
+		}
+	}
+	if hasOpencode {
+		sb.WriteString("\n\nopencode: only this project's sessions are listed (opencode groups by git project).")
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func cmdSessions(args []string) error {
+	fs := flagSet("sessions")
+	maxFlag := fs.Int("max", 10, "maximum number of sessions to list")
+	hereFlag := fs.Bool("here", false, "only list sessions belonging to current working directory")
+	stop, err := parse(fs, args)
+	if stop {
+		return err
+	}
+	rest := fs.Args()
+
+	var filterAgent, filterProfile string
+	if len(rest) > 0 {
+		ref := rest[0]
+		if strings.Contains(ref, ":") {
+			parts := strings.SplitN(ref, ":", 2)
+			filterAgent = parts[0]
+			filterProfile = parts[1]
+		} else {
+			filterAgent = ref
+		}
+	}
+
+	cwd, _ := os.Getwd()
+	if cwd != "" {
+		cwd = filepath.Clean(cwd)
+	}
+
+	warn := func(err error) {
+		fmt.Fprintf(os.Stderr, "ap: warn: %v\n", err)
+	}
+
+	scanLimit := *maxFlag
+	if scanLimit < 50 {
+		scanLimit = 50
+	}
+	sessions := session.Scan(scanLimit, warn)
+
+	var filtered []session.Session
+	scannedOpencode := false
+
+	for _, s := range sessions {
+		if s.Agent == "opencode" {
+			scannedOpencode = true
+		}
+		if filterAgent != "" && s.Agent != filterAgent {
+			continue
+		}
+		if filterProfile != "" && s.Profile != filterProfile {
+			continue
+		}
+		if *hereFlag && cwd != "" {
+			if filepath.Clean(s.Dir) != cwd {
+				continue
+			}
+		}
+		filtered = append(filtered, s)
+	}
+
+	if *maxFlag > 0 && len(filtered) > *maxFlag {
+		filtered = filtered[:*maxFlag]
+	}
+
+	if len(filtered) == 0 {
+		fmt.Println("No sessions found.")
+		return nil
+	}
+
+	fmt.Print(renderSessions(filtered, scannedOpencode))
+	return nil
+}
+
+func cmdVersion(args []string) error {
 	fmt.Printf("ap %s (commit %s, built %s, %s/%s, %s)\n",
 		version, commit, date, runtime.GOOS, runtime.GOARCH, runtime.Version())
 	return nil
