@@ -82,8 +82,8 @@ func skipPaths(a agent.Agent) []string {
 	for _, st := range a.State {
 		skip = append(skip, filepath.Clean(st))
 	}
-	if a.Shim != nil {
-		skip = append(skip, filepath.Clean(a.Shim.Rel))
+	for _, s := range a.Shims {
+		skip = append(skip, filepath.Clean(s.Rel))
 	}
 	return skip
 }

@@ -104,22 +104,47 @@ type FirstRun struct {
 	Keys []string
 }
 
-// Shim describes an agent that has no config-directory variable of its own, so
-// isolating it means setting a variable other programs also read.
+// Shim describes an agent that has no private variable for some part of its
+// state, so isolating it means setting a variable other programs also read.
 //
-// The profile then carries a directory, Rel, that is safe to point that variable
-// at: it holds Entry (a link to the profile itself, which is what the agent
-// looks for) plus one passthrough link per entry of the real config base, so
-// every other program the agent spawns still resolves to its own real config.
-// profile.Shim builds it and re-asserts it on every run.
+// The profile then carries a directory, Rel, that is safe to point Env at: it
+// holds Entry (a link to the profile itself, which is what the agent looks for)
+// plus one passthrough link per entry of the real base, so every other program
+// the agent spawns still resolves to its own real directory. profile.Shim builds
+// it and re-asserts it on every run.
 //
-// Only reach for this when the agent genuinely has no private variable. Verify
-// by reading the code that computes its config path, not the documentation.
+// An agent may need more than one: opencode's config comes from XDG_CONFIG_HOME
+// and its sessions from XDG_DATA_HOME, and neither has a private alternative.
+//
+// Only reach for this when the agent genuinely has no private variable. Verify by
+// reading the code that computes the path, not the documentation.
 type Shim struct {
-	// Rel is the subdirectory of the profile that ConfigEnv points at.
+	// Env is the shared variable this shim makes safe to set.
+	Env string
+	// Rel is the subdirectory of the profile that Env points at. Unique per
+	// agent: two shims at one Rel would overwrite each other's links.
 	Rel string
 	// Entry is the name the agent looks for inside it, linked to the profile.
 	Entry string
+	// Fallback is the path under $HOME that Env resolves to when it is unset,
+	// e.g. ".config" or ".local/share".
+	Fallback string
+}
+
+// Base is the directory Env normally resolves to, read exactly the way a
+// freedesktop-following program reads it: Env when set, otherwise $HOME/Fallback.
+//
+// This must be evaluated against the environment ap inherited, before ap sets
+// anything, or the shim would end up pointing at itself.
+func (s Shim) Base() string {
+	if d := os.Getenv(s.Env); d != "" {
+		return d
+	}
+	h := home()
+	if h == "" {
+		return ""
+	}
+	return filepath.Join(h, s.Fallback)
 }
 
 // Agent is one supported CLI.
@@ -205,8 +230,9 @@ type Agent struct {
 	// Hardcoded here for now. These belong in a user config file, so cases like a hook
 	// script living somewhere unusual can be declared per machine.
 	CloneAllow []string
-	// Shim is non-nil only for an agent whose isolation needs a shared variable.
-	Shim *Shim
+	// Shims lists every shared variable this agent needs made safe. Empty for an
+	// agent with a private config variable, which is three of the four.
+	Shims []Shim
 	// Settings is the agent's settings file, relative to its config directory:
 	// the one file `ap create --only-settings` slices. Always also a CloneAllow
 	// entry, so a narrowed clone can never reach a path the unfiltered clone
@@ -229,27 +255,11 @@ func home() string {
 }
 
 // ConfigBase is the directory freedesktop-config-following programs resolve
-// their config root against, read exactly the way they read it: XDG_CONFIG_HOME
-// when set, otherwise ~/.config.
+// their config root against: XDG_CONFIG_HOME when set, otherwise ~/.config.
 //
-// The one definition, used by opencode's Config below and by
-// profile.ConfigBase — which delegates here rather than keeping its own copy,
-// since agent has no dependency on profile and can be the single source
-// without an import cycle. Before this was one function, opencode's Config
-// hardcoded ~/.config/opencode while profile.ConfigBase() (and
-// scripts/smoke.sh, independently, in shell) already honoured
-// XDG_CONFIG_HOME — a three-way disagreement that made `ap create --from
-// default` and `ap run opencode:default` silently target the wrong directory
-// on any machine that sets XDG_CONFIG_HOME.
+// Used by opencode's Config below and by profile.ConfigBase.
 func ConfigBase() string {
-	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
-		return d
-	}
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(h, ".config")
+	return Shim{Env: "XDG_CONFIG_HOME", Fallback: ".config"}.Base()
 }
 
 func registry() map[string]Agent {
@@ -377,7 +387,9 @@ func registry() map[string]Agent {
 			// safe for every other program in the process tree.
 			ConfigEnv: "XDG_CONFIG_HOME",
 			Mode:      Replace,
-			Shim:      &Shim{Rel: "xdg", Entry: "opencode"},
+			Shims: []Shim{
+				{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"},
+			},
 			// Never node_modules — 62 MB on the reference machine, and reinstalled
 			// by opencode itself.
 			CloneAllow:     []string{"opencode.json", "agents", "command", "skills"},

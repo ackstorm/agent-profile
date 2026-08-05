@@ -12,8 +12,9 @@ import (
 // ConfigDir is the value a.ConfigEnv is set to: the profile itself, or the shim
 // directory inside it for an agent that needs one.
 func ConfigDir(a agent.Agent, dir string) string {
-	if a.Shim != nil {
-		return filepath.Join(dir, a.Shim.Rel)
+	// TODO(task2/3): iterate
+	if len(a.Shims) > 0 {
+		return filepath.Join(dir, a.Shims[0].Rel)
 	}
 	return dir
 }

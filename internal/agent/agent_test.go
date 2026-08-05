@@ -174,10 +174,8 @@ func TestModes(t *testing.T) {
 	}
 }
 
-// A shim is only ever acceptable for an agent whose config variable is shared
-// with other programs. Setting a private variable through a shim would be a
-// pointless indirection, and an agent with a SHARED variable and NO shim would
-// redirect every process it spawns.
+// A shared variable may only be set through a shim; a private one must never
+// have the indirection. Now per-shim, because an agent may declare more than one.
 func TestOnlySharedConfigVarsAreShimmed(t *testing.T) {
 	shared := map[string]bool{
 		"XDG_CONFIG_HOME": true,
@@ -188,15 +186,28 @@ func TestOnlySharedConfigVarsAreShimmed(t *testing.T) {
 	}
 	for _, name := range Names() {
 		a, _ := Lookup(name)
-		switch {
-		case shared[a.ConfigEnv] && a.Shim == nil:
+		if shared[a.ConfigEnv] && len(a.Shims) == 0 {
 			t.Errorf("%s sets the shared variable %s with no shim: every process it spawns would be redirected into the profile",
 				name, a.ConfigEnv)
-		case !shared[a.ConfigEnv] && a.Shim != nil:
+		}
+		if !shared[a.ConfigEnv] && len(a.Shims) > 0 {
 			t.Errorf("%s has a private variable %s but also a shim: drop the indirection", name, a.ConfigEnv)
 		}
-		if a.Shim != nil && (a.Shim.Rel == "" || a.Shim.Entry == "") {
-			t.Errorf("%s has an incomplete shim spec %+v", name, *a.Shim)
+		seen := map[string]bool{}
+		for _, s := range a.Shims {
+			if s.Env == "" || s.Rel == "" || s.Entry == "" || s.Fallback == "" {
+				t.Errorf("%s has an incomplete shim spec %+v", name, s)
+			}
+			if !shared[s.Env] {
+				t.Errorf("%s shims %s, which is not a shared variable: a private one needs no shim", name, s.Env)
+			}
+			if seen[s.Rel] {
+				t.Errorf("%s has two shims at the same Rel %q: they would overwrite each other", name, s.Rel)
+			}
+			seen[s.Rel] = true
+			if s.Base() == "" {
+				t.Errorf("%s: shim %s cannot resolve its base directory", name, s.Env)
+			}
 		}
 	}
 }

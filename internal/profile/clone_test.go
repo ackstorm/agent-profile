@@ -353,7 +353,7 @@ func TestCloneNeverCopiesTheShimEvenIfAllowlisted(t *testing.T) {
 	a := agent.Agent{
 		Name:       "fake",
 		CloneAllow: []string{"opencode.json", "xdg"},
-		Shim:       &agent.Shim{Rel: "xdg", Entry: "opencode"},
+		Shims:      []agent.Shim{{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"}},
 	}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)

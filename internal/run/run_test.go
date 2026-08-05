@@ -148,11 +148,11 @@ func TestEnvSetsOnlyTheConfigVar(t *testing.T) {
 // profile root does not contain a directory called "opencode".
 func TestEnvPointsAShimmedAgentAtTheShimDir(t *testing.T) {
 	oc, _ := agent.Lookup("opencode")
-	if oc.Shim == nil {
+	if len(oc.Shims) == 0 {
 		t.Fatal("opencode has no shim spec; this test no longer describes it")
 	}
 	got := envMap(t, Env(oc, "/p/plan", nil))
-	want := filepath.Join("/p/plan", oc.Shim.Rel)
+	want := filepath.Join("/p/plan", oc.Shims[0].Rel)
 	if got[oc.ConfigEnv] != want {
 		t.Errorf("%s = %q, want %q", oc.ConfigEnv, got[oc.ConfigEnv], want)
 	}

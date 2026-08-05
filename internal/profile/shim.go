@@ -44,10 +44,11 @@ func ConfigBase() string {
 // Re-asserted on every run because ~/.config gains entries over time, and a
 // profile created last month must not hide a tool installed yesterday.
 func Shim(a agent.Agent, dir string) (shimDir string, foundReal []string, err error) {
-	if a.Shim == nil {
+	// TODO(task2/3): iterate
+	if len(a.Shims) == 0 {
 		return "", nil, nil
 	}
-	shimDir = filepath.Join(dir, a.Shim.Rel)
+	shimDir = filepath.Join(dir, a.Shims[0].Rel)
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
 		return "", nil, err
 	}
@@ -84,13 +85,14 @@ func Shim(a agent.Agent, dir string) (shimDir string, foundReal []string, err er
 // shimTargets maps each name in the shim to what it must point at: the agent's
 // own name to the profile, everything else in the real config base to itself.
 func shimTargets(a agent.Agent, dir, base string) (map[string]string, error) {
-	want := map[string]string{a.Shim.Entry: dir}
+	// TODO(task2/3): iterate
+	want := map[string]string{a.Shims[0].Entry: dir}
 	entries, err := os.ReadDir(base)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("cannot read %s: %w", base, err)
 	}
 	for _, e := range entries {
-		if e.Name() == a.Shim.Entry {
+		if e.Name() == a.Shims[0].Entry {
 			// The agent's own real config: deliberately NOT passed through. This
 			// single omission is the whole isolation.
 			continue

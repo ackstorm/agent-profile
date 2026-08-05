@@ -85,7 +85,7 @@ func TestShimIsolatesTheAgentAndPassesEverythingElseThrough(t *testing.T) {
 	}
 
 	// The agent's own entry: the profile, NOT the real config.
-	got, err := filepath.EvalSymlinks(filepath.Join(shimDir, a.Shim.Entry))
+	got, err := filepath.EvalSymlinks(filepath.Join(shimDir, a.Shims[0].Entry))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,10 +94,10 @@ func TestShimIsolatesTheAgentAndPassesEverythingElseThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got != want {
-		t.Errorf("%s resolves to %s, want the profile %s", a.Shim.Entry, got, want)
+		t.Errorf("%s resolves to %s, want the profile %s", a.Shims[0].Entry, got, want)
 	}
-	if real := filepath.Join(base, a.Shim.Entry); got == real {
-		t.Errorf("%s resolves to the real config %s: no isolation at all", a.Shim.Entry, real)
+	if real := filepath.Join(base, a.Shims[0].Entry); got == real {
+		t.Errorf("%s resolves to the real config %s: no isolation at all", a.Shims[0].Entry, real)
 	}
 
 	// Everything else: the real config, so the agent's subprocesses still work.
@@ -245,11 +245,11 @@ func TestShimDoesNotClobberARealAgentEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shimDir := filepath.Join(dir, a.Shim.Rel)
-	if err := os.MkdirAll(filepath.Join(shimDir, a.Shim.Entry), 0o700); err != nil {
+	shimDir := filepath.Join(dir, a.Shims[0].Rel)
+	if err := os.MkdirAll(filepath.Join(shimDir, a.Shims[0].Entry), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	marker := filepath.Join(shimDir, a.Shim.Entry, "keepme")
+	marker := filepath.Join(shimDir, a.Shims[0].Entry, "keepme")
 	if err := os.WriteFile(marker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestShimDoesNotClobberARealAgentEntry(t *testing.T) {
 	}
 	var reported bool
 	for _, n := range foundReal {
-		if n == a.Shim.Entry {
+		if n == a.Shims[0].Entry {
 			reported = true
 		}
 	}
@@ -278,7 +278,7 @@ func TestShimIsANoOpWithoutASpec(t *testing.T) {
 	fakeConfigBase(t, "git")
 	for _, name := range []string{"claude", "codex", "pi"} {
 		a := agentOrFail(t, name)
-		if a.Shim != nil {
+		if len(a.Shims) != 0 {
 			t.Fatalf("%s unexpectedly has a shim spec", name)
 		}
 		dir, err := Create(a, "nos")
