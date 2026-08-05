@@ -2032,3 +2032,24 @@ func TestOnlySettingsIsRepeatableNotCommaSeparated(t *testing.T) {
 		t.Errorf("repeatedFlag = %q, want the values verbatim", got)
 	}
 }
+
+// The warning names the base a real entry should be moved to. With two shims,
+// naming the config base for a data-shim entry sends the user to the wrong
+// directory.
+func TestShimWarningNamesTheMatchingBase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "dat"))
+
+	a, _ := agent.Lookup("opencode")
+	for _, tc := range []struct{ found, wantBase string }{
+		{filepath.Join("xdg", "git"), filepath.Join(home, "cfg")},
+		{filepath.Join("xdg-data", "fonts"), filepath.Join(home, "dat")},
+	} {
+		got := shimWarning(a, []string{tc.found})
+		if !strings.Contains(got, tc.wantBase) {
+			t.Errorf("warning for %q = %q, want it to name %q", tc.found, got, tc.wantBase)
+		}
+	}
+}

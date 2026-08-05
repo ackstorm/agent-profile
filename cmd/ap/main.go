@@ -1304,6 +1304,33 @@ func prepare(a agent.Agent, name string) (string, error) {
 	return dir, nil
 }
 
+// shimWarning reports entries a program wrote into a shim for real, each pointed
+// at the base directory it should be moved to. The base differs per shim, so the
+// entries are grouped by the Rel they came back under.
+func shimWarning(a agent.Agent, foundReal []string) string {
+	byRel := map[string][]string{}
+	for _, p := range foundReal {
+		rel, name, ok := strings.Cut(p, string(filepath.Separator))
+		if !ok {
+			rel, name = "", p
+		}
+		byRel[rel] = append(byRel[rel], name)
+	}
+	var b strings.Builder
+	for _, s := range a.Shims {
+		names := byRel[s.Rel]
+		if len(names) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b,
+			"ap: warning: real files inside the profile %s shim: %s\n"+
+				"    a program wrote there instead of following a passthrough link, so it is\n"+
+				"    invisible outside this profile. Move it to %s/ to share it.\n",
+			s.Env, strings.Join(names, " "), s.Base())
+	}
+	return b.String()
+}
+
 // shim builds or refreshes the config shim and reports anything a program wrote
 // into it for real, which would otherwise be invisible from outside the profile.
 func shim(a agent.Agent, dir string) error {
@@ -1311,12 +1338,8 @@ func shim(a agent.Agent, dir string) error {
 	if err != nil {
 		return err
 	}
-	if len(foundReal) > 0 {
-		fmt.Fprintf(os.Stderr,
-			"ap: warning: real config inside the profile shim: %s\n"+
-				"    a program wrote there instead of following a passthrough link, so it is\n"+
-				"    invisible outside this profile. Move it to %s/ to share it.\n",
-			strings.Join(foundReal, " "), profile.ConfigBase())
+	if msg := shimWarning(a, foundReal); msg != "" {
+		fmt.Fprint(os.Stderr, msg)
 	}
 	return nil
 }
