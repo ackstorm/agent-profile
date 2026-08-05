@@ -184,12 +184,18 @@ it and re-asserts it on every run.
 
 Rules that follow:
 
-- Never point a shared variable at a raw profile directory.
-  `TestOnlySharedConfigVarsAreShimmed` fails if an agent has one without a shim.
+- One variable per declared shim, and nothing else. Three agents have a private
+  variable and declare no shim. opencode declares two: XDG_CONFIG_HOME for its
+  config and XDG_DATA_HOME for its sessions, neither of which it has a private
+  alternative for.
+- `XDG_STATE_HOME`, `XDG_CACHE_HOME` and `HOME` are never redirected. opencode's
+  prompt history, selected model and locks stay shared, deliberately: a run was
+  measured never to write there, so isolating them is cost with no benefit.
+- Never point a shared variable at a raw profile directory, with or without a
+  shim. `TestOnlySharedConfigVarsAreShimmed` fails if an agent sets one without a
+  matching shim, and `TestEnvOnlySetsPathsInsideTheProfile` fails if any variable
+  lands outside the profile.
 - Never shim a private variable: pointless indirection, same test catches it.
-- `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` and `HOME` are never
-  redirected at all. That is what keeps sessions, logins and caches shared, which
-  is the entire point of the tool.
 - The passthrough is not optional. Without it this is the bug the old blanket ban
   existed to prevent.
 
@@ -198,6 +204,14 @@ re-litigate without new measurements: `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG` a
 `OPENCODE_CONFIG_CONTENT` are all additive; `OPENCODE_TEST_HOME` moves `home` but
 not `config`; there is no config-level switch. All 82 `OPENCODE_*` variables in
 the binary were enumerated.
+
+opencode keeps its session database (`opencode.db`) under `XDG_DATA_HOME/opencode`.
+`XDG_DATA_HOME` is shimmed for opencode to `<profile>/xdg-data` so profiles get
+isolated sessions. The three credentials under data (`auth.json`, `account.json`,
+`mcp-auth.json`) are linked back as `Shared`. Both shims point `Entry` at the
+profile itself (`<profile>/xdg` and `<profile>/xdg-data`), resolving config and
+data into one directory with no name collisions (`opencode.jsonc` vs `opencode.db`).
+Existing sessions in the global db are not migrated.
 
 ## The registry describes other people's software
 
