@@ -120,6 +120,18 @@ func TestResumeRefusesAMissingDirectory(t *testing.T) {
 	}
 }
 
+// Off a terminal ap never asks and never resumes. `ap resume` in a script would
+// otherwise block forever, and dev.sh runs with -it, so an unguarded prompt hangs
+// make sandbox itself.
+func TestResumeNeverPromptsOffATerminal(t *testing.T) {
+	r, w, _ := os.Pipe()
+	_, _ = w.WriteString("1\n")
+	_ = w.Close()
+	if got := askToResume(r, []session.Session{{ID: "a"}, {ID: "b"}}); got != -1 {
+		t.Errorf("picked %d from a pipe: off a terminal it must not choose", got)
+	}
+}
+
 func TestDispatchRejectsBadReferences(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	for _, args := range [][]string{

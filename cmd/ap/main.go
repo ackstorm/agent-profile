@@ -469,6 +469,59 @@ func findSession(id string) (session.Session, error) {
 	return session.Session{}, fmt.Errorf("no session found matching %q", id)
 }
 
+// askToResume prints the list and reads one number. The index is meaningful only
+// inside this call: the list was produced a few milliseconds earlier by this same
+// command, so nothing can have shifted under it. Returns -1 for "do not resume".
+//
+// os.Stdin.Stat with ModeCharDevice, not x/term — this repository is stdlib only.
+func askToResume(in *os.File, list []session.Session) int {
+	if in == nil {
+		return -1
+	}
+	fi, err := in.Stat()
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return -1
+	}
+
+	for i, s := range list {
+		numStr := fmt.Sprintf("[%d]", i+1)
+		id := s.ID
+		if len(id) >= 8 {
+			id = id[:8]
+		}
+		tStr := fmtTime(s.Updated)
+		refStr := s.Agent + ":" + s.Profile
+		dirStr := tilde(s.Dir)
+		if s.Dir != "" {
+			if _, err := os.Stat(s.Dir); err != nil {
+				dirStr += " (missing)"
+			}
+		}
+		title := s.Title
+		fmt.Printf("%4s  %s  %s  %-16s  %s", numStr, id, tStr, refStr, dirStr)
+		if title != "" {
+			fmt.Printf("  %s", title)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("\nSelect a session to resume (1-%d, or Enter to cancel): ", len(list))
+	reader := bufio.NewReader(in)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return -1
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return -1
+	}
+	var n int
+	if _, err := fmt.Sscanf(line, "%d", &n); err != nil || n < 1 || n > len(list) {
+		return -1
+	}
+	return n - 1
+}
+
 func cmdResume(args []string) error {
 	fs := flagSet("resume")
 	stop, err := parse(fs, args)
@@ -476,15 +529,32 @@ func cmdResume(args []string) error {
 		return err
 	}
 	rest := fs.Args()
-	if len(rest) == 0 {
-		return fmt.Errorf("usage: ap resume <id> [args...]")
-	}
-	id := rest[0]
-	extra := rest[1:]
 
-	s, err := findSession(id)
-	if err != nil {
-		return err
+	var s session.Session
+	var extra []string
+
+	if len(rest) == 0 {
+		warn := func(err error) {
+			fmt.Fprintf(os.Stderr, "ap: warn: %v\n", err)
+		}
+		sessions := session.Scan(10, warn)
+		if len(sessions) == 0 {
+			fmt.Println("No sessions found.")
+			return nil
+		}
+		idx := askToResume(os.Stdin, sessions)
+		if idx < 0 {
+			return nil
+		}
+		s = sessions[idx]
+	} else {
+		id := rest[0]
+		extra = rest[1:]
+		var err error
+		s, err = findSession(id)
+		if err != nil {
+			return err
+		}
 	}
 
 	a, ok := agent.Lookup(s.Agent)
