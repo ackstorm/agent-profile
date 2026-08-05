@@ -44,14 +44,19 @@ func TestOpencodeConfigHonoursXDGConfigHome(t *testing.T) {
 }
 
 // Config must agree with what Shared already claims about the real home, or the two
-// would describe different machines.
+// would describe different machines. For opencode, credentials live under dataBase()
+// rather than Config.
 func TestConfigAgreesWithSharedSources(t *testing.T) {
 	for _, name := range Names() {
 		a, _ := Lookup(name)
 		for _, s := range a.Shared {
-			if !strings.HasPrefix(s.From, a.Config+string(os.PathSeparator)) {
-				t.Errorf("%s: shared %q lives at %q, outside Config %q", name, s.Rel, s.From, a.Config)
+			if strings.HasPrefix(s.From, a.Config+string(os.PathSeparator)) {
+				continue
 			}
+			if strings.HasPrefix(s.From, filepath.Join(dataBase(), name)+string(os.PathSeparator)) {
+				continue
+			}
+			t.Errorf("%s: shared %q lives at %q, outside Config %q and data base", name, s.Rel, s.From, a.Config)
 		}
 	}
 }
@@ -212,12 +217,23 @@ func TestOnlySharedConfigVarsAreShimmed(t *testing.T) {
 	}
 }
 
-// A Replace-mode agent forks auth and history unless we link them back.
-// An Additive one keeps its data outside the config root, so it needs nothing.
+// Every Replace-mode agent forks auth unless we link it back. opencode's
+// credentials live under XDG_DATA_HOME, which it now shims, so it needs shares
+// exactly like the others — it did not before, when data was global.
 func TestSharedEntries(t *testing.T) {
 	oc, _ := Lookup("opencode")
-	if len(oc.Shared) != 0 {
-		t.Errorf("opencode Shared = %v, want empty (data dir is already separate)", oc.Shared)
+	want := map[string]bool{"auth.json": true, "account.json": true, "mcp-auth.json": true}
+	got := map[string]bool{}
+	for _, s := range oc.Shared {
+		got[s.Rel] = true
+		if !filepath.IsAbs(s.From) {
+			t.Errorf("opencode share %s: From %q is not absolute", s.Rel, s.From)
+		}
+	}
+	for rel := range want {
+		if !got[rel] {
+			t.Errorf("opencode does not share %s: profiles would start logged out", rel)
+		}
 	}
 	for _, name := range []string{"claude", "codex", "pi"} {
 		a, _ := Lookup(name)
@@ -235,7 +251,7 @@ func TestEveryAgentSharesOnlyItsCredential(t *testing.T) {
 		"claude":   {".credentials.json"},
 		"codex":    {"auth.json"},
 		"pi":       {"auth.json"},
-		"opencode": nil, // its auth lives under XDG_DATA_HOME, which ap never redirects
+		"opencode": {"account.json", "auth.json", "mcp-auth.json"},
 	}
 	for _, name := range Names() {
 		a, _ := Lookup(name)

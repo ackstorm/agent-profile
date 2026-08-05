@@ -262,6 +262,12 @@ func ConfigBase() string {
 	return Shim{Env: "XDG_CONFIG_HOME", Fallback: ".config"}.Base()
 }
 
+// dataBase is the directory freedesktop-following programs resolve their data
+// root against: XDG_DATA_HOME when set, otherwise ~/.local/share.
+func dataBase() string {
+	return Shim{Env: "XDG_DATA_HOME", Fallback: ".local/share"}.Base()
+}
+
 func registry() map[string]Agent {
 	h := home()
 	// Every agent shares exactly one thing: its credential. A profile is a separate
@@ -412,7 +418,17 @@ func registry() map[string]Agent {
 			// avoid doing to every other program in the tree. So opencode cannot honour
 			// the one-credential rule: its sessions stay global across profiles. Known
 			// asymmetry, documented in the README, not worth a second shim.
-			Shared: nil,
+			// opencode's credentials live under the data directory, which is now
+			// shimmed, so they must be linked back or every profile starts logged
+			// out. Measured: a run through these symlinks left all three files
+			// byte-identical — opencode does not do claude's temp-file-plus-rename,
+			// so none of this needs the Promote/orphan path Link has for
+			// .credentials.json. If that ever changes, the machinery is already there.
+			Shared: []Share{
+				{Rel: "auth.json", From: filepath.Join(dataBase(), "opencode", "auth.json")},
+				{Rel: "account.json", From: filepath.Join(dataBase(), "opencode", "account.json")},
+				{Rel: "mcp-auth.json", From: filepath.Join(dataBase(), "opencode", "mcp-auth.json")},
+			},
 			// State is nil for the same reason: its sessions are outside the profile
 			// entirely, so a clone cannot carry them.
 			Setup: "ap run %s providers   (a custom provider means editing opencode.json inside the profile)",
