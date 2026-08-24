@@ -61,8 +61,24 @@ func TestRunCommandReportsAFailingCommand(t *testing.T) {
 // its questions on, and in a script a blocked read would sit there until the
 // timeout ten minutes later.
 func TestRunCommandGivesTheCommandNoStdin(t *testing.T) {
+	// Real bytes are put on ap's OWN stdin first. Without them the check is
+	// vacuous — under `go test` stdin is normally already at EOF, so a command
+	// that did inherit it would read nothing and look exactly like one that was
+	// given none. Found by mutation: c.Stdin = os.Stdin left this test green.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_, _ = w.WriteString("leaked\n")
+		_ = w.Close()
+	}()
+	old := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = old; _ = r.Close() }()
+
 	out := filepath.Join(t.TempDir(), "in")
-	if err := runCommand("cat > "+out+" 2>/dev/null; echo done >> "+out, os.Environ()); err != nil {
+	if err = runCommand("cat > "+out+" 2>/dev/null; echo done >> "+out, os.Environ()); err != nil {
 		t.Fatalf("runCommand: %v", err)
 	}
 	b, _ := os.ReadFile(out)
@@ -431,16 +447,24 @@ func TestSyncDoesNotRunInstallOffATerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// "y", not "1": an answer that means NO makes this vacuous, because the
+	// run then stops for the wrong reason and passes with the terminal check
+	// removed. Found by mutation — the guard was replaced with `if false` and
+	// this test stayed green.
 	go func() {
-		_, _ = w.WriteString("1\ny\n")
+		_, _ = w.WriteString("y\ny\n")
 		_ = w.Close()
 	}()
 	old := os.Stdin
 	os.Stdin = r
 	defer func() { os.Stdin = old; _ = r.Close() }()
 
-	if err := dispatch([]string{"sync", dir}); err == nil {
+	err = dispatch([]string{"sync", dir})
+	if err == nil {
 		t.Fatal("sync off a pipe = nil error, want a refusal naming --yes")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("error = %q, want the refusal to name --yes", err)
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("an install ran with an answer read off a pipe; a pipe is not consent")

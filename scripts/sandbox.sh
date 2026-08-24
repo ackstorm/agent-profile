@@ -308,11 +308,12 @@ else
     bad sync "ap sync --dry-run failed"
 fi
 
-# A literal "1" down a PIPE, never </dev/null: an empty answer also means no, so
-# a check written that way could not fail. dev.sh passes -it, so this is the only
-# form that proves a pipe is not consent.
+# A literal "y" down a PIPE, never </dev/null and never a "1": an empty answer
+# and a "1" both mean NO, so a check written either of those ways stops for the
+# wrong reason and cannot fail. Only a YES down a pipe proves that ap refused
+# because there was no terminal, rather than because the answer was no.
 rm -f "$RAN"
-if echo 1 | "$AP" sync "$MAN" >/dev/null 2>&1; then
+if echo y | "$AP" sync "$MAN" >/dev/null 2>&1; then
     bad sync "ap sync ran commands with an answer read off a pipe"
 elif [ -e "$RAN" ]; then
     bad sync "a command ran despite the refusal"
