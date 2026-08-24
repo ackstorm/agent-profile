@@ -6,11 +6,50 @@ to this file so every agent reads the same thing.
 ## What this is
 
 `ap` launches `claude`, `codex`, `opencode` or `pi` with a named per-agent
-profile. Pure exec: resolve a profile directory, set **one** environment
-variable, `syscall.Exec` the real binary. Sessions, credentials and workspace
-trust are symlinked back into the user's real home so profiles never fork them.
+profile. Sessions, credentials and workspace trust are symlinked back into the
+user's real home, so profiles never fork them.
 
 Go 1.25, **standard library only**. Unix only (`//go:build unix`).
+
+```
+ap run claude:plan:review --effort xhigh
+ │
+ ├─ dispatch          cmd/ap/main.go       run parses no flags after the ref
+ ├─ ParseVariantRef   internal/profile/    agent + profile + variant,
+ │                                         every name through ValidName
+ ├─ prepare
+ │    ├─ Exists?      missing profile names the create command
+ │    ├─ :default     the real config: nothing linked, no shim, no override
+ │    ├─ Link         internal/profile/share.go
+ │    │                 shares → symlinks into the real home, re-asserted
+ │    │                 every run; a real file found there is healed, and a
+ │    │                 newer credential may be promoted (a human decides)
+ │    └─ Shim         internal/profile/shim.go
+ │                      <profile>/xdg + one passthrough link per entry of
+ │                      the real config base (opencode also gets xdg-data)
+ ├─ runArgs           internal/profile/variant.go    {} substitution
+ └─ run.Exec          internal/run/
+      ├─ Env            exactly ONE config variable, pointing inside the
+      │                 profile; inherited shim vars stripped
+      └─ syscall.Exec   the agent owns the TTY from here
+
+profile dir   ~/.local/share/agent-profile/profiles/<agent>/<profile>
+the registry  internal/agent/agent.go — four external CLIs, every field
+              verified by running the binary, never read from docs
+```
+
+## MANDATORY reading
+
+Read the file before touching the code. Not suggestions.
+
+| Working on…                                                   | MUST read first                  |
+|---------------------------------------------------------------|----------------------------------|
+| `Dockerfile.smoke`, `Dockerfile.devtools`, `scripts/smoke.sh`   | `docs/references/SMOKE.md`       |
+| `internal/profile/share.go`, share conflicts, promotion         | `docs/references/CREDENTIALS.md` |
+| "the profile behaves oddly", `Agent.FirstRun`, onboarding flags | `docs/references/CLAUDE-JSON.md` |
+
+Everything else in this file is a standing rule: it applies before you know
+which file you are about to touch.
 
 ## Never run the toolchain on the host
 
@@ -33,122 +72,44 @@ means one thing everywhere.
 ## Three images, and only one of them pins anything
 
 `Dockerfile.devtools` pins every tool, because `make verify` has to mean the same
-thing on every machine. `Dockerfile.smoke` installs the four agents from npm and
-pins **nothing**, on purpose: smoke exists to catch the day an agent changes what
-it does with the variable ap hands it, and a pinned agent freezes the very thing
-under observation. Do not "stabilise" it with versions.
+thing on every machine. `Dockerfile.smoke` pins **nothing**, on purpose: smoke
+exists to catch the day an agent changes what it does with the variable ap hands
+it, and a pinned agent freezes the very thing under observation. Do not
+"stabilise" it with versions.
 
-`make smoke` runs there now, not on the host. Two things follow:
+`make smoke` runs there, not on the host, against a seeded home it builds and
+throws away. A missing agent is a broken image and a red run, never a skip.
 
-- Do not reintroduce a `command -v <agent>` guard as a reason to skip on the
-  host. The agents are in the image; if one is missing, that is a broken image
-  and a red run, not a skip.
-- The seeded home is load-bearing. Every "shared state survived" assertion is
-  vacuous against an empty one, and three checks were caught passing that way:
-  a `[user]` git section with no keys made the shim passthrough compare 0 against
-  0, and the credential and transcript assertions had nothing to lose. When you
-  add a check, seed what it needs to be able to fail.
+**MUST read `docs/references/SMOKE.md`** before editing either image or
+`scripts/smoke.sh`: why the seeded home is load-bearing, the checks caught
+passing vacuously, and the two orderings that are.
 
-Both credentials in the seed are synthesised, from the **field names** of a real
-one and never a value. Neither needs to be accepted, because neither check is
-about acceptance: what is asserted is that the profile REACHED the file through
-ap's symlink. claude distinguishes the two cases itself — "Not logged in ·
-Please run /login" when it cannot get to the credential, "Failed to
-authenticate" when it read one and the token was rejected. Only the first is
-ap's business. With `ANTHROPIC_API_KEY` set claude does not open the credential
-at all, so that check skips rather than passing with the link severed.
-
-Two orderings there are load-bearing, and both were found by reverting a guard:
-
-- The symlink assertion runs **before** the agent does. Given a credential it
-  cannot refresh, claude replaces the file with a real one of its own — which is
-  the exact reason `Link` re-asserts the symlink on every run. Asserted
-  afterwards, it goes red because claude did its job, not because ap failed.
-  That ordering is also why smoke could never have caught the bug below: the one
-  thing it does not observe is the state claude leaves behind.
-- The authentication message goes to **stdout**, never to `--debug-file`. This
-  grepped the debug log for it and therefore could not fail; measured with the
-  link severed, it stayed green.
-
-codex's equivalent does work, and needs no key: `codex login status` reads
-`auth.json` and masks what it finds without validating it, so the seed
-synthesises one and the profile can still only report "logged in" by reaching
-that file through the link ap made. Whether the token would work is OpenAI's
-business, not ap's. It briefly used `printenv OPENAI_API_KEY | codex login
---with-api-key`, which also works and is worth knowing — `--api-key` was removed
-upstream — but demanding a secret for something a literal could do is how a gate
-ends up unrunnable in CI.
-
-That check was also **vacuous for as long as it existed**, on the host too:
-`grep -qi "logged in"` matches "Not logged in". The mutation that found it —
-`Link` skipping codex's `Shared` entry, so the profile has no `auth.json` — left
-it green. The pattern is anchored now. When you write a check whose negative
-answer is the positive one with a word in front, anchor it.
-
-## A share the agent overwrote is healed, not refused
+## Share conflicts are healed, and the user picks the survivor
 
 `Link` used to abort on finding a real file where a share's symlink belongs.
-That was wrong, and it was measured wrong on this machine: two of three claude
-profiles held a 74 KB regular file at `.credentials.json`, differing from the
-shared one in exactly the four `claudeAiOauth` leaves out of 796 — claude's own
-temp-file-plus-rename, during ordinary use. `ap run` on those profiles was dead
-until someone moved the file by hand, which is what the error text asked for.
+That was measured wrong on this machine — claude's own temp-file-plus-rename
+replaces the symlink during ordinary use, and `ap run` on those profiles was
+dead until someone moved the file by hand.
 
-It now does that itself: rename to `<rel>.ap-orphan` through the same `os.Root`,
-relink, and say so — `rc.warn` from `create`, stderr from `run`, one wording in
-`orphanWarning`. Renamed and not removed because it is a credential and may hold
-the newer of the two tokens; both halves are mutation-tested by
-`TestLinkMovesRealDataAsideAndRelinks` (restore the refusal and it fails; heal by
-`RemoveAll` and it fails). A second overwrite overwrites the first orphan, which
-is the point — of two stale credentials the older one is the one worth losing.
+Two rules came out of that, and neither may be weakened:
 
-## …but which of the two survives is the user's call, not `Link`'s
+- **A real file is healed, not refused.** Rename to `<rel>.ap-orphan` through
+  the same `os.Root`, relink, and say so. Renamed and not removed: it is a
+  credential and may hold the newer token.
+- **Which credential survives is the user's call, not `Link`'s.** `Link` takes
+  a `resolve func(Conflict) Resolution` and asks. A nil resolver means `Orphan`;
+  identical files are not a conflict; off a terminal ap never asks and never
+  promotes; a symlink at the shared path is refused, not replaced. `Promote`
+  always keeps what it replaced at `<shared>.ap-previous` — that backup is the
+  only way back, and is not optional.
 
-Healing alone was still wrong, because "the older one is the one worth losing"
-was an assumption `Link` never checked. The shared credential is the one it
-always kept, and **nothing is able to update it from inside a profile**: claude's
-rename replaces the symlink, so a refresh or a `/login` performed in a profile
-lands in the profile and the shared file keeps the old token. Measured here,
-`claudeAiOauth` carries a `refreshTokenExpiresAt` about 29 days out that only a
-refresh moves forward. So a shared credential nothing may write eventually
-expires outright, and from then on every profile asks for a login it has nowhere
-to put — the loop the healing was supposed to end.
-
-So `Link` now takes a `resolve func(Conflict) Resolution` and asks. `Orphan` is
-what it always did; `Promote` copies the profile's file over the shared one,
-keeping what it replaced at `<shared>.ap-previous`, and then orphans and relinks
-exactly as before. Four rules hold it together, each mutation-tested:
-
-- **A nil resolver means `Orphan`.** `ap create` passes nil. Promotion is a
-  decision and silence is not one (`TestLinkWithNoResolverNeverTouchesTheSharedPath`).
-- **Identical files are not a conflict** and `resolve` never hears about them.
-  claude rewrites the credential whether or not the tokens changed, and a prompt
-  whose two answers produce the same bytes teaches people to dismiss the prompt
-  that matters (`TestLinkDoesNotAskAboutAnIdenticalFile`).
-- **Off a terminal, ap never asks and never promotes.** `askToPromote` checks
-  `os.Stdin.Stat` for `ModeCharDevice` — not `x/term`, this is stdlib only. The
-  sandbox check feeds a literal `1` down a pipe and asserts it is ignored;
-  written with `</dev/null` instead it was vacuous, because an empty answer also
-  means keep. `dev.sh` passes `-it`, so an unguarded prompt would also hang
-  `make sandbox` itself, and `echo … | ap run claude:x -p` puts the agent's own
-  prompt on stdin, which ap must not eat.
-- **A symlink at the shared path is refused, not replaced.** That is somebody's
-  dotfile manager: following it writes a credential somewhere ap was never
-  pointed at, replacing it strands the file they version. The refusal happens
-  before anything is moved, so the run fails with the profile untouched and the
-  same choice comes back next time (`TestPromoteRefusesASymlinkedSharedPath`).
-
-The backup is not optional. Promotion is the only thing in this program that
-writes outside a profile, and ap cannot tell whose account either credential
-belongs to — the identity lives in `.claude.json`, which is deliberately not
-shared. A `/login` with a different account inside a profile therefore *can*
-become the machine-wide login; `.ap-previous` is the only way back. Both writes
-go through an `os.Root` on the shared file's own directory, which is defence in
-depth rather than the tested guard: with the refusal in place nothing reaches it
-holding a symlink.
-
-Do not widen this into ap syncing credentials on its own. It moves one file, once,
+Promotion is the only thing in this program that writes outside a profile. Do
+not widen it into ap syncing credentials on its own: it moves one file, once,
 because a human at a terminal said so.
+
+**MUST read `docs/references/CREDENTIALS.md`** before editing
+`internal/profile/share.go` or anything that resolves a share conflict. Every
+rule above is mutation-tested, and the file names the test for each.
 
 ## Three tests that must never be deleted or weakened
 
@@ -228,28 +189,12 @@ XDG_CONFIG_HOME=/tmp/shim opencode debug paths   # config must be /tmp/shim/open
 CLAUDE_CONFIG_DIR=/tmp/x claude -p --debug-file /tmp/x.log "ok"
 ```
 
-When `scripts/smoke.sh` fails, the registry row is usually what is wrong. But
-check whether the *check* is lying first — two of them originally were:
-
-- `codex doctor` pretty-prints paths, collapsing `$HOME` to `~` and eliding the
-  middle, so grepping a full path never matches.
-- `opencode debug config` emits ~730 KB but exits without waiting for the pipe to
-  drain, losing everything past 64 KiB. Capture to a file, never a pipe.
-- `AP=${AP:-./ap}` was relative, and the plugin block runs its agent calls from a
-  neutral empty directory, so `./ap` resolved to nothing there and the commands
-  never ran. Six checks failed, each blaming what it was testing — one of them
-  literally asked "did the cwd leak in?", which was the opposite of the truth.
-  `AP` is absolute now, and setup commands go through `setup()`, which silences
-  output but **checks the exit status**. Silencing both is what made a failure to
-  run indistinguishable from a failure to pass.
-
-A third failure mode, worse than a lying check: a check that is honest but not
-deterministic. `clone` asserted that a cloned plugin declaration materialises at
-session start; that is claude's asynchronous background work, and it took 3 starts
-once and 5 the next before not happening at all. It is a `warn` now, not a `bad` —
-see the comment there for the measurement. Before adding a check, ask what it
-would take to make it go red when nothing is wrong; a smoke run that is red for
-reasons nobody controls teaches people to ignore red.
+When `scripts/smoke.sh` fails, the registry row is usually what is wrong — but
+check whether the *check* is lying first, because three of them were: two
+grepped output that could never match, and one asserted claude's asynchronous
+background work and went red for reasons nobody controls. Before adding a check,
+ask what it would take to make it go red when nothing is wrong. The three
+write-ups are in `docs/references/SMOKE.md`.
 
 ## Guards get mutation-tested, not just green tests
 
@@ -319,51 +264,15 @@ no dependency beyond curl, tar and sha256sum/shasum.
 Claude Code keeps far more in it than its name suggests: onboarding flags,
 per-project trust, user-scope MCP servers, UI preferences, cached feature flags,
 prompt history. Before treating "the profile behaves oddly" as an ap bug, check
-whether the behaviour is driven by a key in that file. Real example:
-`defaultToAgentsView` makes a profile open in the agents view, where a short
-message answers "Too short — describe the task" — which reads like a broken
-profile and is just an inherited UI preference.
+whether a key in that file drives it — then run the bare agent, which has
+settled more than one such report.
 
-It was shared, by symlink, until `57f545f`. It is not any more, because
-user-scope MCP servers live in it and sharing it made a per-profile MCP server
-impossible. Do not link it back.
+It is **not** shared, since `57f545f`: user-scope MCP servers live in it and
+sharing it made a per-profile MCP server impossible. Do not link it back, and do
+not sync it per key — that would fight the agent on every write. `Agent.FirstRun`
+is not that and must not grow into it.
 
-Do not sync it per key either. Rewriting a file the agent owns would fight it on
-every write. `Agent.FirstRun` is not that and must not grow into it: it copies
-an allowlist of keys **once, at create, into a file the profile does not have
-yet**, `O_EXCL` so it can never rewrite one, and never looks at it again. It
-exists because sharing the credential makes a profile logged in but not
-started — measured on claude v2.1.220, a credential-only profile opens on the
-theme picker, and `hasCompletedOnboarding` alone is what gets past it.
-`settings.json`, empty or carrying a theme, changes nothing.
-
-Two things that measurement also settles, so do not re-derive them:
-
-- `claude -p` never shows the wizard, which is why a credential-only profile
-  looked complete when it was verified that way. Verify interactive behaviour
-  interactively — `CLAUDE_CONFIG_DIR=<dir> timeout 25 script -qec claude /dev/null`
-  under a pty, then strip the escape sequences before grepping, because they land
-  mid-word and a naive `grep "text style"` finds nothing.
-- Outside a profile claude reads `~/.claude.json`; inside one it reads
-  `$CLAUDE_CONFIG_DIR/.claude.json`. Different directories, same base name.
-
-`hasTrustDialogAccepted` is deliberately **not** seeded. It lives under
-`projects.<path>` alongside that project's prompt history, so there is no way to
-carry it without carrying history, and one trust prompt per profile per project
-is the honest answer for a separate environment anyway.
-
-Do not add profile-level overrides for these keys either. `defaultToAgentsView`
-was measured: Claude Code reads it only from `.claude.json`, so the same key in a
-profile's `settings.json` has no effect, and the only per-profile lever is
-`disableAgentView`, which removes background agents entirely rather than just
-choosing a startup view. Before believing a report that a profile behaves
-differently from a bare agent, run the bare agent — that one turned out to behave
-identically, and the profile was never involved.
-
-Claude Code also gates behaviour on remote feature flags cached in that same file
-under `cachedGrowthBookFeatures`, so which settings rows are even writable can
-change without any local change. Read the flag rather than inferring it from a
-symptom: reading one wrong produced two contradictory diagnoses in a row here.
+**MUST read `docs/references/CLAUDE-JSON.md`** before acting on any of this.
 
 ## Anything that turns user input into a path must call `profile.ValidName`
 
