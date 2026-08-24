@@ -272,6 +272,112 @@ if quiet "$AP" create claude:sbxrun; then
     else
         bad variant "could not store the placeholder variant"
     fi
+# --- sync -------------------------------------------------------------------
+#
+# Every assertion here is ap's own side: what it refuses, what it creates, what
+# environment a manifest's command sees, and what argv a synced variant produces.
+# None of it needs a real agent, which is why it lives here and not in smoke.sh.
+MAN="$SANDBOX/manifests"
+rm -rf "$MAN" && mkdir -p "$MAN"
+RAN="$SANDBOX/ran"
+cat >"$MAN/execute.yaml" <<YAML
+version: 1
+name: execute
+bootstrap:
+  - printf 'boot:%s|%s\n' "\${CLAUDE_CONFIG_DIR:-none}" "\$(ls -A "\$HOME/.local/share/agent-profile/profiles/claude" 2>/dev/null | grep -c '^execute\$')" >> $RAN
+platforms:
+  claude:
+    install:
+      - printf 'install:%s\n' "\${CLAUDE_CONFIG_DIR:-none}" >> $RAN
+    variants:
+      execute-plan:
+        args: --effort=xhigh "/plan:run {}"
+YAML
+
+# --dry-run changes nothing at all: no profile, no variant, no command.
+rm -f "$RAN"
+if quiet "$AP" sync "$MAN" --dry-run; then
+    if [ -e "$RAN" ]; then
+        bad sync "--dry-run ran a command"
+    elif [ -d "$HOME/.local/share/agent-profile/profiles/claude/execute" ]; then
+        bad sync "--dry-run created a profile"
+    else
+        pass sync "--dry-run changed nothing"
+    fi
+else
+    bad sync "ap sync --dry-run failed"
+fi
+
+# A literal "1" down a PIPE, never </dev/null: an empty answer also means no, so
+# a check written that way could not fail. dev.sh passes -it, so this is the only
+# form that proves a pipe is not consent.
+rm -f "$RAN"
+if echo 1 | "$AP" sync "$MAN" >/dev/null 2>&1; then
+    bad sync "ap sync ran commands with an answer read off a pipe"
+elif [ -e "$RAN" ]; then
+    bad sync "a command ran despite the refusal"
+else
+    pass sync "a pipe is not consent"
+fi
+
+# The real run: bootstrap first with no agent variable and no profile yet, then
+# the install inside the profile.
+rm -f "$RAN"
+if quiet "$AP" sync "$MAN" --yes; then
+    boot=$(grep '^boot:' "$RAN" 2>/dev/null || true)
+    inst=$(grep '^install:' "$RAN" 2>/dev/null || true)
+    pdir="$HOME/.local/share/agent-profile/profiles/claude/execute"
+    if [ -z "$boot" ] || [ -z "$inst" ]; then
+        bad sync "a command did not run: boot=$boot inst=$inst"
+    elif [ "$boot" != "boot:none|0" ]; then
+        # The profile root is NOT empty here — the checks above this one made
+        # profiles of their own in the same fake home — so what is asserted is
+        # the manifest's OWN profile: bootstrap is step 8a and claude:execute
+        # does not exist yet when it runs.
+        bad sync "bootstrap saw an agent variable, or its profile already existed: $boot"
+    elif [ "$inst" != "install:$pdir" ]; then
+        bad sync "install did not see its profile: $inst"
+    elif [ ! -d "$pdir" ]; then
+        bad sync "the profile was not created"
+    else
+        pass sync "bootstrap ran clean, install ran in the profile"
+    fi
+else
+    bad sync "ap sync --yes failed"
+fi
+
+# The argv property, asserted on arg:[…] and never on argv:. The stub's "$*"
+# joins with a space, so a check written against that line cannot tell one
+# argument from two — which is the entire property {} exists to produce.
+out=$("$AP" run claude:execute:execute-plan 'fix the parser' 2>&1 || true)
+if ! printf '%s' "$out" | grep -q 'arg:\[--effort=xhigh\]'; then
+    bad sync "the variant's own argument is missing: $out"
+elif ! printf '%s' "$out" | grep -qF 'arg:[/plan:run fix the parser]'; then
+    bad sync "args was tokenized after substitution, or not at all: $out"
+elif printf '%s' "$out" | grep -qF 'arg:[fix]'; then
+    bad sync "the caller's argument was split across argv elements: $out"
+else
+    pass sync "a synced variant tokenizes before it substitutes"
+fi
+
+# name: default has its own gate, and --yes does not reach it.
+cat >"$MAN/base.yaml" <<YAML
+version: 1
+name: default
+platforms:
+  claude:
+    install:
+      - touch "\$HOME/.claude/SYNC-REACHED-THE-REAL-HOME"
+YAML
+rm -f "$MAN/execute.yaml"
+if "$AP" sync "$MAN" --yes >/dev/null 2>&1; then
+    bad sync "ap sync --yes ran a name: default manifest"
+elif [ -e "$HOME/.claude/SYNC-REACHED-THE-REAL-HOME" ]; then
+    bad sync "--yes alone wrote into the agent's real configuration"
+else
+    pass sync "--yes does not cover name: default"
+fi
+
     # An agent that rewrites its credential with temp-file-plus-rename leaves a
     # real file where ap's symlink was. Measured on two real claude profiles, so
     # this is reproduction, not hypothesis. `ap run` must heal it and keep going:
