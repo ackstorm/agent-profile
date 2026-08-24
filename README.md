@@ -478,6 +478,10 @@ cannot tell which account either credential belongs to. Anything other than
 `1` keeps the shared one, and a run with no terminal — a script, CI, a pipe —
 is never asked and never promotes.
 
+Why it works this way, and the measurement behind each of those rules, is in
+[`docs/references/CREDENTIALS.md`](docs/references/CREDENTIALS.md) — required
+reading before changing `internal/profile/share.go`.
+
 **History is not shared, and `--from` never copies it either** — `projects/` for
 claude, `sessions/` and `history.jsonl` for codex, `sessions/` for pi. A `plan`
 session resumed inside an `exec` profile would replay a transcript full of tool
@@ -688,18 +692,11 @@ So the only key that buys anything buys a `warn`, and CI needs no secret. Both
 synthesised credentials were built from the **field names** of a real one, never
 a value.
 
-Two orderings in there are load-bearing, and both were found by reverting a
-guard rather than by reading the code. The symlink assertion runs *before* the
-agent does: given a credential it cannot refresh, claude replaces the file with
-one of its own, which is exactly why `Link` re-asserts the symlink on every `ap
-run` — asserted afterwards it goes red because claude did its job. And the
-authentication message goes to stdout, never to `--debug-file`, so grepping the
-debug log for it is a check that cannot fail.
-
-The seeded home is load-bearing. Every "shared state survived" assertion is
-vacuous against an empty one, and adding a check means seeding whatever would
-let it fail — a `[user]` git section with no keys under it made the shim's
-passthrough check compare zero settings against zero and call that a pass.
+Two orderings in there are load-bearing, the seeded home is load-bearing, and
+three checks were caught passing vacuously. Each was found by reverting a guard
+rather than by reading the code; the write-ups are in
+[`docs/references/SMOKE.md`](docs/references/SMOKE.md), which is required
+reading before editing either image or `scripts/smoke.sh`.
 
 `sandbox` is the half of that which never needed a real agent. It builds a home
 that has been used — configuration, credentials, transcripts, and a `~/.config`
@@ -709,29 +706,21 @@ place of each agent, and asks whether `ap` keeps its hands off any of it: what
 environment `run` execs with. Every one of its checks was confirmed to go red
 with its guard reverted. It is not a substitute for `smoke`: the registry's
 claims are about what the real binaries do with the variable they are handed,
-and a stub cannot answer that. Running `smoke` inside a container is worse than
-not running it — every block is gated on `command -v <agent>`, so all twelve
-skip and it exits 0 announcing "all checks passed".
+and a stub cannot answer that.
 
 Releases are cut with `make release VERSION=vX.Y.Z`. It gates first and tags
 last, so a failed release never leaves a tag behind on origin.
 
-`make test` runs 84 tests with `-race -shuffle=on`, all against fakes.
+`make test` runs the whole suite with `-race -shuffle=on`, all against fakes.
 `make fuzz` targets `ValidName`, because that is the boundary a traversal bug got
 through once: it asserts the property (an accepted name never resolves outside
 the profile root) rather than a list of known-bad inputs.
 
 The registry makes claims about other people's software. `scripts/smoke.sh` is
 what catches an upstream change. If it fails, the registry row is usually what
-needs fixing — but check first whether the *check* is lying, because two of them
-originally were:
-
-- `codex doctor` pretty-prints paths, collapsing `$HOME` to `~` and eliding the
-  middle with an ellipsis, so grepping the full profile path can never match.
-- `opencode debug config` emits ~730 KB but exits without waiting for the pipe to
-  drain. Piping it into `grep` loses everything past 64 KiB — one pipe buffer —
-  and truncates the JSON mid-string. The script captures to a file for that
-  reason; do not turn it back into a pipeline.
+needs fixing — but check first whether the *check* is lying, because three of
+them originally were. Each is written up in
+[`docs/references/SMOKE.md`](docs/references/SMOKE.md).
 
 ### The one test never to delete
 
