@@ -1172,14 +1172,9 @@ func cmdCreate(args []string) error {
 		return err
 	}
 
-	if err := linkAndReport(a, dir, rc); err != nil {
+	if err := finishCreate(a, name, dir, rc); err != nil {
 		return err
 	}
-	if err := shim(a, dir); err != nil {
-		return err
-	}
-
-	seedAndLink(a, name, dir, rc)
 
 	if *copyMD {
 		if err := copyInstructions(a, dir); err != nil {
@@ -1200,6 +1195,28 @@ func cmdCreate(args []string) error {
 			fmt.Printf("\nnext: %s\n", hint)
 		}
 	}
+	return nil
+}
+
+// finishCreate is everything `ap create` does once the directory exists: the
+// shared links, the config shim, the first-run flags and the wrapper.
+//
+// Extracted so `ap sync` can call it rather than reimplement it. §10 requires a
+// synced profile to be indistinguishable from a hand-made one, and the only way
+// to guarantee that is for both to run the same four steps in the same order.
+//
+// Safe to run against a profile that already exists, which is what `ap sync`
+// does on a reused one: Link re-asserts, Shim re-asserts, seedFirstRun opens
+// with O_EXCL and so can never rewrite a file the profile already has, and the
+// wrapper is rewritten to the same bytes.
+func finishCreate(a agent.Agent, name, dir string, rc *receipt) error {
+	if err := linkAndReport(a, dir, rc); err != nil {
+		return err
+	}
+	if err := shim(a, dir); err != nil {
+		return err
+	}
+	seedAndLink(a, name, dir, rc)
 	return nil
 }
 
