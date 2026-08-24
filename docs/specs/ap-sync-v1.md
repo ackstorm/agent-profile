@@ -1,6 +1,13 @@
 # `ap sync` — SPEC v1
 
 **Status:** Implemented (2026-08-24)
+**Amended (2026-08-24):** `--allow-default` was removed after implementation, on
+the author's decision — `--yes` now covers a `name: default` manifest too. §6.1
+and §11 below describe the two-gate design as specified; the reasoning there is
+kept as the record of why it existed, and what replaced it is the display: a
+default target is printed with its resolved absolute path and named as the real
+config in both `--dry-run` and the prompt. Everything else in §6.1 still holds —
+nothing is created for the sentinel, and variants are still refused under it.
 **Version:** 1
 **Scope:** Declarative agent profiles, reproduced from a Git repository.
 **Principle:** YAGNI. Two lists of shell commands do 95% of the work.

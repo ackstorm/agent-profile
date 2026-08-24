@@ -274,12 +274,17 @@ and four rules hold it together. The reasoning is in
   and its own example leaked into the real home — `npx … --claude --global`
   during codex's turn sees no `CLAUDE_CONFIG_DIR` and writes to `~/.claude`.
 
-`name: default` is gated **separately** from `--yes`, and the two must not be
-merged. `--yes` means "do not ask me" and covers commands whose worst outcome is
-a stray package or a directory `ap delete` removes. `name: default` writes into
-the configuration the developer uses every day, which ap cannot undo. Off a
-terminal each refuses by name; a pipe is not consent, checked with
-`stdinIsTerminal` and not with `answered()`.
+`name: default` runs against the configuration the developer uses every day,
+which ap cannot undo. It used to be gated **separately** from `--yes`; that
+second flag, `--allow-default`, was removed on request — one run, one question.
+`--yes` now covers it. What must not be lost with it is the display: a default
+target is printed with its resolved absolute path and named as the real config,
+in `--dry-run` and in the prompt, because that display is now the only thing
+distinguishing the two blast radii. Off a terminal the single gate still
+refuses; a pipe is not consent, checked with `stdinIsTerminal` and not with
+`answered()`. Nothing is ever created for the sentinel — no directory, no
+links, no shim, no wrapper — and `TestSyncDefaultNeverCreatesLinksOrShims`
+holds that line.
 
 Two limits are stated in the spec rather than defended here, and neither is a
 bug to be fixed: **ap cannot tell whether an install command honoured the

@@ -1,0 +1,50 @@
+# Stage 1 — plan. Read the problem, argue about it, write the plan down.
+#
+# Its own profile, so the transcripts of "what we decided and why" never mix
+# with the ones from the branch that implemented it.
+version: 1
+name: plan
+
+# Machine-level, before any profile exists and with no agent variable set.
+# Guarded, because a directory sync runs one bootstrap per manifest and rtk
+# only needs installing once.
+bootstrap:
+  - command -v rtk >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+
+platforms:
+  claude:
+    # Runs with CLAUDE_CONFIG_DIR pointed at this profile, so the marketplace
+    # and the plugins land inside it and nowhere else.
+    install:
+      - claude plugin marketplace add DietrichGebert/ponytail
+      - claude plugin install ponytail@ponytail
+      - claude plugin marketplace add obra/superpowers-marketplace
+      - claude plugin install superpowers@superpowers-marketplace
+    variants:
+      # Explore intent before any code exists. The prompt is a PREFIX: what you
+      # type on the command line lands where {} is, as ONE argument.
+      brainstorm:
+        args: --effort=xhigh "/superpowers:brainstorming {}"
+      # Turn an agreed shape into a written plan under docs/superpowers/plans/.
+      write:
+        args: --effort=xhigh "/superpowers:writing-plans {}"
+      # The bare profile, at full effort, for the thinking in between.
+      opus:
+        args: --model=claude-opus-5 --effort=xhigh
+  codex:
+    install:
+      - codex plugin marketplace add DietrichGebert/ponytail
+      - codex plugin add ponytail@ponytail
+      - codex plugin marketplace add obra/superpowers-marketplace
+      - codex plugin add superpowers@superpowers-marketplace
+    variants:
+      # codex takes one positional PROMPT, so the prefix and your argument have
+      # to arrive as one element of argv — which is what {} is for.
+      brainstorm:
+        args: "/superpowers:brainstorming {}"
+      write:
+        args: "/superpowers:writing-plans {}"
+  pi:
+    install:
+      - pi install git:github.com/DietrichGebert/ponytail
+      - pi install git:github.com/obra/superpowers

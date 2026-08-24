@@ -180,7 +180,7 @@ Examples:
 	"sync": `ap sync - create profiles from manifests kept in Git
 
 Usage:
-  ap sync [--dry-run] [--yes] [--allow-default] <file-or-directory>
+  ap sync [--dry-run] [--yes] <file-or-directory>
 
 Reads YAML manifests describing profiles, the commands that populate them and
 the launch variants over them, then materialises all of it. A directory is
@@ -190,10 +190,8 @@ Everything is parsed and checked before anything is created, so a typo in one
 manifest leaves the run with nothing done.
 
 Flags:
-  --dry-run        print the whole plan and change nothing
-  --yes, -y        run the manifests' commands without asking
-  --allow-default  let a "name: default" manifest write into the agent's real
-                   configuration. --yes does NOT cover this
+  --dry-run  print the whole plan and change nothing
+  --yes, -y  run the manifests' commands without asking
 
 A manifest's commands are shell commands, and syncing a repository runs them as
 you. That is the feature, not an oversight — but ap will not do it by surprise:
@@ -201,7 +199,8 @@ off a terminal it refuses unless --yes is given, and a pipe is not an answer.
 
 "name: default" is not a profile. It names the agent you already had, so its
 install commands run against ~/.claude, ~/.codex and the rest, which ap cannot
-undo. It is gated on its own, and --yes does not reach it.
+undo. There is one gate, not two: --yes covers it as well, and --dry-run prints
+the resolved directory so you can see what is at stake first.
 
 Sync is additive. Removing a line from a manifest does not undo it: a variant
 dropped from the YAML stays on disk, and nothing an install command did is

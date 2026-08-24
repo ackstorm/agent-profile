@@ -223,7 +223,7 @@ func notATerminal(t *testing.T) {
 func TestGateRefusesCommandsOffATerminalWithoutYes(t *testing.T) {
 	notATerminal(t)
 	p := syncPlan{files: []filePlan{{path: "x.yaml", bootstrap: []string{"true"}}}}
-	err := gate(p, false, false)
+	err := gate(p, false)
 	if err == nil {
 		t.Fatal("gate = nil error off a terminal, want a refusal")
 	}
@@ -235,7 +235,7 @@ func TestGateRefusesCommandsOffATerminalWithoutYes(t *testing.T) {
 func TestGateAllowsCommandsOffATerminalWithYes(t *testing.T) {
 	notATerminal(t)
 	p := syncPlan{files: []filePlan{{path: "x.yaml", bootstrap: []string{"true"}}}}
-	if err := gate(p, true, false); err != nil {
+	if err := gate(p, true); err != nil {
 		t.Fatalf("gate(--yes) = %v, want nil", err)
 	}
 }
@@ -248,14 +248,15 @@ func TestGateNeverAsksAboutAManifestThatRunsNothing(t *testing.T) {
 		path:    "x.yaml",
 		targets: []targetPlan{{ref: "claude:x", variants: []variantPlan{{name: "v", args: []string{"-p"}, verb: "created"}}}},
 	}}}
-	if err := gate(p, false, false); err != nil {
+	if err := gate(p, false); err != nil {
 		t.Fatalf("gate = %v for a plan with no commands, want nil", err)
 	}
 }
 
-// The distinction the two gates exist for: --yes is not consent to write into
-// the agent's real configuration.
-func TestGateYesAloneDoesNotCoverADefaultTarget(t *testing.T) {
+// The second gate is gone by request: --yes covers a default target too. What
+// must NOT come back is silence — the plan is still shown, and off a terminal
+// the single gate still refuses. See gate's comment for what was traded away.
+func TestGateYesCoversADefaultTarget(t *testing.T) {
 	notATerminal(t)
 	p := syncPlan{files: []filePlan{{
 		path: "d.yaml",
@@ -264,15 +265,17 @@ func TestGateYesAloneDoesNotCoverADefaultTarget(t *testing.T) {
 			path: "/home/me/.claude", install: []string{"true"},
 		}},
 	}}}
-	err := gate(p, true, false)
+	if err := gate(p, true); err != nil {
+		t.Fatalf("gate(--yes) = %v for a default target, want nil", err)
+	}
+	// Without --yes and without a terminal it still refuses, naming the one
+	// flag there is.
+	err := gate(p, false)
 	if err == nil {
-		t.Fatal("gate(--yes) = nil for a default target, want a refusal")
+		t.Fatal("gate off a terminal = nil error, want a refusal")
 	}
-	if !strings.Contains(err.Error(), "--allow-default") {
-		t.Errorf("error = %q, want it to name --allow-default", err)
-	}
-	if err := gate(p, true, true); err != nil {
-		t.Fatalf("gate(--yes --allow-default) = %v, want nil", err)
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("error = %q, want it to name --yes", err)
 	}
 }
 
@@ -471,17 +474,17 @@ func TestSyncDoesNotRunInstallOffATerminal(t *testing.T) {
 	}
 }
 
-// §6.1 and §11: --yes alone leaves the real config directory untouched, and the
-// run is non-zero.
-func TestSyncDefaultRequiresAllowDefault(t *testing.T) {
+// --yes now runs a default manifest's commands, and the report says which
+// directory they ran against.
+func TestSyncDefaultRunsUnderYes(t *testing.T) {
 	notATerminal(t)
 	marker := filepath.Join(t.TempDir(), "ran")
 	dir := syncFixture(t, "version: 1\nname: default\nplatforms:\n  claude:\n    install:\n      - touch "+marker+"\n")
-	if err := dispatch([]string{"sync", dir, "--yes"}); err == nil {
-		t.Fatal("sync --yes on a default manifest = nil error, want a refusal")
+	if err := dispatch([]string{"sync", dir, "--yes"}); err != nil {
+		t.Fatalf("sync --yes on a default manifest = %v, want it to run", err)
 	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Error("--yes alone ran a command against the agent's real configuration")
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("the default install did not run: %v", err)
 	}
 }
 
@@ -498,7 +501,7 @@ func TestSyncDefaultNeverCreatesLinksOrShims(t *testing.T) {
 	}
 	link := os.Getenv("AP_LINK_DIR")
 
-	if err := dispatch([]string{"sync", dir, "--yes", "--allow-default"}); err != nil {
+	if err := dispatch([]string{"sync", dir, "--yes"}); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	// The install ran with NO override at all, exactly as `ap run

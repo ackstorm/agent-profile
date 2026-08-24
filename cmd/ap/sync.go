@@ -229,66 +229,36 @@ func (p syncPlan) print() {
 // it IS the feature. What can be done is make it impossible by surprise, and
 // that is all this function does.
 //
-// Two gates, deliberately separate. --yes covers the commands; --allow-default
-// covers running them against the agent's real configuration, and --yes does
-// NOT imply it. The distinction is what each can destroy: a bootstrap command
-// adds something to the machine, where a mistake is a stray package, and every
-// other install writes into a directory `ap delete` removes. `name: default`
-// mutates the setup the developer already depends on, where a mistake is their
-// working environment and ap has no undo. Bundling them would let one `y` cover
-// both.
-func gate(p syncPlan, yes, allowDefault bool) error {
-	if p.hasCommands() && !yes {
-		if !stdinIsTerminal() {
-			// A pipe is not consent. Same rule as askToPromote, and checked
-			// the same way — os.Stdin.Stat for ModeCharDevice, stdlib only,
-			// no x/term.
-			return fmt.Errorf("ap sync would run commands from these manifests, and there is no terminal to confirm on; pass --yes")
-		}
-		printCommands(p)
-		if !askYes("run these commands?") {
-			return errors.New("cancelled — nothing was run and nothing was created")
-		}
-	}
-	// Asked SECOND, and only after the commands are on screen: the scarier
-	// question is the last one before anything happens, and by then the reader
-	// has seen what would run.
-	defaults := p.defaultTargets()
-	if len(defaults) == 0 || allowDefault {
+// ONE gate: --yes, covering every command in the plan, including the ones a
+// `name: default` manifest runs against the agent's real configuration. There
+// was a second flag for those — --allow-default — on the grounds that a mistake
+// there is the developer's working environment and ap has no undo, where a
+// mistake anywhere else is a stray package or a directory `ap delete` removes.
+// It was removed on request: two questions for one run was one question too
+// many. What survives of it is the display — a default target is shown with its
+// resolved absolute path and its own heading, so the one prompt that remains
+// says plainly which of the two it is about to touch.
+func gate(p syncPlan, yes bool) error {
+	if !p.hasCommands() || yes {
 		return nil
 	}
 	if !stdinIsTerminal() {
-		return fmt.Errorf("%s would run against the agent's real configuration, "+
-			"which ap cannot undo; pass --allow-default (--yes does not cover this)",
-			strings.Join(refsOf(defaults), " "))
+		// A pipe is not consent. Same rule as askToPromote, and checked the
+		// same way — os.Stdin.Stat for ModeCharDevice, stdlib only, no x/term.
+		return fmt.Errorf("ap sync would run commands from these manifests, and there is no terminal to confirm on; pass --yes")
 	}
-	fmt.Fprintf(os.Stderr, "\nap: this manifest provisions the agent you already had, not a profile:\n")
-	for _, t := range defaults {
-		// The resolved absolute path, every time. This is the directory the
-		// developer's own agent reads, and abbreviating it to ~ is how a line
-		// stops being read.
-		fmt.Fprintf(os.Stderr, "\n      %s   %s\n", t.ref, t.path)
-		for _, c := range t.install {
-			fmt.Fprintf(os.Stderr, "        %s\n", c)
-		}
-	}
-	if !askYes("write into the real configuration?") {
+	printCommands(p)
+	if !askYes("run these commands?") {
 		return errors.New("cancelled — nothing was run and nothing was created")
 	}
 	return nil
 }
 
-func refsOf(ts []targetPlan) []string {
-	out := make([]string, len(ts))
-	for i, t := range ts {
-		out[i] = t.ref
-	}
-	return out
-}
-
-// printCommands shows the two lists SEPARATELY, each labelled by what it can
-// reach. Two blast radii on one screen that looked alike would make the prompt
-// worse than no prompt.
+// printCommands shows each list labelled by what it can reach: the machine, one
+// profile, or — last and loudest — the agent's real configuration. Two blast
+// radii on one screen that looked alike would make the prompt worse than no
+// prompt, and since the second gate was removed this display is the only thing
+// telling them apart.
 func printCommands(p syncPlan) {
 	fmt.Fprintln(os.Stderr, "\nap sync will run these commands as you:")
 	for _, f := range p.files {
@@ -302,7 +272,14 @@ func printCommands(p syncPlan) {
 			if len(t.install) == 0 {
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "\n  %s — in %s:\n", t.ref, t.path)
+			where := fmt.Sprintf("in %s", t.path)
+			if t.isDefault {
+				// The resolved absolute path, unabbreviated, and named for what
+				// it is. This is the directory the developer's own agent reads,
+				// and nothing here can be undone by `ap delete`.
+				where = fmt.Sprintf("in %s — THE AGENT'S REAL CONFIG, which ap cannot undo", t.path)
+			}
+			fmt.Fprintf(os.Stderr, "\n  %s — %s:\n", t.ref, where)
 			for _, c := range t.install {
 				fmt.Fprintf(os.Stderr, "      %s\n", c)
 			}
@@ -338,9 +315,8 @@ func cmdSync(args []string) error {
 	dry := fs.Bool("dry-run", false, "print the whole plan and change nothing")
 	yes := fs.Bool("yes", false, "run the manifests' commands without asking")
 	fs.BoolVar(yes, "y", false, "shorthand for --yes")
-	allowDefault := fs.Bool("allow-default", false, "allow a `name: default` manifest to write into the agent's real configuration")
 	stop, path, err := parseAroundRef(fs, args,
-		"sync [--dry-run] [--yes] [--allow-default] <file-or-directory>")
+		"sync [--dry-run] [--yes] <file-or-directory>")
 	if stop {
 		return err
 	}
@@ -359,7 +335,7 @@ func cmdSync(args []string) error {
 		plan.print()
 		return nil
 	}
-	if err := gate(plan, *yes, *allowDefault); err != nil {
+	if err := gate(plan, *yes); err != nil {
 		return err
 	}
 	return runPlan(plan)

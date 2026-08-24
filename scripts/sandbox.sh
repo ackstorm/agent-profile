@@ -361,23 +361,33 @@ else
     pass sync "a synced variant tokenizes before it substitutes"
 fi
 
-# name: default has its own gate, and --yes does not reach it.
+# name: default reaches the agent's real config under --yes — there is one gate
+# now, not two. What must still hold is that NOTHING is created for it: no
+# profile directory, no shared links, no shim, no wrapper. Link especially must
+# never run there, since the shared credential IS the file in that directory.
 cat >"$MAN/base.yaml" <<YAML
 version: 1
 name: default
 platforms:
   claude:
     install:
-      - touch "\$HOME/.claude/SYNC-REACHED-THE-REAL-HOME"
+      - touch "\$HOME/.claude/SYNC-RAN-HERE"
 YAML
-rm -f "$MAN/execute.yaml"
-if "$AP" sync "$MAN" --yes >/dev/null 2>&1; then
-    bad sync "ap sync --yes ran a name: default manifest"
-elif [ -e "$HOME/.claude/SYNC-REACHED-THE-REAL-HOME" ]; then
-    bad sync "--yes alone wrote into the agent's real configuration"
+rm -f "$MAN/execute.yaml" "$HOME/.claude/SYNC-RAN-HERE"
+if quiet "$AP" sync "$MAN" --yes; then
+    if [ ! -e "$HOME/.claude/SYNC-RAN-HERE" ]; then
+        bad sync "a name: default install did not run under --yes"
+    elif [ -d "$HOME/.local/share/agent-profile/profiles/claude/default" ]; then
+        bad sync "a profile directory was created for the sentinel"
+    elif [ -e "$HOME/.local/share/agent-profile/variants/claude/default" ]; then
+        bad sync "variants were written for the sentinel"
+    else
+        pass sync "name: default runs in the real config and creates nothing"
+    fi
 else
-    pass sync "--yes does not cover name: default"
+    bad sync "ap sync --yes failed on a name: default manifest"
 fi
+rm -f "$HOME/.claude/SYNC-RAN-HERE"
 
     # An agent that rewrites its credential with temp-file-plus-rename leaves a
     # real file where ap's symlink was. Measured on two real claude profiles, so

@@ -1,0 +1,52 @@
+# 00 so it runs FIRST: manifests are loaded in filename order, and this one's
+# `rtk init -g` writes the machine-level configuration the rest may read.
+#
+# The agent you already had — NOT a profile.
+#
+# `name: default` targets ~/.claude, ~/.codex and pi's real config directory, so
+# a bare `claude` typed anywhere gets the same three tools the profiles get.
+# Nothing is created for it: no directory, no shared links, no shim, no wrapper.
+# ap runs the install commands with NO override set, exactly as `ap run
+# claude:default` does.
+#
+# One gate, not two: `--yes` covers it. Look before you leap:
+#
+#   ap sync ./examples/agent-profiles --dry-run   # prints the resolved directory
+#   ap sync ./examples/agent-profiles             # asks once, showing all of it
+#
+# Variants are not accepted here, and the schema says so: a variant is a file ap
+# writes for a profile, and nothing is ever written for the real config.
+version: 1
+name: default
+
+bootstrap:
+  - command -v rtk >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+  - npm install -g pyright
+
+platforms:
+  claude:
+    install:
+      - claude plugin marketplace add anthropics/claude-plugins-official
+      - claude plugin marketplace add DietrichGebert/ponytail
+      - claude plugin marketplace add obra/superpowers-marketplace
+      - claude plugin install ponytail@ponytail
+      - claude plugin install superpowers@superpowers-marketplace
+      - claude plugin install pyright-lsp@claude-plugins-official
+      - rtk init -g
+  codex:
+    install:
+      - codex plugin marketplace add DietrichGebert/ponytail
+      - codex plugin marketplace add obra/superpowers-marketplace
+      - codex plugin add ponytail@ponytail
+      - codex plugin add superpowers@superpowers-marketplace
+      - rtk init -g --codex
+  pi:
+    install:
+      - pi install git:github.com/DietrichGebert/ponytail
+      - pi install git:github.com/obra/superpowers
+      - rtk init -g --agent pi
+  opencode:
+    install:
+      - opencode plugin --print-logs --log-level DEBUG -g "superpowers@git+https://github.com/obra/superpowers.git"
+      - opencode plugin --print-logs --log-level DEBUG -g @dietrichgebert/ponytail
+      - rtk init -g --opencode

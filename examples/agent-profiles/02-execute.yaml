@@ -1,0 +1,42 @@
+# Stage 2 — execute. Follow the plan written in stage 1, task by task.
+version: 1
+name: execute
+
+bootstrap:
+  - command -v rtk >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+
+platforms:
+  claude:
+    install:
+      - claude plugin marketplace add DietrichGebert/ponytail
+      - claude plugin install ponytail@ponytail
+      - claude plugin marketplace add obra/superpowers-marketplace
+      - claude plugin install superpowers@superpowers-marketplace
+    variants:
+      # Inline execution with review checkpoints. Takes the plan's path:
+      #   ap run claude:execute:run docs/superpowers/plans/2026-08-24-thing.md
+      run:
+        args: --effort=xhigh "/superpowers:executing-plans {}"
+      # A fresh subagent per task — higher quality, more tokens.
+      subagents:
+        args: --effort=xhigh "/superpowers:subagent-driven-development {}"
+      # Isolate the work before touching anything shared.
+      worktree:
+        args: --effort=xhigh "/superpowers:using-git-worktrees {}"
+  codex:
+    install:
+      - codex plugin marketplace add DietrichGebert/ponytail
+      - codex plugin add ponytail@ponytail
+      - codex plugin marketplace add obra/superpowers-marketplace
+      - codex plugin add superpowers@superpowers-marketplace
+    variants:
+      run:
+        args: "/superpowers:executing-plans {}"
+      # Full access, no approval prompts: a second pair of hands on a branch
+      # you already decided to let it change.
+      yolo:
+        args: -s danger-full-access -a never
+  pi:
+    install:
+      - pi install git:github.com/DietrichGebert/ponytail
+      - pi install git:github.com/obra/superpowers
