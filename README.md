@@ -62,6 +62,7 @@ exactly that reason — see "`default`" below.
 | `ap resume [<id>] [args...]` | resume a session by full ID or prefix, changing to its directory first; when no ID is given on a terminal, prompts with a numbered list |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant [--yes] <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it. May leave `{}` where your run-time arguments should be substituted, which is how a variant becomes a prompt prefix. Over a variant that exists it asks first, showing both argument lists; `--yes` answers |
+| `ap sync [--dry-run] [--yes] [--allow-default] <file-or-directory>` | create profiles, their variants and whatever their install commands put in them, from YAML manifests kept in Git. `--dry-run` prints the whole plan and changes nothing. A manifest's commands are shell commands and run as you, so ap shows them and asks; off a terminal it refuses unless `--yes`. `name: default` targets the agent you already had and needs `--allow-default` on top |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
 | `ap env <agent>:<profile>[:<variant>]` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile>[:<variant>] <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory. `cmd` never receives a variant's arguments: those are the agent's flags |
@@ -381,6 +382,67 @@ ap create --from plan claude:review        # the same thing
 can only be cloned within its own agent — the source and the destination always
 share one. Putting the flag after the reference makes that read correctly: the
 agent is already stated to the left of the name.
+
+## Reproducing a team's profiles
+
+Keep the profiles in Git and materialise them with one command:
+
+```bash
+git clone git@github.com:company/agent-profiles.git
+ap sync ./agent-profiles --dry-run    # see the whole plan first
+ap sync ./agent-profiles
+```
+
+A manifest is one file per logical profile:
+
+```yaml
+version: 1
+name: execute
+
+bootstrap:                                  # once, on this machine
+  - npm install -g @ackstorm/ach-cli
+
+platforms:
+  claude:
+    install:                                # inside claude:execute
+      - ach-cli skill install pdf@anthropics --global
+    variants:
+      opus:
+        args: --model=claude-opus-5 --effort=xhigh
+      execute-plan:
+        args: --effort=xhigh "/superpowers:executing-plans {}"
+  codex:
+    install:
+      - npx get-shit-done-cc@latest --codex --global
+```
+
+which produces `claude:execute`, `claude:execute:opus`,
+`claude:execute:execute-plan` and `codex:execute`.
+
+`bootstrap` puts tools on the machine; `install` puts content in one profile,
+and runs with that profile's config variable set, so a tool that honours it
+lands inside. `ap` does not interpret either list — between them they can
+install skills, plugins, hooks or MCP servers without the format growing a
+concept per artifact.
+
+Syncing a repository runs its commands as you. `ap sync` shows them and asks
+first; off a terminal it refuses unless you pass `--yes`. A manifest whose name
+is `default` targets the agent you already had rather than a profile, and needs
+`--allow-default` on top — `--yes` does not cover it.
+
+Sync is additive: removing a line does not undo it, and `ap delete` is still how
+things are removed. A variant of the same name is overwritten, and the report
+says `updated` when it was.
+
+Two limits worth knowing before you write a manifest:
+
+- `ap` sets one environment variable and cannot make a third-party tool read it.
+  A tool that resolves `~/.claude` directly writes into your real configuration
+  and reports success. Check a new tool once with
+  `ap env claude:probe <command>` and see where the files land.
+- Nothing is pinned. `npx …@latest` is whatever it was that day, so two people
+  syncing a week apart can get different environments. Pin in the command if
+  you need to.
 
 ## How it works
 
