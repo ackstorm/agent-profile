@@ -35,6 +35,7 @@ Commands:
   sessions  List recent sessions across agents and profiles
   resume    Resume a past session in its directory
   create    Create a profile and a wrapper you can type as a command
+  sync      Create profiles, variants and installs from a manifest repository
   variant   Name a set of launch arguments over an existing profile
   which     Print the profile directory
   env       Print the environment override, or run a command under it
@@ -50,6 +51,7 @@ There is no active profile: every command names one explicitly.
 
 Examples:
   ap create claude:plan
+  ap sync ./agent-profiles --dry-run
   ap run claude:plan --effort xhigh
   ap sessions
   ap resume 05d8188f
@@ -175,6 +177,45 @@ Examples:
       --only-settings statusLine --only-settings theme
 `,
 
+	"sync": `ap sync - create profiles from manifests kept in Git
+
+Usage:
+  ap sync [--dry-run] [--yes] [--allow-default] <file-or-directory>
+
+Reads YAML manifests describing profiles, the commands that populate them and
+the launch variants over them, then materialises all of it. A directory is
+scanned for *.yaml and *.yml, not recursively, in filename order.
+
+Everything is parsed and checked before anything is created, so a typo in one
+manifest leaves the run with nothing done.
+
+Flags:
+  --dry-run        print the whole plan and change nothing
+  --yes, -y        run the manifests' commands without asking
+  --allow-default  let a "name: default" manifest write into the agent's real
+                   configuration. --yes does NOT cover this
+
+A manifest's commands are shell commands, and syncing a repository runs them as
+you. That is the feature, not an oversight — but ap will not do it by surprise:
+off a terminal it refuses unless --yes is given, and a pipe is not an answer.
+
+"name: default" is not a profile. It names the agent you already had, so its
+install commands run against ~/.claude, ~/.codex and the rest, which ap cannot
+undo. It is gated on its own, and --yes does not reach it.
+
+Sync is additive. Removing a line from a manifest does not undo it: a variant
+dropped from the YAML stays on disk, and nothing an install command did is
+reversed. "ap delete" is still how things are removed.
+
+A variant of the same name IS overwritten, and the report says "updated" rather
+than "created" when it was.
+
+Examples:
+  ap sync ./agent-profiles --dry-run
+  ap sync ./agent-profiles
+  ap sync ./agent-profiles/execute.yaml
+  ap sync ./agent-profiles --yes            # in a script
+`,
 	"variant": `ap variant - name a set of launch arguments over a profile
 
 Usage:
@@ -334,6 +375,8 @@ func dispatch(args []string) error {
 		return cmdResume(args[1:])
 	case "create":
 		return cmdCreate(args[1:])
+	case "sync":
+		return cmdSync(args[1:])
 	case "variant":
 		return cmdVariant(args[1:])
 	case "which":
