@@ -9,28 +9,57 @@ ap sync ./examples/agent-profiles --dry-run   # read the plan first
 ap sync ./examples/agent-profiles             # default first, then the three profiles
 ```
 
-12 targets (3 stages × claude, codex, pi — plus the three `default` ones), 16
-variants, 40 install commands.
+16 targets (3 stages × claude, codex, pi, opencode — plus the four `default`
+ones), 16 variants, 69 install commands.
 
-## The same three tools everywhere
+## The same tools everywhere
 
-| | claude | codex | pi |
-|---|---|---|---|
-| rtk | `bootstrap`, machine-level | same | same |
-| ponytail | `plugin marketplace add DietrichGebert/ponytail` + `plugin install ponytail@ponytail` | same, but `plugin add` | `pi install git:github.com/DietrichGebert/ponytail` |
-| superpowers | `plugin marketplace add obra/superpowers-marketplace` + `plugin install superpowers@superpowers-marketplace` | same, `plugin add` | `pi install git:github.com/obra/superpowers` |
+| | claude | codex | pi | opencode |
+|---|---|---|---|---|
+| rtk (binary) | `bootstrap`, machine-level, guarded | same | same | same |
+| pyright (binary) | `bootstrap`, machine-level, guarded | same | same | same |
+| ponytail | `plugin marketplace add DietrichGebert/ponytail` + `plugin install ponytail@ponytail` | same, but `plugin add` | `pi install git:github.com/DietrichGebert/ponytail` | `opencode plugin -g "@dietrichgebert/ponytail"` |
+| superpowers | `obra/superpowers-marketplace` + `plugin install superpowers@superpowers-marketplace` | same, `plugin add` | `pi install git:github.com/obra/superpowers` | `opencode plugin -g "superpowers@git+…"` |
+| pyright-lsp | `plugin install pyright-lsp@claude-plugins-official` | — | — | — |
+| rtk hooks | `rtk init -g --auto-patch` | `rtk init -g --codex` | `rtk init -g --agent pi --auto-patch` | only in `00-default.yaml` — see below |
 
-Nothing per-stage. Every profile gets the same three, so what makes the stages
+Nothing per-stage. Every profile gets the same set, so what makes the stages
 different is the session history and the variants, not the tooling.
 
 `bootstrap` runs **once per manifest, before any profile exists and with no
 agent variable set** — the right place for rtk, the wrong place for a plugin.
 It is guarded with `command -v rtk >/dev/null ||` because a directory sync runs
-four manifests and rtk only needs installing once.
+four manifests and neither rtk nor pyright needs installing twice.
 
 `install` runs **inside one profile**, with that platform's config variable
 pointed at it, so `claude plugin install …` in `claude:review` writes to
 `~/.local/share/agent-profile/profiles/claude/review`, never to `~/.claude`.
+
+### Which of these actually honour the variable, measured
+
+ap sets one variable and cannot make a third-party tool read it (§8.5 of the
+spec). So each was run against a throwaway home and the files were looked for:
+
+| | result |
+|---|---|
+| `rtk init -g --auto-patch` under `CLAUDE_CONFIG_DIR` | ✔ `CLAUDE.md`, `RTK.md`, `settings.json` **inside the profile**; the real `~/.claude` stayed empty |
+| `rtk init -g --codex` under `CODEX_HOME` | ✔ `AGENTS.md`, `RTK.md` inside the profile |
+| `rtk init -g --opencode` under a shimmed `XDG_CONFIG_HOME` | ✘ writes `~/.config/opencode/plugins/rtk.ts` — resolves `$HOME/.config` directly |
+
+That last row is why no opencode profile runs `rtk init`: inside a profile it
+would leak into the real config. It stays in `00-default.yaml`, where writing
+globally is exactly the intent. `rtk`'s own state (`~/.config/rtk`) is global in
+every case, which is fine — it is rtk's, not the agent's.
+
+Check any tool you add the same way:
+
+```bash
+ap create claude:probe
+ap env claude:probe <the install command>
+ls ~/.local/share/agent-profile/profiles/claude/probe   # did it land here…
+ls ~/.claude                                            # …or here?
+ap delete claude:probe --yes
+```
 
 ## The variants
 
@@ -40,8 +69,9 @@ pointed at it, so `claude plugin install …` in `claude:review` writes to
 | `execute` | `run` · `subagents` · `worktree` | `run` · `yolo` |
 | `review` | `review` · `simplify` · `security` · `finish` | `review` (codex's own) · `simplify` |
 
-`pi` gets the tools and no variants — pi was not installed on the machine these
-were written on, so nothing is claimed about its flags.
+`pi` and `opencode` get the tools and no variants: pi was not installed on the
+machine these were written on, and opencode's argv was not measured here, so
+nothing is claimed about either one's flags.
 
 A worked pass:
 
@@ -55,8 +85,9 @@ ap run claude:review:finish              # tests, then merge / PR / keep
 
 ## `00-default.yaml` is not a profile
 
-`name: default` targets `~/.claude`, `~/.codex` and pi's real config directory,
-so a bare `claude` typed anywhere gets the same three tools. **Nothing is
+`name: default` targets `~/.claude`, `~/.codex`, `~/.config/opencode` and pi's
+real config directory,
+so a bare `claude` typed anywhere gets the same set the profiles get. **Nothing is
 created for it** — no directory, no shared links, no shim, no wrapper — and the
 install commands run with no override set at all.
 
@@ -110,6 +141,8 @@ variant under one `name:` and delete the other two files.
   <plugin>@<marketplace>`) and codex (`codex plugin marketplace add <SOURCE>`,
   `codex plugin add <PLUGIN@MARKETPLACE>`). The `pi` lines are as upstream
   documents them and were **not** run here.
+- **`00-` runs first** — filename order — so its machine-level bootstrap and
+  its global `rtk init` are done before any profile installs on top.
 - **The bootstrap block repeats in all four files.** v1 has no includes and no
   merge semantics, deliberately — two files claiming one `<platform>:<name>` is
   an error, not an override. Four copies of one guarded line is the cost.

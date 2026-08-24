@@ -21,7 +21,7 @@ name: default
 
 bootstrap:
   - command -v rtk >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-  - npm install -g pyright
+  - command -v pyright >/dev/null 2>&1 || sudo npm install -g pyright
 
 platforms:
   claude:
@@ -32,7 +32,7 @@ platforms:
       - claude plugin install ponytail@ponytail
       - claude plugin install superpowers@superpowers-marketplace
       - claude plugin install pyright-lsp@claude-plugins-official
-      - rtk init -g
+      - rtk init -g --auto-patch
   codex:
     install:
       - codex plugin marketplace add DietrichGebert/ponytail
@@ -44,9 +44,9 @@ platforms:
     install:
       - pi install git:github.com/DietrichGebert/ponytail
       - pi install git:github.com/obra/superpowers
-      - rtk init -g --agent pi
+      - rtk init -g --agent pi --auto-patch
   opencode:
     install:
       - opencode plugin --print-logs --log-level DEBUG -g "superpowers@git+https://github.com/obra/superpowers.git"
-      - opencode plugin --print-logs --log-level DEBUG -g @dietrichgebert/ponytail
-      - rtk init -g --opencode
+      - opencode plugin --print-logs --log-level DEBUG -g "@dietrichgebert/ponytail"
+      - rtk init -g --opencode --auto-patch

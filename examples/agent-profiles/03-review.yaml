@@ -7,14 +7,22 @@ name: review
 
 bootstrap:
   - command -v rtk >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+  - command -v pyright >/dev/null 2>&1 || sudo npm install -g pyright
 
 platforms:
   claude:
+    # Marketplaces first, then what comes out of them. Every command runs with
+    # CLAUDE_CONFIG_DIR pointed at this profile, so all of it lands inside.
     install:
+      - claude plugin marketplace add anthropics/claude-plugins-official
       - claude plugin marketplace add DietrichGebert/ponytail
-      - claude plugin install ponytail@ponytail
       - claude plugin marketplace add obra/superpowers-marketplace
+      - claude plugin install ponytail@ponytail
       - claude plugin install superpowers@superpowers-marketplace
+      - claude plugin install pyright-lsp@claude-plugins-official
+      # Measured: rtk honours CLAUDE_CONFIG_DIR, so -g writes CLAUDE.md, RTK.md
+      # and settings.json into THIS profile, not into ~/.claude.
+      - rtk init -g --auto-patch
     variants:
       # Correctness review of the working tree's diff.
       review:
@@ -31,9 +39,11 @@ platforms:
   codex:
     install:
       - codex plugin marketplace add DietrichGebert/ponytail
-      - codex plugin add ponytail@ponytail
       - codex plugin marketplace add obra/superpowers-marketplace
+      - codex plugin add ponytail@ponytail
       - codex plugin add superpowers@superpowers-marketplace
+      # Measured: honours CODEX_HOME — AGENTS.md and RTK.md land in the profile.
+      - rtk init -g --codex
     variants:
       # codex has a review of its own, non-interactive, which is the second
       # opinion this stage exists to get.
@@ -45,3 +55,16 @@ platforms:
     install:
       - pi install git:github.com/DietrichGebert/ponytail
       - pi install git:github.com/obra/superpowers
+      # pi was not installed on the machine these were written on: the three
+      # lines are as upstream documents them, unverified here.
+      - rtk init -g --agent pi --auto-patch
+  opencode:
+    # -g means "the global opencode config", which for this profile IS the
+    # profile: XDG_CONFIG_HOME is shimmed to <profile>/xdg.
+    install:
+      - opencode plugin -g "superpowers@git+https://github.com/obra/superpowers.git"
+      - opencode plugin -g "@dietrichgebert/ponytail"
+      # No `rtk init --opencode` here, deliberately. Measured: it writes
+      # ~/.config/opencode/plugins/rtk.ts directly and ignores XDG_CONFIG_HOME,
+      # so inside a profile it would leak into the real config. It lives in
+      # 00-default.yaml, where writing globally is the point.
