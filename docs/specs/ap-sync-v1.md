@@ -1,6 +1,6 @@
 # `ap sync` — SPEC v1
 
-**Status:** Draft
+**Status:** Implemented (2026-08-24)
 **Version:** 1
 **Scope:** Declarative agent profiles, reproduced from a Git repository.
 **Principle:** YAGNI. Two lists of shell commands do 95% of the work.

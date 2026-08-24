@@ -244,6 +244,56 @@ The sandbox check for it is asserted on `arg:[…]`, never on `argv:`. The stub'
 argument from two — which is the entire property under test. That check was
 written against `argv:` first and would have been vacuous.
 
+## `ap sync` runs other people's shell commands, on purpose
+
+`git clone` a repository and `ap sync` runs the commands inside it as you. That
+is arbitrary code execution by design and cannot be engineered away — it is the
+feature. Everything in `cmd/ap/sync.go` exists to stop it happening by surprise,
+and four rules hold it together. The reasoning is in
+`docs/specs/ap-sync-v1.md`; these are the parts that must not drift.
+
+- **`install` goes to `sh -c`; a variant's `args` goes to a tokenizer.** The two
+  fields are both strings and look alike, so the difference is stated rather
+  than inferred. An install command is a shell one-liner by nature; an agent's
+  argv is data. `--prompt $HOME` reaches the agent as those characters. Never
+  give `args` a shell, and never take one away from `install`.
+- **`args` is tokenized BEFORE `{}` is substituted.** Substituting first would
+  let a caller's argument change how many tokens a variant has — one prompt
+  silently becoming three arguments, which claude then drops without a word.
+  `TestSyncVariantArgsTokenizeBeforeSubstituting` fails with four tokens if
+  anyone reverses it.
+- **An inherited variable is stripped by VALUE, never by name.** A value that
+  resolves inside `profile.Root()` goes; everything else stays. Stripping the
+  four config variables by name would delete `XDG_CONFIG_HOME` for a claude
+  install — that string is opencode's config variable *and* the one every other
+  program on the machine reads — and break `npm` for everyone.
+  `TestSyncKeepsAConfigVariableThatPointsOutsideTheProfileRoot` is the guard.
+- **`bootstrap` runs before any profile exists, with no agent variable set.**
+  Not a convention: it is what makes "install this into all my profiles at once"
+  inexpressible. An earlier draft ran a profile-level list once per platform,
+  and its own example leaked into the real home — `npx … --claude --global`
+  during codex's turn sees no `CLAUDE_CONFIG_DIR` and writes to `~/.claude`.
+
+`name: default` is gated **separately** from `--yes`, and the two must not be
+merged. `--yes` means "do not ask me" and covers commands whose worst outcome is
+a stray package or a directory `ap delete` removes. `name: default` writes into
+the configuration the developer uses every day, which ap cannot undo. Off a
+terminal each refuses by name; a pipe is not consent, checked with
+`stdinIsTerminal` and not with `answered()`.
+
+Two limits are stated in the spec rather than defended here, and neither is a
+bug to be fixed: **ap cannot tell whether an install command honoured the
+variable** (§8.5 — a tool that resolves `~/.claude` directly writes to the real
+home and reports success; the fix belongs upstream, and sandboxing it was
+rejected on four counts), and **a manifest is only as reproducible as its
+install commands** (§14 — `@latest` is whatever it was that day; ap does not pin
+and does not lock).
+
+`ap sync` is additive. Nothing is pruned, nothing is uninstalled, and there is
+no ownership tracking. The one exception is a variant of the same name, which is
+overwritten — reported as `updated`, in both the report and `--dry-run`, because
+it is the only place v1 destroys something a user typed.
+
 ## install.sh is a `curl | bash` target, so treat it as one
 
 Two couplings that no compiler checks:
