@@ -85,6 +85,32 @@ it green. The pattern is anchored now. When you write a check whose negative
 answer is the positive one with a word in front, anchor it.
 
 
+## An install must be asserted on the path, not on the agent's word
+
+claude, codex and pi all install the same marketplace plugin, from the same
+`owner/repo`, into their own profile. What is under test is never what the plugin
+does — it is that the install landed in the directory ap redirected.
+
+Two traps, both measured by mutating the redirect away (`Env` returning the base
+environment for codex and pi) and re-running:
+
+- **Asking the agent whether it installed something proves nothing.** With the
+  redirect gone, `codex plugin list` still says "installed, enabled" and `pi list`
+  still lists the package: they are describing the real `~/.codex` and
+  `~/.pi/agent`. Both checks stayed green through the mutation until they were
+  anchored on the profile path the listing prints. Assert the path.
+- **`plugins/cache`, never the marketplace clone.** On claude and on codex alike,
+  `SKILL.md` exists under the marketplace checkout as soon as the marketplace is
+  added, whether or not anything was installed. Searching there reads as "the
+  skill is available" while asserting "a git clone happened".
+
+`codex plugin list` also needs anchoring on `"installed, enabled"`: the negative
+answer is `not installed`, which contains `installed`.
+
+pi's packages are not claude plugins — pi clones the repo and records it in its
+own `settings.json`, and never reads the skill. It is checked anyway, because the
+property under test is the same one.
+
 ## When a smoke check is lying
 
 When `scripts/smoke.sh` fails, the registry row is usually what is wrong. But

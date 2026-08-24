@@ -463,13 +463,16 @@ done
 # profile then appears to inherit plugins it never declared, and marketplaces
 # clone into it out of nowhere. That false positive is very convincing. Keep the
 # neutral cwd.
-if command -v claude >/dev/null 2>&1; then
-  neutral=$(mktemp -d)
-  mkrepo=forrestchang/andrej-karpathy-skills # a plugin whose payload IS a skill,
-  mk=karpathy-skills                         # so one install proves both
-  plug=andrej-karpathy-skills
-  skill=karpathy-guidelines
+# Hoisted out of the claude block: the codex and pi blocks below install the same
+# thing, and under `set -u` an unset name here would abort the run rather than
+# report the missing agent.
+neutral=$(mktemp -d)
+mkrepo=forrestchang/andrej-karpathy-skills # a plugin whose payload IS a skill,
+mk=karpathy-skills                         # so one install proves both
+plug=andrej-karpathy-skills
+skill=karpathy-guidelines
 
+if command -v claude >/dev/null 2>&1; then
   for p in claude:apsmokeplug claude:apsmokeclone; do setup "$AP" delete --yes "$p"; done
   setup "$AP" create claude:apsmokeplug || bad plugin "ap create claude:apsmokeplug failed"
   od=$("$AP" which claude:apsmokeplug)
@@ -615,10 +618,88 @@ if command -v claude >/dev/null 2>&1; then
   fi
 
   for p in claude:apsmokeplug claude:apsmokeclone; do "$AP" delete --yes "$p" >/dev/null 2>&1; done
-  rm -rf "$neutral"
 else
   bad plugin "claude is not in the smoke image"
 fi
+
+# --- codex: the same plugin must install into the profile --------------------
+# Same marketplace and same plugin as claude, deliberately: what is under test is
+# not what the plugin does but where it lands. Measured (codex 0.149.1): both
+# commands need no credential, and `plugin add` reports an install root under
+# CODEX_HOME. config.toml is not Shared, so this cannot leak into another profile.
+if command -v codex >/dev/null 2>&1; then
+  setup "$AP" delete --yes codex:apsmokeplug
+  setup "$AP" create codex:apsmokeplug || bad plugin "ap create codex:apsmokeplug failed"
+  od=$("$AP" which codex:apsmokeplug)
+  if ! (cd "$neutral" && setup timeout 180 "$AP" run codex:apsmokeplug plugin marketplace add "$mkrepo"); then
+    bad plugin "codex plugin marketplace add $mkrepo failed - re-run it by hand to see why"
+  elif ! (cd "$neutral" && setup timeout 180 "$AP" run codex:apsmokeplug plugin add "$plug@$mk"); then
+    bad plugin "codex plugin add $plug@$mk failed - re-run it by hand to see why"
+  else
+    # Two things, and the second is what makes this able to fail. "installed,
+    # enabled" never a bare "installed", because the negative answer is "not
+    # installed", which contains it. And the PATH column must be under the
+    # profile: with CODEX_HOME not redirected codex still installs, still reports
+    # "installed, enabled", and is simply describing the real ~/.codex. Measured
+    # with the redirect mutated away, where the status alone stayed green.
+    cxlist=$( (cd "$neutral" && timeout 120 "$AP" run codex:apsmokeplug plugin list 2>&1) )
+    if printf '%s' "$cxlist" | grep -F "$plug@$mk" | grep -q "installed, enabled" \
+       && printf '%s' "$cxlist" | grep -qF "$od"; then
+      pass plugin "codex installed it into the profile"
+    else
+      bad plugin "codex does not report $plug@$mk installed under $od"
+    fi
+    # plugins/cache, not .tmp/marketplaces. The marketplace clone carries the
+    # skill as soon as the marketplace is added, whether or not anything was
+    # installed, so searching there passes without proving an install. Same trap
+    # as claude's above, measured on codex too.
+    if [ -n "$(find "$od/plugins/cache" -name SKILL.md -path "*$skill*" -print -quit 2>/dev/null)" ]; then
+      pass plugin "codex's plugin skill is on disk in the profile"
+    else
+      bad plugin "no $skill SKILL.md under $od/plugins/cache"
+    fi
+  fi
+  "$AP" delete --yes codex:apsmokeplug >/dev/null 2>&1
+else
+  bad plugin "codex is not in the smoke image"
+fi
+
+# --- pi: a package must install into the profile -----------------------------
+# pi packages are not claude plugins: pi clones the repo and records it in its own
+# settings.json, and never reads the skill. The ap-relevant property is the same
+# either way -- the install lands inside the directory ap redirected. Run from the
+# neutral cwd because `pi install -l` writes .pi/settings.json into the cwd, and a
+# project-local install would answer the question for the wrong directory.
+if command -v pi >/dev/null 2>&1; then
+  setup "$AP" delete --yes pi:apsmokeplug
+  setup "$AP" create pi:apsmokeplug || bad plugin "ap create pi:apsmokeplug failed"
+  od=$("$AP" which pi:apsmokeplug)
+  if ! (cd "$neutral" && setup timeout 180 "$AP" run pi:apsmokeplug install "https://github.com/$mkrepo"); then
+    bad plugin "pi install https://github.com/$mkrepo failed - re-run it by hand to see why"
+  else
+    # The clone on disk under PI_CODING_AGENT_DIR is what proves the redirect.
+    # `pi list` alone would print the same line for a project-local install.
+    if [ -d "$od/git/github.com/$mkrepo" ]; then
+      pass plugin "pi cloned the package into the profile"
+    else
+      bad plugin "no $mkrepo clone under $od/git - did PI_CODING_AGENT_DIR reach the profile?"
+    fi
+    # The path, not just the name. pi prints where each package lives, and with
+    # PI_CODING_AGENT_DIR not redirected it lists the very same package out of the
+    # real ~/.pi/agent - measured, and green until this was anchored on $od.
+    if (cd "$neutral" && timeout 120 "$AP" run pi:apsmokeplug list 2>&1) \
+         | grep -qF "$od/git/github.com/$mkrepo"; then
+      pass plugin "pi lists it as a user package in the profile"
+    else
+      bad plugin "pi does not list $mkrepo under $od - the install did not reach user scope"
+    fi
+  fi
+  "$AP" delete --yes pi:apsmokeplug >/dev/null 2>&1
+else
+  bad plugin "pi is not in the smoke image"
+fi
+
+rm -rf "$neutral"
 
 # --- first run: create seeds the onboarding flag, and only that key ----------
 # Without it a new profile opens on claude's theme picker even though the shared
