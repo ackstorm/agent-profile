@@ -108,7 +108,21 @@ mkdir -p "$HOME"/.claude/projects "$HOME"/.codex/sessions "$HOME"/.pi/agent/sess
     "$HOME"/.config/opencode "$HOME"/.config/git "$HOME"/.config/nvim
 printf '{"hasCompletedOnboarding":true}' >"$HOME/.claude.json"
 printf '{"theme":"dark"}' >"$HOME/.claude/settings.json"
-printf '{}' >"$HOME/.pi/agent/auth.json"
+# pi's auth.json, synthesised. Measured (pi 0.84.2): `pi auth check --no-refresh`
+# reports {"status":"ready"} from an oauth-shaped credential without contacting
+# anything, so a profile can only report ready by reaching this file through the
+# link ap made. This used to hold `{}`, which answers
+# "credentials_not_configured" — the same answer a severed link gives, so no
+# check written against it could have failed.
+printf '{"anthropic":{"type":"oauth","access":"notarealtoken","refresh":"notarealtoken","expires":9999999999999}}' \
+    >"$HOME/.pi/agent/auth.json"
+# opencode keeps its three credentials under the data dir, all three Shared.
+# Synthesised the same way and for the same reason: `opencode auth list` reports
+# what it finds without validating the token.
+mkdir -p "$HOME/.local/share/opencode"
+printf '{"anthropic":{"type":"api","key":"notarealtoken"}}' >"$HOME/.local/share/opencode/auth.json"
+printf '{"email":"smoke@example.invalid"}' >"$HOME/.local/share/opencode/account.json"
+printf '{"github":{"token":"notarealtoken"}}' >"$HOME/.local/share/opencode/mcp-auth.json"
 # Real keys, not just the section header: the shim's passthrough check compares
 # how many settings git sees through the shim against how many it sees outside,
 # and refuses to pass when both are zero. A bare "[user]" makes both zero, which
@@ -222,7 +236,7 @@ if command -v claude >/dev/null 2>&1; then
     pass claude "config and history are the profile's own"
   fi
 else
-  skip claude
+  bad claude "claude is not in the smoke image"
 fi
 
 # --- codex: the profile dir must be reported as codex_home -------------------
@@ -257,20 +271,37 @@ if command -v codex >/dev/null 2>&1; then
     bad codex "not logged in - auth.json link broken"
   fi
 else
-  skip codex
+  bad codex "codex is not in the smoke image"
 fi
 
 # --- pi: an empty profile must report no packages, unlike the real home ------
 if command -v pi >/dev/null 2>&1; then
   "$AP" delete --yes pi:apsmoke >/dev/null 2>&1
   "$AP" create pi:apsmoke >/dev/null 2>&1
+  d=$("$AP" which pi:apsmoke)
   if timeout 120 "$AP" run pi:apsmoke list 2>&1 | grep -qi "no packages installed"; then
     pass pi "profile package set is isolated"
   else
     bad pi "still reading the real package list - check PI_CODING_AGENT_DIR"
   fi
+  # Asserted before the reach check below, and before pi has run: the structural
+  # half must be answered while the link is still ap's doing.
+  if [ ! -L "$d/auth.json" ]; then
+    bad pi "auth.json is not a symlink - the profile is not sharing auth"
+  else
+    pass pi "the credential is shared"
+  fi
+  # '"status":"ready"' anchored on the JSON field, never a bare 'ready': the
+  # negative answer is "not_ready", which contains it. --no-refresh so the check
+  # needs no network and cannot be answered by anything but the file.
+  if timeout 120 "$AP" run pi:apsmoke auth check --provider anthropic --no-refresh --json 2>/dev/null \
+       | grep -q '"status":"ready"'; then
+    pass pi "the credential was reached through the shared link"
+  else
+    bad pi "profile never reached the credential - auth.json link broken"
+  fi
 else
-  skip pi
+  bad pi "pi is not in the smoke image"
 fi
 
 # --- opencode: a profile-only agent must appear in the resolved config -------
@@ -278,6 +309,26 @@ if command -v opencode >/dev/null 2>&1; then
   "$AP" delete --yes opencode:apsmoke >/dev/null 2>&1
   "$AP" create opencode:apsmoke >/dev/null 2>&1
   d=$("$AP" which opencode:apsmoke)
+  # All three Shared credentials, asserted before opencode runs, for the same
+  # reason claude's is: a real file appearing later would be the agent's doing.
+  notlinked=
+  for c in auth.json account.json mcp-auth.json; do
+    [ -L "$d/$c" ] || notlinked="$notlinked $c"
+  done
+  if [ -n "$notlinked" ]; then
+    bad opencode "not symlinks, so the profile is not sharing auth:$notlinked"
+  else
+    pass opencode "the three credentials are shared"
+  fi
+  # Matched on the provider name, not on the count. With no credential reachable
+  # the listing prints "0 credentials" and no provider line at all, whereas
+  # grepping "1 credentials" would also match "11 credentials" — the same
+  # unanchored trap that made codex's "logged in" check unable to fail.
+  if timeout 180 "$AP" run opencode:apsmoke auth list 2>/dev/null | grep -q "Anthropic"; then
+    pass opencode "the credential was reached through the shared link"
+  else
+    bad opencode "profile never reached the credential - auth.json link broken"
+  fi
   mkdir -p "$d/agent"
   # shellcheck disable=SC2016  # $schema is a literal JSON key, not a shell variable
   printf '{"$schema":"https://opencode.ai/config.json"}' > "$d/opencode.json"
@@ -337,13 +388,13 @@ if command -v opencode >/dev/null 2>&1; then
     pass opencode "sessions stay inside the profile"
   fi
 else
-  skip opencode
+  bad opencode "opencode is not in the smoke image"
 fi
 
 # --- default: <agent>:default is the real config dir, undeletable, and
 #     --from default clones configuration only, none of the runtime ----------
 for ag in $(agents); do
-  command -v "$ag" >/dev/null 2>&1 || { skip "$ag"; continue; }
+  command -v "$ag" >/dev/null 2>&1 || { bad "$ag" "$ag is not in the smoke image"; continue; }
   # marker is one file CloneAllow actually names for this agent, checked only
   # when present in the real config - proof that --from default clones
   # something, not just that it leaves runtime behind. runtime is real state
@@ -466,7 +517,7 @@ if command -v claude >/dev/null 2>&1; then
       bad mcp "apsmokemcp not listed - MCP at user scope did not reach the profile"
     fi
   else
-    skip mcp
+    bad mcp "npx is not in the smoke image"
   fi
 
   # --- and now the clone ---
@@ -566,14 +617,18 @@ if command -v claude >/dev/null 2>&1; then
   for p in claude:apsmokeplug claude:apsmokeclone; do "$AP" delete --yes "$p" >/dev/null 2>&1; done
   rm -rf "$neutral"
 else
-  skip plugin
+  bad plugin "claude is not in the smoke image"
 fi
 
 # --- first run: create seeds the onboarding flag, and only that key ----------
 # Without it a new profile opens on claude's theme picker even though the shared
 # credential has it logged in. Checked on the file rather than by driving the
 # wizard: the wizard needs a pty and 25s, this needs neither.
-if command -v claude >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
+if ! command -v claude >/dev/null 2>&1; then
+  bad firstrun "claude is not in the smoke image"
+elif [ ! -f "$HOME/.claude.json" ]; then
+  bad firstrun "the seeded home has no ~/.claude.json to seed from"
+else
   "$AP" delete --yes claude:apsmokeseed >/dev/null 2>&1
   "$AP" create claude:apsmokeseed >/dev/null 2>&1
   seeded="$("$AP" which claude:apsmokeseed)/.claude.json"
@@ -590,8 +645,6 @@ if command -v claude >/dev/null 2>&1 && [ -f "$HOME/.claude.json" ]; then
     pass firstrun "and nothing else from ~/.claude.json"
   fi
   "$AP" delete --yes claude:apsmokeseed >/dev/null 2>&1
-else
-  skip firstrun
 fi
 
 # --- link: create writes a wrapper that is executable and reaches the profile
@@ -620,7 +673,7 @@ if command -v claude >/dev/null 2>&1; then
   fi
   rm -rf "$linkdir"
 else
-  skip claude
+  bad claude "claude is not in the smoke image"
 fi
 
 # --- variant: the stored arguments actually reach the binary ----------------
@@ -678,7 +731,7 @@ if command -v claude >/dev/null 2>&1; then
   fi
   rm -rf "$vlink"
 else
-  skip variant
+  bad variant "claude is not in the smoke image"
 fi
 
 # --- every variable set must point inside the profile -----------------------
@@ -727,7 +780,9 @@ before=$(find "$HOME/.claude/projects" -mindepth 1 -maxdepth 1 2>/dev/null | wc 
 for p in claude codex pi opencode; do "$AP" delete --yes "$p:apsmoke" >/dev/null 2>&1; done
 after=$(find "$HOME/.claude/projects" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
 lost=""
-for c in "$HOME/.claude/.credentials.json" "$HOME/.codex/auth.json" "$HOME/.pi/agent/auth.json"; do
+for c in "$HOME/.claude/.credentials.json" "$HOME/.codex/auth.json" "$HOME/.pi/agent/auth.json" \
+         "$HOME/.local/share/opencode/auth.json" "$HOME/.local/share/opencode/account.json" \
+         "$HOME/.local/share/opencode/mcp-auth.json"; do
   [ -e "$c" ] || lost="$lost ${c#"$HOME"/}"
 done
 if [ -n "$lost" ]; then

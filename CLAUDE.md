@@ -59,8 +59,8 @@ release command goes through `scripts/dev.sh`, which runs it inside the pinned
 `in_container` macro and delegate to a private `_name` half; add both when you
 add a gate, and never wrap a target that must touch the real home.
 
-Host-only targets, deliberately: `install`, and the housekeeping ones. That list
-used to include `smoke`; it does not any more — see below.
+Host-only targets, deliberately: `install` and the housekeeping ones. `smoke` is
+not one of them — it runs in its own image, like everything else.
 
 `AP_IN_DEVTOOLS=1` skips the container. It exists for CI's macOS runner, which
 has no docker. Do not reach for it to avoid a slow first image build.
@@ -86,12 +86,12 @@ passing vacuously, and the two orderings that are.
 
 ## Share conflicts are healed, and the user picks the survivor
 
-`Link` used to abort on finding a real file where a share's symlink belongs.
-That was measured wrong on this machine — claude's own temp-file-plus-rename
-replaces the symlink during ordinary use, and `ap run` on those profiles was
-dead until someone moved the file by hand.
+A share's symlink gets replaced by a real file during ordinary use: claude
+writes its credential with a temp-file-plus-rename, which lands on top of the
+link. `Link` must cope with that on its own — never refuse and tell the user to
+move the file by hand.
 
-Two rules came out of that, and neither may be weakened:
+Two rules, and neither may be weakened:
 
 - **A real file is healed, not refused.** Rename to `<rel>.ap-orphan` through
   the same `os.Root`, relink, and say so. Renamed and not removed: it is a
@@ -362,8 +362,8 @@ is the only thing that can catch an upstream change. When both could cover an
 assertion, the sandbox is where it belongs — smoke's version of the variant
 check is now the weaker of the two and says so.
 
-Neither touches the real home any more. Both build their own, seeded, inside a
-container, and throw it away.
+Neither touches the real home. Both build their own, seeded, inside a container,
+and throw it away.
 
 ## Releasing
 

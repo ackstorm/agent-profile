@@ -11,25 +11,51 @@ pins **nothing**, on purpose: smoke exists to catch the day an agent changes wha
 it does with the variable ap hands it, and a pinned agent freezes the very thing
 under observation. Do not "stabilise" it with versions.
 
-`make smoke` runs there now, not on the host. Two things follow:
+`make smoke` runs there, not on the host. Two things follow:
 
-- Do not reintroduce a `command -v <agent>` guard as a reason to skip on the
-  host. The agents are in the image; if one is missing, that is a broken image
-  and a red run, not a skip.
+- **A missing agent fails the run.** Every `command -v <agent>` guard ends in
+  `bad`, so an absent binary sets `fail=1` and smoke exits non-zero. The image
+  installs all four, so absence means a broken image — most likely a package
+  that renamed its binary, which is exactly what pinning nothing invites.
+  Not `skip`: that keeps `fail` at 0, so the run prints "all checks passed"
+  having tested nothing. `skip` is only for a check that cannot observe its
+  property in this environment, and it must say why — see the
+  `ANTHROPIC_API_KEY` and `--from default` cases.
 - The seeded home is load-bearing. Every "shared state survived" assertion is
   vacuous against an empty one, and three checks were caught passing that way:
   a `[user]` git section with no keys made the shim passthrough compare 0 against
   0, and the credential and transcript assertions had nothing to lose. When you
   add a check, seed what it needs to be able to fail.
 
-Both credentials in the seed are synthesised, from the **field names** of a real
-one and never a value. Neither needs to be accepted, because neither check is
-about acceptance: what is asserted is that the profile REACHED the file through
-ap's symlink. claude distinguishes the two cases itself — "Not logged in ·
-Please run /login" when it cannot get to the credential, "Failed to
-authenticate" when it read one and the token was rejected. Only the first is
-ap's business. With `ANTHROPIC_API_KEY` set claude does not open the credential
-at all, so that check skips rather than passing with the link severed.
+Every credential in the seed is synthesised, from the **field names** of a real
+one and never a value. All four agents are covered: claude's
+`.credentials.json`, codex's and pi's `auth.json`, and opencode's three
+(`auth.json`, `account.json`, `mcp-auth.json`). None needs to be accepted,
+because no check is about acceptance: what is asserted is that the profile
+REACHED the file through ap's symlink. Each agent reports that without
+validating anything and without a network —
+
+| agent    | asked with                                        | reached | not reached                  |
+|----------|---------------------------------------------------|---------|------------------------------|
+| claude   | a `-p` run                                        | "Failed to authenticate" | "Not logged in · Please run /login" |
+| codex    | `codex login status`                              | "Logged in" | "Not logged in"           |
+| pi       | `pi auth check --provider … --no-refresh --json`  | `"status":"ready"` | `credentials_not_configured` |
+| opencode | `opencode auth list`                              | provider line, "1 credentials" | "0 credentials" |
+
+Only "not reached" is ap's business. With `ANTHROPIC_API_KEY` set claude does not
+open the credential at all, so that check skips rather than passing with the link
+severed.
+
+pi's entry is what the rule above costs in practice. Its seed held `{}` until the
+checks were added, and `{}` answers `credentials_not_configured` — the same
+answer a severed link gives, so no check written against it could ever have
+failed. Seeding a credential it can actually read is what made the assertion
+possible.
+
+Two of those four answers contain their own negative, so both are anchored:
+`"status":"ready"` on the JSON field, never a bare `ready`, because the negative
+is `not_ready`; and opencode on the **provider name**, never `1 credentials`,
+which is a substring of `11 credentials`.
 
 Two orderings there are load-bearing, and both were found by reverting a guard:
 
