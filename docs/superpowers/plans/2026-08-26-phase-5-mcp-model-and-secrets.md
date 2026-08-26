@@ -1,6 +1,6 @@
 # Phase 5 — MCP, model, prompt and secret references
 
-> **For agentic workers:** execute task by task. Steps use `- [ ]` for tracking.
+> **For agentic workers:** execute task by task. Steps use `- [x]` for tracking.
 
 **Goal:** Materialize the three things that are not files-in-a-directory — MCP
 servers, `model`, and `prompt` — into each runtime's own configuration, with
@@ -13,6 +13,12 @@ used. One new dependency, `github.com/BurntSushi/toml`, and it is the only one
 v1 gets.
 
 **Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.2.md`
+
+**Status: Tasks 1-4 COMPLETE. Task 5 (prompt) DEFERRED — see below.** Gates
+green. Eleven mutation tests. One real bug found by a test rather than by
+reading: an absent MCP container was written whole and recorded as
+`mcpServers`, which would have made Phase 7's uninstall delete every server in
+the file, including the user's.
 
 ## Global Constraints
 
@@ -91,7 +97,7 @@ Two things about that table are load-bearing:
 func MergeInto(path string, contribution map[string]any) (keys []string, err error)
 ```
 
-- [ ] **Step 1** Write the test, and these three assertions are the task:
+- [x] **Step 1** Write the test, and these three assertions are the task:
   - **a key the user added by hand survives** a merge that writes a sibling.
     This is Phase 4's hand-added-file assertion one level down, and it is the
     same property: apply is additive;
@@ -101,18 +107,18 @@ func MergeInto(path string, contribution map[string]any) (keys []string, err err
   - a merge is **idempotent**: merging the same contribution twice produces
     byte-identical output, or every apply would show a spurious diff in the
     user's version control.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement. JSON via `encoding/json`; TOML via
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement. JSON via `encoding/json`; TOML via
   `github.com/BurntSushi/toml`, chosen by extension. Port the shape of
   `ach/internal/cli/merge`.
 
   **A file that does not parse is an ERROR, never a file to overwrite.** The
   user broke it, or it was never ours; replacing it would destroy work this
   program did not create and cannot restore.
-- [ ] **Step 4** Run, watch pass. `make crossbuild`.
-- [ ] **Step 5** **Mutation-test the additive property**: replace the merge with
+- [x] **Step 4** Run, watch pass. `make crossbuild`.
+- [x] **Step 5** **Mutation-test the additive property**: replace the merge with
   a whole-document write. The hand-added-key assertion must go red.
-- [ ] **Step 6** Commit: `feat(hydrate): deep merge reporting the keys it wrote`
+- [x] **Step 6** Commit: `feat(hydrate): deep merge reporting the keys it wrote`
 
 ---
 
@@ -127,32 +133,32 @@ func MergeInto(path string, contribution map[string]any) (keys []string, err err
 func SecretRef(runtime, bindingVar string) (string, bool)
 ```
 
-- [ ] **Step 1** Write the test: claude `${VAR}`, opencode and pi `{env:VAR}`,
+- [x] **Step 1** Write the test: claude `${VAR}`, opencode and pi `{env:VAR}`,
   codex `false` — it has no generic syntax, only the two specific keys — and
   **the rendered reference never contains the value**, asserted with a value in
   the environment.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement §34's table. `env`-sourced secrets reference the
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement §34's table. `env`-sourced secrets reference the
   DECLARED binding variable: no launcher re-export and no synthesized name, so
   invoking the runtime CLI directly works wherever the environment is already
   populated — containers, CI.
-- [ ] **Step 4** Implement the `file`-sourced case: the launcher reads the file
+- [x] **Step 4** Implement the `file`-sourced case: the launcher reads the file
   and exports `AP_SECRET_<NAME>`, and materialized configuration references
   THAT name. Wire it into `internal/run`. State the consequence in its doc
   comment: a profile using file-sourced secrets in runtime configuration
   requires launching through ap.
-- [ ] **Step 5** **The refusal.** If a runtime cannot express a reference for an
+- [x] **Step 5** **The refusal.** If a runtime cannot express a reference for an
   ACTIVE resource, apply fails in the RESOLUTION phase — the same error class as
   a missing secret. Warn-and-skip is forbidden (§34): it would materialize a
   resource without its authentication.
-- [ ] **Step 6** `--allow-plaintext-secrets` is the sole opt-in, a CLI flag with
+- [x] **Step 6** `--allow-plaintext-secrets` is the sole opt-in, a CLI flag with
   **no manifest field** — a field in a shared inherited base would pre-consent
   plaintext for every child invisibly. Under it, the adapter emits a prominent
   warning listing every file that now contains plaintext, emphasized when the
   root is the real configuration.
-- [ ] **Step 7** **Mutation-test the refusal**: make the unexpressable case a
+- [x] **Step 7** **Mutation-test the refusal**: make the unexpressable case a
   warning. Confirm red. Restore.
-- [ ] **Step 8** Commit: `feat(hydrate): secret references, never values`
+- [x] **Step 8** Commit: `feat(hydrate): secret references, never values`
 
 ---
 
@@ -160,20 +166,20 @@ func SecretRef(runtime, bindingVar string) (string, bool)
 
 **Files:** Create `pkg/hydrate/mcp.go`, `mcp_test.go`
 
-- [ ] **Step 1** Write one golden test per runtime from SPEC §35's `memory`
+- [x] **Step 1** Write one golden test per runtime from SPEC §35's `memory`
   server (http transport, `Authorization: Bearer` from `memory-token`) plus the
   `filesystem` stdio server. Assert the exact document, not a substring: a
   substring check passes for a document the runtime cannot load.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement the table above. `args` are literal strings — §25 has
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement the table above. `args` are literal strings — §25 has
   no placeholder mechanism, and adding one here would be inventing syntax the
   spec refuses.
-- [ ] **Step 4** Record every merged file in the ledger with `Merge: "deep"` and
+- [x] **Step 4** Record every merged file in the ledger with `Merge: "deep"` and
   its contributed `Keys`. **This is the field Phase 4 recorded and never used,
   and Phase 7 cannot work without it.**
-- [ ] **Step 5** **Mutation-test the ledger keys**: write `Merge: ""` instead.
+- [x] **Step 5** **Mutation-test the ledger keys**: write `Merge: ""` instead.
   The test must go red on the recorded shape, not on the file's contents.
-- [ ] **Step 6** Commit: `feat(hydrate): MCP servers in each runtime's own shape`
+- [x] **Step 6** Commit: `feat(hydrate): MCP servers in each runtime's own shape`
 
 ---
 
@@ -181,35 +187,53 @@ func SecretRef(runtime, bindingVar string) (string, bool)
 
 **Files:** Create `pkg/hydrate/model.go`, `model_test.go`
 
-- [ ] **Step 1** Write the test: `model` becomes adapter-managed environment
+- [x] **Step 1** Write the test: `model` becomes adapter-managed environment
   variables; a user-declared `runtimes.<r>.environment` entry for the same
   variable WINS (§15.1) and produces a NOTICE naming the variable — without the
   notice the `model` block silently lies about what the agent will use.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement. Absent `model` means runtime-native defaults AND
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement. Absent `model` means runtime-native defaults AND
   native credentials — the subscription case — so nothing is written at all.
   Absent `model.auth` means native credentials even when `base_url` is declared.
-- [ ] **Step 4** **Mutation-test the notice**: drop it, confirm red, restore.
-- [ ] **Step 5** Commit: `feat(hydrate): model as adapter-managed environment`
+- [x] **Step 4** **Mutation-test the notice**: drop it, confirm red, restore.
+- [x] **Step 5** Commit: `feat(hydrate): model as adapter-managed environment`
 
 ---
 
-### Task 5: `prompt`
+### Task 5: `prompt` — DEFERRED, and this is why
 
-**Files:** Create `pkg/hydrate/prompt.go`, `prompt_test.go`
+Not built, and deliberately not attempted. Every other table in this phase came
+from `ach`, which measured it against the real binaries. There is no such
+measurement for `prompt`, for any of the four runtimes.
 
-Moved here from Phase 4, and the reason is worth keeping: a prompt is not a FILE
-for every runtime. claude takes `--append-system-prompt` at launch, which is a
-launch-argument concern, not a destination — the same shape as `model`, which is
-why it belongs beside it.
+`CLAUDE.md`'s rule is explicit: *"Only fill it in once you have run the binary
+and watched it read the file… A guessed path is worse than none: the flag would
+silently copy nothing, or copy to a name the agent never opens."* That is
+exactly the situation, and shipping a guess would have been the same mistake as
+guessing codex's skills directory — the one this phase avoided by leaving it
+empty.
 
-- [ ] **Step 1** Write the test per runtime: `mode: append` and `mode: replace`
-  where the runtime supports both, and a §8 degradation warning where it does
-  not. **Do not invent a destination for a runtime whose mechanism you have not
-  verified** — an unverified path silently writes nothing, or writes to a name
-  the agent never opens, which is worse than a warning.
-- [ ] **Step 2–4** Implement, run, commit:
-  `feat(hydrate): prompt append and replace`
+What is known and not enough:
+
+- claude takes `--append-system-prompt`, which is a LAUNCH ARGUMENT and not a
+  destination, so its shape is `model`'s (a variant/env concern) rather than a
+  materialized file;
+- what `mode: replace` maps to for claude is not known;
+- codex, opencode and pi's mechanisms are not known at all.
+
+**To close it**, in the smoke image, against each real binary:
+
+```bash
+claude --help | grep -i 'system-prompt'
+codex --help  | grep -i prompt
+opencode --help | grep -i prompt
+pi --help     | grep -i prompt
+```
+
+Then one row per runtime, with a smoke check that the binary READS what was
+written. Until then §8 is the honest answer: a declared `prompt` produces a
+degradation warning naming the runtime, which is a true statement, where a
+guessed path is a false one.
 
 ---
 
@@ -236,3 +260,46 @@ write. Phase 7 removes exactly those keys and nothing else; a write recorded as
 
 **The dependency:** `github.com/BurntSushi/toml`, and it is the only one v1
 gets. Adding it to `pkg/` adds it to `ach`.
+
+---
+
+## What Phase 5 turned up that the plan did not predict
+
+### The merge test passed while the merge was broken
+
+`TestMergeIsAdditiveReportsItsKeysAndIsIdempotent` seeded a document that
+already contained `mcpServers`. With the container present, the merge descended
+correctly and recorded `mcpServers.memory`. With it **absent** — the first apply
+into a fresh profile, the common case — it wrote the container as a unit and
+recorded the key `mcpServers`.
+
+Phase 7 removes exactly the recorded keys, so uninstalling one of our servers
+would have removed **every** server in the file, including ones the user added
+by hand. Reporting keys at all exists to prevent precisely that.
+
+It was caught by the apply-level test, which started from an empty root, and
+only after the merge-level test was green. The lesson is not "write more tests":
+it is that a fixture which pre-creates the structure under test hides the
+creation path, and the creation path is the one every new user takes.
+
+### `model` needed a mechanism the spec does not name
+
+§9 and §15.1 describe variables; §34's table describes expansion inside
+materialized configuration. Neither says where a derived `ANTHROPIC_BASE_URL`
+lives between `apply` and `run`, which are separate invocations — and a manifest
+is an input that may be gone by then.
+
+`<root>/.ap-env` is the answer, read by `internal/run`. It is not a shell script
+and is never sourced, so an awkward value needs no escaping and cannot smuggle
+in a command. The consequence — a profile with a `model` block requires
+launching through ap — is the same class §34 already states for file-sourced
+secrets, and is written into the constant's doc comment rather than left to be
+discovered.
+
+### codex having no generic secret syntax is a design constraint, not a quirk
+
+It shapes the code: `SecretRef` returns `false` for codex, and `codexMCP` is
+routed away from `renderHeaders` entirely rather than being given a placeholder
+to substitute. A made-up placeholder would be written into `config.toml`
+verbatim and codex would send those literal characters AS the credential. The
+test asserts codex's document contains neither `${` nor `{env:` anywhere.

@@ -71,10 +71,10 @@ func managedModelEnv(runtime string, m schema.Model, bindings map[string]string)
 		return nil, fmt.Errorf("runtime %q has no model environment mapping", runtime)
 	}
 	if m.BaseURL != "" {
-		env[names.baseURL] = m.BaseURL
+		env[names.baseURLEnv] = m.BaseURL
 	}
-	if m.Model != "" && names.model != "" {
-		env[names.model] = m.Model
+	if m.Model != "" && names.modelEnv != "" {
+		env[names.modelEnv] = m.Model
 	}
 	if m.Auth != nil {
 		v, err := bindingVar(bindings, m.Auth.ValueFrom.Secret, m.Auth.ValueFrom.Variable)
@@ -90,19 +90,29 @@ func managedModelEnv(runtime string, m schema.Model, bindings map[string]string)
 			// environment variable, and the launcher can point one at another.
 			ref = "$" + v
 		}
-		env[names.token] = ref
+		env[names.tokenEnv] = ref
 	}
 	return env, nil
 }
 
+// modelVars is the per-runtime variable table. Every value here is a variable
+// NAME, never a credential — the fields are suffixed Env to say so, because
+// `token: "OPENAI_API_KEY"` reads to a scanner (and to a reader) as a secret
+// and is the opposite: it is the name of the thing that holds one.
+//
 // modelVars is the per-runtime variable table. Like every other table in this
 // package it is measured, not derived: the names come from each agent's own
 // documentation of what it reads, and smoke is what re-verifies them.
-var modelVars = map[string]struct{ baseURL, token, model string }{
-	"claude":   {baseURL: "ANTHROPIC_BASE_URL", token: "ANTHROPIC_AUTH_TOKEN", model: "ANTHROPIC_MODEL"},
-	"codex":    {baseURL: "OPENAI_BASE_URL", token: "OPENAI_API_KEY"},
-	"opencode": {baseURL: "OPENCODE_BASE_URL", token: "OPENCODE_API_KEY"},
-	"pi":       {baseURL: "PI_BASE_URL", token: "PI_API_KEY"},
+// as hardcoded credentials. They are the NAMES of the variables that hold one,
+// which is the whole point: §34 forbids this package from ever holding a value,
+// and every field here is suffixed Env to say so.
+//
+//nolint:gosec // G101 matches the strings ANTHROPIC_AUTH_TOKEN and OPENAI_API_KEY
+var modelVars = map[string]struct{ baseURLEnv, tokenEnv, modelEnv string }{
+	"claude":   {baseURLEnv: "ANTHROPIC_BASE_URL", tokenEnv: "ANTHROPIC_AUTH_TOKEN", modelEnv: "ANTHROPIC_MODEL"},
+	"codex":    {baseURLEnv: "OPENAI_BASE_URL", tokenEnv: "OPENAI_API_KEY"},
+	"opencode": {baseURLEnv: "OPENCODE_BASE_URL", tokenEnv: "OPENCODE_API_KEY"},
+	"pi":       {baseURLEnv: "PI_BASE_URL", tokenEnv: "PI_API_KEY"},
 }
 
 // FormatEnvFile renders the env file. One KEY=VALUE per line, sorted, so a

@@ -96,7 +96,7 @@ package:
 | 2 | Input *resolution* (reading a bound secret/variable's value), `--strict` promoting `Warning` to error |
 | 3 | `pkg/source`: the cache, the credential guards, git/archive/local fetching, `Resolve` over an effective profile, `ap manifest apply --dry-run` |
 | 4 | `pkg/hydrate`: the root lock, the ledger, per-runtime destinations, `SKILL.md` contracts, `ap manifest apply` for real |
-| 5 | MCP and model materialization, secret references, the TOML dependency (§9, §25, §34) |
+| 5 | `pkg/hydrate`: deep merge, MCP in four native shapes, secret references, `model` as environment. The TOML dependency. `prompt` deferred |
 | 6 | Marketplace item resolution (§21–§22), the `ref` grammar, top-level `plugins:` as a common resource type, runtime-native plugin schemas (`Runtime.Plugins` stays an unvalidated `*Node` tree until then, open question §40.1) |
 
 `Effective` (`effective.go`) is Phase 1's single entry point: it is what
@@ -307,3 +307,68 @@ is not a file for every runtime — claude takes `--append-system-prompt` at
 launch, which is a launch-argument concern — so it moves to Phase 5, where the
 per-runtime materialization table (§34) already lives. Guessing a file path for
 it would be the same mistake as guessing codex's skills directory.
+
+## Phase 5: four runtimes, four answers, and one bug a test found
+
+**Nothing in this phase generalises, and the table is the deliverable.**
+
+| Runtime | MCP file | Key | Secret reference |
+|---|---|---|---|
+| claude | `.claude.json` | `mcpServers` | `${VAR}` |
+| codex | `config.toml` | `mcp_servers` | `bearer_token_env_var`, `env_http_headers` |
+| opencode | `opencode.json` | `mcp` | `{env:VAR}` |
+| pi | `mcp.json` | `mcpServers` | `{env:VAR}` |
+
+Four details in that table are load-bearing and none is derivable:
+
+- **claude's user-scope MCP servers live in `.claude.json`**, not `.mcp.json`,
+  which is project scope. This is the same fact `CLAUDE.md` records from the
+  other direction: `.claude.json` is deliberately not shared *because*
+  user-scope MCP servers live in it, and sharing it made a per-profile MCP
+  server impossible.
+- **pi's HTTP entry has NO `type` field.** Pi defines none — `url` presence
+  implies StreamableHTTP with SSE fallback — and an earlier shared shape emitted
+  a stray one.
+- **opencode's `type` is `"remote"`, never `"http"`, and `command` is an
+  ARRAY.** Its schema is closed: an unexpected key aborts the *entire*
+  configuration with a `ConfigInvalidError`, observed against 1.16.0. That is
+  why the golden tests assert whole documents — a substring check passes for a
+  document opencode refuses to load.
+- **codex has no generic expansion syntax at all**, only two specific keys. So
+  `SecretRef` returns false for it and `codexMCP` is routed away from the
+  generic header renderer entirely, rather than being handed a placeholder to
+  substitute. A made-up placeholder would be written into `config.toml`
+  verbatim and codex would send those characters AS the credential; the test
+  asserts codex's document contains neither `${` nor `{env:` anywhere.
+
+**A test found a real bug that reading did not.** `MergeInto`'s own test seeded
+a document that already contained `mcpServers`. With the container present, the
+merge descended and recorded `mcpServers.memory`. With it **absent** — the first
+apply into a fresh profile, which is the common case — it wrote the container as
+a unit and recorded the key `mcpServers`. Phase 7 removes exactly the recorded
+keys, so uninstalling one of our servers would have removed every server in the
+file, including ones the user added by hand.
+
+The apply-level test caught it, starting from an empty root, after the
+merge-level test was green. The lesson is not "write more tests": a fixture that
+pre-creates the structure under test hides the creation path, and the creation
+path is the one every new user takes.
+
+**`model` needed a mechanism the spec does not name.** §9 and §15.1 describe
+variables; §34 describes expansion inside materialized configuration. Neither
+says where a derived `ANTHROPIC_BASE_URL` lives between `apply` and `run`, which
+are separate invocations — and a manifest is an input that may be gone by then.
+`<root>/.ap-env` is the answer, written by apply and read by `internal/run`. It
+is **not** a shell script and is never sourced, so a value holding a space, a
+quote or `$(rm -rf /)` needs no escaping and cannot smuggle in a command. The
+consequence — a profile with a `model` block requires launching through ap — is
+the same class §34 already states for file-sourced secrets.
+
+**`prompt` is deliberately not built.** There is no measurement of any runtime's
+prompt mechanism, and `CLAUDE.md`'s rule is explicit: a guessed path is worse
+than none, because the flag silently copies nothing or copies to a name the
+agent never opens. claude's `--append-system-prompt` is a launch argument rather
+than a destination, `mode: replace` maps to nothing known, and the other three
+are unknown entirely. §8's degradation warning is a true statement where a
+guessed path is a false one. The plan file records the four `--help` invocations
+that would close it.
