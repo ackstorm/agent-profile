@@ -233,6 +233,18 @@ type Agent struct {
 	// FirstRun names the keys `ap create` seeds a new profile with so the agent
 	// does not re-run its first-run wizard. See FirstRun's doc comment.
 	FirstRun *FirstRun
+	// Skills is where this agent reads Agent Skill directories (§23), relative
+	// to its CONFIG directory — so it is a path inside whatever ap points
+	// ConfigEnv at, and a per-profile skill is isolated by construction.
+	//
+	// Empty means this agent has no skills destination inside its config
+	// directory, and hydrating one for it is a §8 degradation: warn and skip,
+	// never a silent drop. codex is that case — its skills live under
+	// ~/.agents/skills, OUTSIDE CODEX_HOME, so pointing CODEX_HOME at a
+	// profile does not isolate them and writing there would leak one profile's
+	// skills into every other. Measured by ach and carried verbatim; smoke is
+	// what re-verifies it against the real binaries.
+	Skills string
 	// Setup is printed after `ap create`, because a profile now starts genuinely
 	// empty and the next step is different for every agent. One %s verb, given the
 	// <agent>:<profile> reference. Each command was taken from that binary's own
@@ -326,6 +338,7 @@ func registry() map[string]Agent {
 			Bin:       "claude",
 			Config:    filepath.Join(h, ".claude"),
 			ConfigEnv: "CLAUDE_CONFIG_DIR",
+			Skills:    "skills",
 			Mode:      Replace,
 			Shared: []Share{
 				{Rel: ".credentials.json", From: filepath.Join(h, ".claude", ".credentials.json")},
@@ -371,7 +384,12 @@ func registry() map[string]Agent {
 			Bin:       "codex",
 			Config:    filepath.Join(h, ".codex"),
 			ConfigEnv: "CODEX_HOME",
-			Mode:      Replace,
+			// Skills is deliberately EMPTY: codex reads skills from
+			// ~/.agents/skills, outside CODEX_HOME, so pointing that variable
+			// at a profile does not isolate them. Writing there anyway would
+			// leak one profile's skills into every other profile and into the
+			// user's bare codex. Warn and skip is the honest answer (§8).
+			Mode: Replace,
 			Shared: []Share{
 				{Rel: "auth.json", From: filepath.Join(h, ".codex", "auth.json")},
 			},
@@ -418,6 +436,7 @@ func registry() map[string]Agent {
 			Bin:       "pi",
 			Config:    filepath.Join(h, ".pi", "agent"),
 			ConfigEnv: "PI_CODING_AGENT_DIR",
+			Skills:    "skills",
 			Mode:      Replace,
 			Shared: []Share{
 				// Empty ({}) on the reference machine: pi reads provider keys from env
@@ -457,6 +476,7 @@ func registry() map[string]Agent {
 			// Pointing it at the shim rather than the raw profile is what keeps that
 			// safe for every other program in the process tree.
 			ConfigEnv: "XDG_CONFIG_HOME",
+			Skills:    "skills",
 			Mode:      Replace,
 			// Two shared variables, no private alternative for either. Config
 			// comes from XDG_CONFIG_HOME; sessions, credentials and snapshots
