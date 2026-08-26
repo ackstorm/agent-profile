@@ -71,7 +71,7 @@ endef
 
 # The private in-container halves. Declared phony so a stray file named after
 # one of them can never make a gate silently no-op.
-.PHONY: _build _snapshot _test _test-verbose _cover _fuzz _fmt _fmt-check _vet \
+.PHONY: _build _snapshot _test _test-one _test-verbose _cover _fuzz _fmt _fmt-check _vet \
 	_lint _lint-fix _vulncheck _secrets _shellcheck _release-publish _verify
 
 ##@ General
@@ -208,6 +208,12 @@ test: ## Run all tests with race detection and shuffling.
 	$(call in_container,_test)
 _test:
 	go test -race -shuffle=on -count=1 -coverprofile coverage.out ./...
+
+.PHONY: test-one
+test-one: ## Run one test or package. make test-one T=TestName P=./internal/foo/
+	$(call in_container,_test-one T='$(T)' P='$(P)')
+_test-one:
+	go test -race -count=1 -run '$(T)' $(if $(P),$(P),./...)
 
 .PHONY: test-verbose
 test-verbose: ## Run all tests, listing every test name.
