@@ -38,7 +38,7 @@ type Resource struct {
 	Source  *Source // §16
 }
 
-// Source is §16's branch-keyed union: exactly one of Git or Local.
+// Source is §16's branch-keyed union: exactly one of Git, Local or Archive.
 type Source struct {
 	Git     *GitSource
 	Local   *LocalSource

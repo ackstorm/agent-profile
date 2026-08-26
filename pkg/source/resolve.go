@@ -1,0 +1,192 @@
+package source
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+
+	"github.com/ackstorm/agent-profile/pkg/schema"
+)
+
+// ErrSecretUnset is what a Secret function returns when a declared binding has
+// no value. Resolve wraps it with the resource that referenced it, because the
+// referrer is what turns a ten-minute hunt into a two-minute fix — and §12's
+// own worked example omits it.
+var ErrSecretUnset = errors.New("secret is not set")
+
+// errRefDeferred marks a ref-backed resource. It is not a failure: Phase 6
+// resolves it against a marketplace catalogue.
+var errRefDeferred = errors.New("marketplace ref")
+
+// Opts is everything Resolve needs from its caller. ManifestDir is a parameter
+// like every other root in pkg/: nothing here reads $HOME.
+type Opts struct {
+	Cache       *Cache
+	ManifestDir string
+	// Secret resolves a binding NAME to a value, transiently (§34). nil means
+	// no secret can be resolved, which is correct for a profile that
+	// references none and an error for one that does.
+	Secret func(name string) (string, error)
+}
+
+// Report is §17.1's mandatory disclosure and §21.2's, carried out of a
+// successful resolution rather than only out of a failure. An inference that
+// is invisible when it works is undebuggable when it stops working.
+type Report struct{ Resource, Text string }
+
+// Resolve turns every ACTIVE locator in an effective profile into bytes.
+//
+// Walk order is sorted by resource name so two runs produce the same reports in
+// the same order: a report nobody can diff is a report nobody reads.
+//
+// A disabled resource is skipped entirely, and its secret is never read — §12
+// computes requirements from active resources, and reading a disabled
+// resource's token would make it required in practice while the spec says it
+// is not.
+func Resolve(ctx context.Context, p schema.Profile, o Opts) (map[string]Resolved, []Report, error) {
+	out := map[string]Resolved{}
+	var reports []Report
+
+	for _, it := range locators(p) {
+		res, err := resolveOne(ctx, it, o)
+		if errors.Is(err, errRefDeferred) {
+			reports = append(reports, Report{
+				Resource: it.name,
+				Text:     it.ref + " — marketplace item resolution is Phase 6; not resolved here",
+			})
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", it.name, err)
+		}
+		out[it.name] = res
+		if res.ResolvedRef != "" || res.SchemeInferred {
+			reports = append(reports, Report{
+				Resource: it.name,
+				Text:     resolutionText(res),
+			})
+		}
+	}
+	return out, reports, nil
+}
+
+func resolutionText(r Resolved) string {
+	text := r.ResolvedRef
+	if r.Anonymous {
+		return text + " (anonymous)"
+	}
+	return text + " auth " + r.SchemeUsed.Report(r.SchemeInferred)
+}
+
+// item is one active locator with the name diagnostics will use.
+type item struct {
+	name   string
+	source *schema.Source
+	ref    string
+}
+
+// locators collects every active locator in a stable order.
+//
+// A ref-backed resource is collected too, and resolveOne reports it as
+// deferred rather than skipping it. Marketplace item resolution is Phase 6
+// (§21.1), and a resource that silently produced nothing here would be §8's
+// silent drop in the one output telling a user what apply will do.
+func locators(p schema.Profile) []item {
+	var items []item
+	add := func(kind string, names []string, get func(string) (*schema.Source, string, bool)) {
+		sort.Strings(names)
+		for _, n := range names {
+			src, ref, enabled := get(n)
+			if !enabled || (src == nil && ref == "") {
+				continue
+			}
+			items = append(items, item{name: kind + " " + n, source: src, ref: ref})
+		}
+	}
+	// Marketplaces first: Phase 6 resolves items against a catalogue, and a
+	// catalogue that cannot be fetched should fail before the resources
+	// naming it do.
+	add("marketplace", keysOf(p.Marketplaces), func(n string) (*schema.Source, string, bool) {
+		m := p.Marketplaces[n]
+		return m.Source, "", m.Enabled
+	})
+	add("skill", keysOf(p.Skills), func(n string) (*schema.Source, string, bool) {
+		r := p.Skills[n]
+		return r.Source, r.Ref, r.Enabled
+	})
+	// No plugins here: §24 makes them a common resource type, but
+	// schema.Profile has no top-level Plugins field yet — Decode's onlyKeys
+	// does not admit the block. Phase 6 adds the field and the routing
+	// together, and this walk gains one add() call at that point.
+	add("artifact", keysOf(p.Artifacts), func(n string) (*schema.Source, string, bool) {
+		a := p.Artifacts[n]
+		return a.Source, "", a.Enabled
+	})
+	if p.Prompt != nil && p.Prompt.Source != nil {
+		items = append(items, item{name: "prompt", source: p.Prompt.Source})
+	}
+	return items
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func resolveOne(ctx context.Context, it item, o Opts) (Resolved, error) {
+	switch {
+	case it.source == nil:
+		// A ref names a marketplace item. Resolving one is Phase 6 (§21.1),
+		// and saying so is what keeps this from being a silent drop.
+		return Resolved{}, errRefDeferred
+	case it.source.Local != nil:
+		return ResolveLocal(o.ManifestDir, *it.source.Local)
+	case it.source.Git != nil:
+		g := it.source.Git
+		token, scheme, err := credential(g.Auth, o)
+		if err != nil {
+			return Resolved{}, err
+		}
+		return FetchGit(ctx, o.Cache, GitSpec{
+			URL: g.URL, Ref: g.Ref, Subpath: g.Subpath,
+			Token: token, DeclaredScheme: scheme,
+		})
+	case it.source.Archive != nil:
+		a := it.source.Archive
+		token, scheme, err := credential(a.Auth, o)
+		if err != nil {
+			return Resolved{}, err
+		}
+		return FetchArchive(ctx, o.Cache, ArchiveSpec{
+			URL: a.URL, Digest: a.Digest, Subpath: a.Subpath,
+			Token: token, DeclaredScheme: scheme,
+		})
+	}
+	return Resolved{}, errors.New("no source branch selected")
+}
+
+// credential reads a locator's secret, transiently. It is called only for an
+// ACTIVE resource, which is what keeps §12's rule true in practice and not
+// only on paper.
+func credential(auth *schema.GitAuth, o Opts) (token, scheme string, err error) {
+	if auth == nil {
+		return "", "", nil
+	}
+	name := auth.ValueFrom.Secret
+	if name == "" {
+		return "", "", fmt.Errorf("auth references no secret")
+	}
+	if o.Secret == nil {
+		return "", "", fmt.Errorf("references secret %q, but no secret resolver was supplied", name)
+	}
+	v, err := o.Secret(name)
+	if err != nil {
+		return "", "", fmt.Errorf("references secret %q: %w", name, err)
+	}
+	return v, auth.Scheme, nil
+}
+
