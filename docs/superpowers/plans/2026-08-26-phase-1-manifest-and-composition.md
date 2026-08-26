@@ -5,7 +5,7 @@
 > task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn a declarative profile YAML file plus its `extends` chain into a
-validated, runtime-specific effective profile, printable with `ap render`, with
+validated, runtime-specific effective profile, printable with `ap manifest render`, with
 no filesystem mutation and no network access.
 
 **Architecture:** One new **exported** package `pkg/schema`, layered bottom-up: a typed
@@ -17,7 +17,7 @@ folds parent trees left-to-right; the composed tree is decoded into a typed
 
 **Tech Stack:** Go 1.25, standard library only. `pkg/schema` carries **no build
 tag** and must compile for windows — `ach` imports it and `ach-cli` ships windows.
-Only `cmd/ap/render.go` keeps `//go:build unix`.
+Only `cmd/ap/manifest.go` keeps `//go:build unix`.
 
 ## Global Constraints
 
@@ -62,7 +62,7 @@ Copied verbatim from `docs/superpowers/plans/2026-08-26-declarative-v1-roadmap.m
 | `pkg/schema/effective.go` | `Effective` — runtime selection, overlay, enabled state, warnings |
 | `pkg/schema/effective_test.go` | Runtime overlay and §7.1/§7.2 warning cases |
 | `pkg/schema/render.go` | Deterministic YAML emit with secret redaction |
-| `cmd/ap/render.go` | `ap render <path> --target <runtime>` and `ap validate <path>` dispatch |
+| `cmd/ap/manifest.go` | `ap manifest render <path> [--target <runtime>]` dispatch |
 
 Also in this phase, as a mechanical move with no behaviour change (Task 0):
 `internal/agent` → `pkg/agentreg`. `ach` needs that table — it keeps a second
@@ -91,7 +91,11 @@ Three design decisions locked here, the first two from the spec:
 
 ---
 
-### Task 0: Make the reusable half exportable
+### Task 0: Make the reusable half exportable — ✅ DONE (`bb5987b`)
+
+> Already implemented and committed: `pkg/agentreg` (registry + `ValidName` +
+> `Default`) and `pkg/boundary_test.go`. Verify with `make test` and
+> `make crossbuild`, then skip to Task 1. Steps kept for the record.
 
 `ach` cannot import `internal/`. This task moves what a consumer needs and pins
 the boundary with a test, before any new code is written against the old layout.
@@ -1842,23 +1846,25 @@ git commit -m "feat(decl): runtime overlay, base refusal and §7 warnings"
 
 ---
 
-### Task 12: `ap render` and `ap validate`
+### Task 12: `ap manifest render`
 
 §31: expose the effective profile without materializing it, with sensitive
-values redacted. `validate` is the same pipeline with no output on success — it
-is the contract check `ach` and `ach-agent` run against a manifest they
-generated, so its exit code is the whole interface.
+values redacted. With **no** `--target` it composes every target the manifest
+declares and says nothing on success — that is the contract check `ach` and
+`ach-agent` run against a manifest they generated, and the exit code is the whole
+interface. There is deliberately no separate `validate` command: it would be the
+same pipeline behind a second name.
 
 **Files:**
 - Create: `pkg/schema/render.go`
-- Create: `cmd/ap/render.go`
+- Create: `cmd/ap/manifest.go`
 - Modify: `cmd/ap/main.go` (dispatch table and usage text)
 - Test: `pkg/schema/render_test.go`, `cmd/ap/main_test.go`
 
 **Interfaces:**
 - Consumes: `Effective`, `Profile` (Task 11).
-- Produces: `Render(p Profile) []byte`; the `render` and `validate` dispatch
-  cases.
+- Produces: `Render(p Profile) []byte`, `Targets(path string) ([]string, error)`;
+  the `manifest` dispatch case with its `render` subcommand.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1915,15 +1921,23 @@ func TestRenderIsDeterministic(t *testing.T) {
 
 ```go
 // cmd/ap/main_test.go
-func TestDispatchRenderRequiresATarget(t *testing.T) {
-	// render has no passthrough, so it uses parseAroundRef — the same reason
-	// create does. A missing --target must be an error, never a guess.
-	code, _, stderr := runAP(t, "render", "./p.yaml")
-	if code == 0 {
-		t.Fatal("render without --target succeeded")
+func TestDispatchRenderWithoutATargetValidatesEveryTarget(t *testing.T) {
+	// No --target is not an error: it means "check them all", which is the
+	// contract check ach and ach-agent run. The exit code is the whole answer,
+	// so a broken second target must fail even though the first composes.
+	dir := t.TempDir()
+	write(t, dir, "ok.yaml", "version: \"1\"\nname: p\ntargets:\n  - claude\n  - codex\n")
+	if code, _, _ := runAP(t, "manifest", "render", filepath.Join(dir, "ok.yaml")); code != 0 {
+		t.Errorf("exit = %d, want 0", code)
 	}
-	if !strings.Contains(stderr, "--target") {
-		t.Errorf("stderr %q does not name --target", stderr)
+	// codex is not a declared target, so composing for it must fail.
+	write(t, dir, "bad.yaml", "version: \"1\"\nname: p\ntargets:\n  - claude\nskills:\n  x: {}\n")
+	code, _, stderr := runAP(t, "manifest", "render", filepath.Join(dir, "bad.yaml"))
+	if code == 0 {
+		t.Fatal("a manifest with a locator-less enabled resource validated clean")
+	}
+	if !strings.Contains(stderr, "x") {
+		t.Errorf("stderr %q does not name the offending resource", stderr)
 	}
 }
 ```
@@ -1939,34 +1953,37 @@ collection keys sorted, block scalars for multi-line prompt content, numbers as
 their stored lexemes. It emits `value_from.secret: <name>` and never reads a
 binding's value — Phase 2 owns resolution, and render must work before it.
 
-`cmd/ap/render.go`:
+`cmd/ap/manifest.go`:
 
 ```go
 //go:build unix
 
 package main
 
-// render prints the effective profile for one runtime and mutates nothing.
+// manifestRender prints the effective profile for one runtime and mutates nothing.
 // It parses its own flags with parseAroundRef, like create and unlike run:
-// there is no passthrough here, so `ap render ./p.yaml --target claude` is
-// unambiguous. Do not give this treatment to run.
-func render(args []string) int {
-	fs := flag.NewFlagSet("render", flag.ContinueOnError)
+// there is no passthrough here, so `ap manifest render ./p.yaml --target claude`
+// is unambiguous. Do not give this treatment to run.
+//
+// It lives under "manifest" because its subject is a FILE. Every other ap
+// command takes a reference first; this one would be the only exception, and
+// the group states that rather than leaving it to be discovered.
+func manifestRender(args []string) int {
+	fs := flag.NewFlagSet("manifest render", flag.ContinueOnError)
 	target := fs.String("target", "", "runtime to render for")
 	path, rest, err := parseAroundRef(fs, args)
 	...
 }
 ```
 
-`validate` is `render` without the printing: run `Effective` for every target
-the profile declares, print warnings to stderr, exit 0 on success and 1 on the
-first error. Running it for *every* target, not one, is what makes it a contract
-check — a manifest that composes for claude and not for codex is broken, and the
-producer needs to hear that in one call.
+With no `--target`, `render` validates instead of printing: run `Effective` for
+every target the profile declares, print warnings to stderr, exit 0 on success
+and 1 on the first error. Running it for *every* target is what makes it a
+contract check — a manifest that composes for claude and not for codex is broken,
+and the producer needs to hear that in one call.
 
 ```go
-func validate(args []string) int {
-	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
+func renderAll(fs *flag.FlagSet, args []string) int {
 	path, _, err := parseAroundRef(fs, args)
 	if err != nil {
 		return usage(err)
@@ -1993,7 +2010,7 @@ func validate(args []string) int {
 `schema.Targets(path string) ([]string, error)` loads and decodes far enough to
 read `targets`, and is exported because `ach` needs it for the same reason.
 
-Register `render` and `validate` in `main.go`'s dispatch and usage text.
+Register `manifest` in `main.go`'s dispatch and usage text.
 
 - [ ] **Step 4: Run tests, verify they pass**
   Run: `make test-one T='TestRender|TestDispatchRender' P='./pkg/schema/ ./cmd/ap/'`
@@ -2002,8 +2019,8 @@ Register `render` and `validate` in `main.go`'s dispatch and usage text.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add pkg/schema/render.go pkg/schema/render_test.go cmd/ap/render.go cmd/ap/main.go cmd/ap/main_test.go
-git commit -m "feat(ap): render and validate the effective profile"
+git add pkg/schema/render.go pkg/schema/render_test.go cmd/ap/manifest.go cmd/ap/main.go cmd/ap/main_test.go
+git commit -m "feat(ap): ap manifest render, redacted and deterministic"
 ```
 
 ---
@@ -2107,9 +2124,9 @@ Profile/Composition/Resources/Model/Prompt sections (Task 9).
 
 **Reframe coverage:** `pkg/schema` is exported and import-boundary-tested
 (Task 0); `pkg/agentreg` is the single copy of the agent table (Task 0);
-`GOOS=windows` builds (Task 0 step 6); `ap validate` is the cross-repository
-contract check (Task 12). `ap schema` (JSON Schema emission) and
-`ap apply --manifest -` are Phase 2 — they need the input model, which does not
+`GOOS=windows` builds (Task 0 step 6); `ap manifest render` is the cross-repository
+contract check (Task 12). `ap manifest schema` (deferred) is not in v1 at all;
+`ap manifest apply --manifest -` are Phase 2 — they need the input model, which does not
 exist yet.
 
 **Blocked on decisions outside this phase, and unaffected by them:** the six spec
@@ -2149,3 +2166,238 @@ between tasks, fast iteration.
 `superpowers:executing-plans`, batched with review checkpoints.
 
 **Which approach?**
+
+
+---
+
+## Phase 1 catch-up — three tasks added after v0.6.1
+
+Tasks 1–11 are committed (`742fe9a`). These close the gap between what was
+planned in v0.5 terms and what SPEC v0.6.2 requires, and Phase 3 consumes all
+three.
+
+**All three are done** (`242fce3`, `59da074`, `7377dbd`), plus one removal the
+audit called for: the JSON Schema emitter and `ap schema` are gone (`5c924dc`)
+— a second, hand-written description of the manifest contract that nothing
+forced to agree with the decoder. Four things the tasks did not anticipate came
+out of doing them, each recorded below its task.
+
+### Task 14: `auth.scheme` on the git source
+
+**Files:** Modify `pkg/schema/profile.go`, `pkg/schema/profile_test.go`
+
+**Interfaces:** `GitSource.Auth` changes from `*ValueFrom` to `*GitAuth`.
+Phase 3 consumes `GitAuth.Scheme`.
+
+- [x] **Step 1: Write the failing test**
+
+```go
+func TestGitAuthSchemeAcceptsOnlyTheTwoV1Values(t *testing.T) {
+	n, _ := ParseYAML([]byte("version: \"1\"\nname: x\ntargets:\n  - claude\n" +
+		"inputs:\n  secrets:\n    t: {env: T}\n" +
+		"skills:\n  s:\n    source:\n      git:\n        url: https://gl/x.git\n" +
+		"        auth:\n          scheme: basic-oauth2\n          value_from: {secret: t}\n"))
+	p, err := Decode(n)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := p.Skills["s"].Source.Git.Auth.Scheme; got != "basic-oauth2" {
+		t.Errorf("scheme = %q", got)
+	}
+	// Absent is legal: §17.1 infers it from the host at fetch time, which is
+	// Phase 3's job. The schema must not invent a default here, or the
+	// inference would be unreachable.
+	n, _ = ParseYAML([]byte("version: \"1\"\nname: x\ntargets:\n  - claude\n" +
+		"inputs:\n  secrets:\n    t: {env: T}\n" +
+		"skills:\n  s:\n    source:\n      git:\n        url: https://gl/x.git\n" +
+		"        auth:\n          value_from: {secret: t}\n"))
+	p, err = Decode(n)
+	if err != nil {
+		t.Fatalf("decode without scheme: %v", err)
+	}
+	if got := p.Skills["s"].Source.Git.Auth.Scheme; got != "" {
+		t.Errorf("scheme = %q, want empty — the schema must not default it", got)
+	}
+	// Anything else is refused by name.
+	n, _ = ParseYAML([]byte("version: \"1\"\nname: x\ntargets:\n  - claude\n" +
+		"inputs:\n  secrets:\n    t: {env: T}\n" +
+		"skills:\n  s:\n    source:\n      git:\n        url: https://gl/x.git\n" +
+		"        auth:\n          scheme: ntlm\n          value_from: {secret: t}\n"))
+	if _, err := Decode(n); err == nil || !strings.Contains(err.Error(), "ntlm") {
+		t.Errorf("err = %v; an unknown scheme must be refused by name", err)
+	}
+}
+```
+
+- [x] **Step 2: Run it, verify it fails**
+  `make test-one T=TestGitAuthScheme P=./pkg/schema/` — Expected: FAIL, `Auth.Scheme` undefined.
+
+- [x] **Step 3: Implement**
+
+```go
+// GitAuth is §17's credential plus §17.1's transport scheme.
+//
+// Scheme is deliberately NOT defaulted here. Absent means "infer from the host
+// at fetch time" (§17.1), and a default written in the decoder would make that
+// inference unreachable — and unreportable, which §17.1 requires it to be.
+type GitAuth struct {
+	// Scheme is "bearer", "basic-oauth2", or "" for inferred.
+	Scheme    string
+	ValueFrom ValueFrom
+}
+```
+
+Point `GitSource.Auth` at it, and in the decoder accept `scheme` alongside
+`value_from`, refusing anything outside the two values by name.
+
+- [x] **Step 4: Run it, verify it passes.** `make test-one T=TestGitAuthScheme P=./pkg/schema/`
+- [x] **Step 5: Commit**
+
+```bash
+git add pkg/schema/profile.go pkg/schema/profile_test.go
+git commit -m "feat(schema): git auth.scheme, never defaulted in the decoder"
+```
+
+### Task 15: the `archive` source branch
+
+**Files:** Modify `pkg/schema/profile.go`, `pkg/schema/schema.go`, `pkg/schema/profile_test.go`
+
+**Interfaces:** `Source` gains `Archive *ArchiveSource`. Phase 3 consumes it.
+
+- [x] **Step 1: Write the failing test**
+
+```go
+func TestArchiveSourceRequiresADigest(t *testing.T) {
+	yaml := func(extra string) string {
+		return "version: \"1\"\nname: x\ntargets:\n  - claude\n" +
+			"skills:\n  s:\n    source:\n      archive:\n" +
+			"        url: https://ach/c/9f2a/skill.tar.gz\n" + extra
+	}
+	n, _ := ParseYAML([]byte(yaml("        digest: sha256:" + strings.Repeat("a", 64) + "\n")))
+	if _, err := Decode(n); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// §18: a git source is content-addressed and an archive is not, so the
+	// digest is its only integrity claim and there is no flag to skip it.
+	n, _ = ParseYAML([]byte(yaml("")))
+	if _, err := Decode(n); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Errorf("err = %v; an archive without a digest must be refused", err)
+	}
+	n, _ = ParseYAML([]byte(yaml("        digest: md5:abc\n")))
+	if _, err := Decode(n); err == nil {
+		t.Error("a non-sha256 digest was accepted")
+	}
+}
+
+func TestArchiveIsAThirdBranchOfTheSourceUnion(t *testing.T) {
+	// §3.5.1: a different branch replaces the union wholesale, and archive is
+	// now one of three rather than one of two.
+	got := mergeYAML(t,
+		"skills:\n  s:\n    source:\n      git:\n        url: https://e/r.git\n",
+		"skills:\n  s:\n    source:\n      archive:\n        url: https://e/a.tgz\n"+
+			"        digest: sha256:"+strings.Repeat("b", 64)+"\n")
+	src := got.Map["skills"].Map["s"].Map["source"]
+	if _, ok := src.Map["git"]; ok {
+		t.Error("git branch survived a switch to archive")
+	}
+}
+```
+
+- [x] **Step 2: Run it, verify it fails.** Expected: `archive` is an unknown key.
+- [x] **Step 3: Implement**
+
+```go
+// ArchiveSource is §18. Digest is REQUIRED and is not a checksum bolted on: an
+// archive is not content-addressed the way a git SHA is, so the digest is the
+// only integrity claim it has, and it participates in cache identity.
+type ArchiveSource struct {
+	URL     string
+	Digest  string // "sha256:<64 hex>", required
+	Subpath string
+	Auth    *GitAuth
+}
+```
+
+Add `Archive` to `Source`, extend the union's branch validation to three, and
+validate the digest shape: `sha256:` followed by exactly 64 lowercase hex.
+`V1Schema` needs no change — `source` is already the marked union node, and
+`sameBranch` compares the first key whatever it is.
+
+- [x] **Step 4: Run it, verify it passes**, plus the whole suite: `make test`.
+- [x] **Step 5: Commit**
+
+```bash
+git add pkg/schema/profile.go pkg/schema/profile_test.go
+git commit -m "feat(schema): archive source with a mandatory sha256 digest"
+```
+
+### Task 16: regroup `ap render` under `ap manifest`
+
+`render.go` was written before the command surface was settled. `manifest render`
+is the shape (`2026-08-26-command-surface.md`): its subject is a **file**, and it
+would otherwise be the only command in the tool whose first argument is a path
+rather than a reference.
+
+**Files:** Rename `cmd/ap/render.go` → `cmd/ap/manifest.go`; modify
+`cmd/ap/main.go`, `cmd/ap/main_test.go`
+
+- [x] **Step 1: Update the dispatch test**
+
+```go
+func TestDispatchManifestRendersAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "ok.yaml", "version: \"1\"\nname: p\ntargets:\n  - claude\n")
+	// No --target: compose every declared target, exit code is the answer.
+	if code, _, _ := runAP(t, "manifest", "render", filepath.Join(dir, "ok.yaml")); code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	// The bare verb is gone: the group is the contract other repositories call.
+	if code, _, _ := runAP(t, "render", filepath.Join(dir, "ok.yaml")); code == 0 {
+		t.Error("bare `ap render` still dispatches; it must be `ap manifest render`")
+	}
+}
+```
+
+- [x] **Step 2: Run it, verify it fails.** Expected: `ap render` still succeeds.
+- [x] **Step 3: `git mv cmd/ap/render.go cmd/ap/manifest.go`**, rename the entry
+  point to `manifestCmd`, dispatch on `manifest` with `render` as its first
+  positional, and remove the `render` case. Update `usage` and `commandHelp`:
+  the entry is `manifest  Apply, render or export a whole manifest`, with only
+  `render` implemented in Phase 1.
+- [x] **Step 4: Run it, verify it passes**, then `make verify`.
+- [x] **Step 5: Commit**
+
+```bash
+git add cmd/ap/manifest.go cmd/ap/main.go cmd/ap/main_test.go
+git commit -m "refactor(ap): group render under ap manifest"
+```
+
+### What the catch-up tasks turned up that the plan did not predict
+
+- **The `auth` block's shape was wrong, and the fixture hid it.** The decoder
+  read `auth: {secret: x}`; §17 and §35 both write
+  `auth: {value_from: {secret: x}}`. `spec-35-execute.yaml` had been written to
+  match the code rather than the spec it is named after, so the one fixture
+  whose whole job is to be §35's bytes agreed with the bug. Task 14's test
+  could not have caught this on its own — it was the fixture going red that
+  did. A fixture named after a document must be diffed against that document,
+  not against what the parser accepts.
+
+- **A new source family silently opened two holes elsewhere.** `Required` and
+  `Render` both switched on `src.Git` and `src.Local` by name, so `archive`
+  contributed no required input (§12) and printed nothing at all (§8's silent
+  drop, in the output another repository reads). Neither is in Task 15's steps.
+  Adding a union branch is not local to the decoder; every exhaustive switch
+  over that union is part of the change.
+
+- **`ap render` and `ap validate` shipped before the surface was settled, and
+  `validate` was never a command.** Its whole job — compose every declared
+  target, exit status is the answer — is `manifest render` with no `--target`.
+  Two names for one pipeline is what §35.1 says a reference implementation's
+  spelling must not become.
+
+- **A blind line-range edit deleted `env` and `which`'s help entries.** They sat
+  between `render` and `delete` in `commandHelp`, and replacing that range by
+  line number took them with it. `TestEachCommandHasItsOwnHelp` caught it; no
+  compiler could have. Anchor an edit on the text it means to replace, never on
+  the lines it currently occupies.

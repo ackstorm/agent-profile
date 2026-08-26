@@ -4,8 +4,8 @@ Purpose: stop a plan being written twice. Every item below changes what gets
 built. **Settled** items are recorded so they are not re-litigated; **Open** items
 each name the conflict, the evidence, and a recommendation to accept or reject.
 
-Nothing in Phases 1 and 2 depends on any open item. Phase 3 depends on D1.
-Phases 4, 5 and 6 depend on the rest.
+**All blocking items are answered.** D6 is deferred by choice and blocks only
+Phase 8, whose requirements are identical under either outcome.
 
 ---
 
@@ -19,6 +19,13 @@ Phases 4, 5 and 6 depend on the rest.
 | S4 | **`a2aAgents` needs no new type.** They are being converted into MCP servers; the translator emits them as `mcps` entries. | no change |
 | S5 | **`guardrails` is dropped.** It does not exist as a hydratable resource — LiteLLM applies it server-side and no adapter projects it. No asymmetry. | no change |
 
+| S6 | **D1 answered: `plugins` becomes a common resource type**, and `ach`'s `route` engine is ported as its materializer. ACH Server does not emit the type today and simply will not declare it — a type nobody uses costs nothing. The `ach-cli` hydration path for it is live and keeps working. | Phase 6 |
+| S7 | **D2 answered: adopt the install ledger.** `ap` supports install/uninstall the way `ach-cli` already does. This **reverses SPEC v0.5 decision #41 and the §33 never-delete rule** — see "Spec amendments" below. | Phase 4 writes it, Phase 7 spends it |
+| S8 | **D3 answered: a root is just a parameter — and v1 has two.** `default` → the agent's real config dir; a named profile → its namespace. Both are one mechanism, the one `ach` calls `--global`: point the agent's config variable at a directory. **Amended 2026-08-26:** the project root is deferred. It is a *second* mechanism (the agent reads its working directory; nothing is redirected) and the only root carrying a containment rule and a per-agent project-root-file list. `ach-cli` serves that case today. Additive later — bare destinations already mean "the root". | Phase 4 |
+| S10 | **D5 answered: both surfaces, and NEITHER is state.** A manifest is an *input* — a portable definition you apply, share and may not even keep. An imperative verb is the same input, typed instead of written. **The ledger is the only state.** `ap install claude:plan skill pdf@anthropic-skills` needs no manifest and creates none. `ap manifest export` turns a root's ledger back into a manifest. | Phase 7 |
+| S11 | **D6 deferred**, leaning binary-only. It does not block: the portability requirement is identical either way, because `ach-cli` ships windows and would need a windows `ap` whether it imports `pkg/` or shells out to it. The zero-logic-CLI rule is adopted now regardless — free from the start, expensive to retrofit. | Phase 8 |
+| S9 | **D4 answered: no gemini.** `gemini-cli` is deprecated. It is not added here, and `ach`'s `gemini` adapter is **deleted** rather than ported — including its `commands/**/*.md → .gemini/commands/**/*.toml` transform. Four runtimes: claude, codex, opencode, pi. | scope reduction |
+
 S2–S4 share one consequence worth stating plainly: **the ACH→agent-profile
 translator is a real component with real logic**, and it lives in `ach`, not
 here. It selects one model, selects one prompt, and rewrites A2A agents as MCP
@@ -27,179 +34,208 @@ the width.
 
 ---
 
-## Open — must be answered before the phases that depend on them
-
-### D1 — The vocabulary: what a "capability" is at the common level
-
-**Blocks:** Phase 6 planning. **Does not block:** Phases 1–5.
-
-`ach-cli` routes nine source kinds (`ach/internal/cli/adapter/route/kinds.go`):
-`rules`, `commands`, `agents`, `skills`, `mcp`, `.mcp.json`, `prompts`,
-`AGENTS.md`, `hooks`. SPEC v0.5's common vocabulary covers three. Replacing
-`ach-cli` with the v0.5 vocabulary as written means commands, agents and rules
-stop being installed.
-
-Noted: plugins are gated in ACH **Server** but not in the **CLI**, so the CLI
-path is live and must keep working.
-
-- **(a) Add a common `plugins` resource type**, port `ach`'s `route` engine as
-  its materializer. — **RECOMMENDED.** One new type; content already ships this
-  way; §25 already calls the plugin marketplace contract "a de-facto standard
-  applicable beyond one runtime, hence declarable at common level". Buys the
-  per-runtime routing (~3 650 LOC verified against real binaries) that
-  `artifacts` + `destination` cannot express.
-- (b) Add `commands`, `agents`, `rules` as separate common types. — Five types
-  for the same work, each needing its own routing table anyway.
-- (c) Keep plugins runtime-native (§24 as written). — Rejected: ACH serves one
-  plugin to N runtimes, so its exporter would need every runtime's routing table.
-
-**Answer: (a) / (b) / (c)**
-
 ---
 
-### D2 — Uninstall and convergence *(SPEC CONFLICT)*
+## Spec amendments these answers require
 
-**Blocks:** Phase 4.
+S7 and S8 are not gaps in SPEC v0.5 — they contradict it. Recording them so the
+next revision carries them and nobody re-derives the old rule from the frozen
+document.
 
-`ach-cli` has convergence today, and SPEC v0.5 explicitly does not:
-
-| `ach-cli` today | SPEC v0.5 |
+| Spec text | Status |
 |---|---|
-| `installed.json` — a per-file ledger with hashes | decision #41: "**no ownership state file exists in any version**" |
-| `plugin uninstall` / `skill uninstall`, with `--dry-run` sharing one classifier with the real removal | §33: "**Apply never deletes.**" |
-| `env hydrate --sync` prunes what is no longer declared, boundary-safe | §33: "`--clean` is v2, **named profiles only**; `default` orphans are permanent by design" |
+| §33 "**Apply never deletes.** … Orphaned entries are an accepted v1 limitation" | **Reversed.** Apply writes a ledger; `uninstall` removes what the ledger owns. (Convergence — `--prune` — is deferred; see the deferral table in the roadmap.) |
+| decision #41 "no ownership state file exists in any version" | **Reversed.** The ledger is that file. |
+| decision #29 "Apply is merge-overwrite-never-delete, uniformly for all profiles including `default`" | **Amended** to merge-overwrite, with deletion confined to ledger-owned paths and ledger-owned keys. |
+| §26.1 "Absolute destinations and workspace (user repository) destinations are v1 non-goals" | **Amended.** A `workspace` root is added. §26.1 already reserved the mechanism: "a scope prefix can be added backward-compatibly: bare paths keep meaning namespace root." |
+| §24 "The common specification does not define one universal plugin format" | **Amended.** `plugins` is a common resource type with adapter-owned routing. §25 already conceded the ground, calling the plugin marketplace contract "a de-facto standard applicable beyond one runtime, hence declarable at common level." |
+| §38 non-goal "archive sources" | **Reversed** (S1). Its own recorded trigger fired. |
+| §38 non-goal "an ownership state file" | **Reversed** (S7). |
 
-If this repository replaces `ach-cli` under v0.5 as written, **users lose
-uninstall and lose drift correction.** That is not an oversight in the plan — the
-spec designed it in deliberately, on the reasoning that ownership tracking is
-state that lies when the user edits by hand.
+### Why the ledger is safe, and why the spec's fear was misplaced
 
-Three ways out:
+The spec refused an ownership file on the reasoning that it drifts from disk and
+then lies. `ach`'s design answers that, and it is the design to port
+(`ach/internal/cli/localpkg/store/store.go`):
 
-- **(a) Adopt the ledger.** Port `ach`'s `installed.json` model into `pkg/hydrate`
-  and reverse spec decision #41 and the §33 never-delete rule. Buys uninstall and
-  `--sync` for every consumer. Costs: a state file that can disagree with disk,
-  which is exactly what the spec refused. — **RECOMMENDED**, because "replaces
-  `ach-cli`" is not true without it, and because `ach` has already carried this
-  design in production and knows its failure modes (its own docs name them).
-- (b) Keep never-delete; `ach-cli`'s uninstall verbs stay in `ach`, reading
-  `installed.json` that `ach` keeps writing. — Then `ach` does not stop
-  hydrating; it keeps half. Contradicts the goal.
-- (c) Ledger only for named profiles / non-`default` roots, matching §33's future
-  `--clean` scoping. Uninstall works in a project or a profile, never against
-  `~/.claude`. — The narrow version of (a).
-
-**Answer: (a) / (b) / (c)**
-
----
-
-### D3 — Project scope *(SPEC CONFLICT)*
-
-**Blocks:** Phase 4.
-
-`ach-cli`'s primary mode is **project-scoped**: it writes `./.claude/`,
-`./.mcp.json` and `./AGENTS.md` into the user's repository, with `--global` as the
-alternative. Its containment rule is "write nothing outside the target's dot-dir",
-with exactly one allowed project-root file.
-
-SPEC v0.5 §26.1: "Absolute destinations and **workspace (user repository)
-destinations are v1 non-goals**." agent-profile's roots are a profile namespace or
-`default` (`~/.claude`).
-
-There is no overlap. A hydrator that cannot write into a repository cannot
-replace `ach-cli`.
-
-- **(a) Add a third root: `workspace`.** §26.1 already reserves the mechanism —
-  "If a second root is ever needed, a scope prefix can be added
-  backward-compatibly: bare paths keep meaning namespace root." So this is
-  additive, not a reversal. Brings `ach`'s containment rule and the `.gitignore`
-  credential block with it. — **RECOMMENDED.**
-- (b) Model a project as a profile whose namespace is `./.ap`. — Does not work:
-  the tools read `./.claude/`, not `./.ap/`.
-- (c) Leave project scope in `ach`. — Contradicts the goal.
-
-**Answer: (a) / (b) / (c)**
-
-If (a): does the `.gitignore` marker block come too? `ach` writes one because
-projected config carries bearer tokens in plaintext at project root. Under §34
-this repository writes *references*, not values — so the block may be
-unnecessary. **Sub-answer: yes / no.**
-
----
-
-### D4 — gemini-cli, the fifth runtime
-
-**Blocks:** Phase 4 (adapter set), the smoke image, `pkg/agentreg`.
-
-`ach-cli` supports five: claude-code, codex, gemini-cli, opencode, pimono.
-`agent-profile` supports four — **there is no gemini row.** Replacing `ach-cli`
-means adding it, and this repository's standing rule is that every registry field
-is verified by running the real binary, never read from documentation.
-
-Known from `ach` (already paid for, still needs re-verification here): the
-variable is `GEMINI_CLI_HOME` and it is a **parent** — config goes to
-`$GEMINI_CLI_HOME/.gemini/`, and a `settings.json` written one level up is
-silently ignored. `GEMINI_CONFIG_DIR` was proposed upstream and never shipped.
-Commands are read **only** as TOML.
-
-- **(a) Add gemini in Phase 4**, with a verified registry row and a smoke check.
-  — **RECOMMENDED** if the answer to D3 is (a); a project-scoped hydrator that
-  drops a supported tool is a regression.
-- (b) Defer gemini to a later phase, accept that `ach-cli` cannot be retired until
-  then.
-
-**Answer: (a) / (b)**
-
----
-
-### D5 — The imperative surface
-
-**Blocks:** Phase 7 (what `ap sync` is replaced *by*).
-
-`ach-cli` has verbs SPEC v0.5 does not model at all:
-
-```
-ach-cli repo add <source> --name <n> | list | remove | update
-ach-cli plugin install <name@repo>… | uninstall | update | outdated
-ach-cli skill  install <name@repo>… | uninstall | update | outdated
+```go
+type FileRec struct {
+	RelPath string   `json:"relPath"`
+	Hash    string   `json:"hash"`
+	Merge   string   `json:"merge,omitempty"` // "deep"|"composite"; empty = replace
+	Keys    []string `json:"keys,omitempty"`  // deep: dotted keys removed on uninstall
+}
 ```
 
-"Install this one thing, now" is not a declarative manifest. `outdated`
-re-resolves each installed ref's SHA and reports drift — which needs D2's ledger.
+Three properties make it honest rather than authoritative:
 
-- **(a) `ap` grows an imperative surface** that edits a manifest and re-applies:
-  `ap add skill pdf@anthropic-skills` appends to the manifest, then applies. The
-  manifest stays the source of truth and `outdated` becomes lockfile drift. —
-  **RECOMMENDED.** It keeps one model and gives the ergonomics people actually
-  use.
-- (b) Declarative only. Users hand-edit YAML. `ach-cli`'s verbs die.
-- (c) `ach` keeps the verbs and generates manifests. — `ach` does not stop
-  hydrating.
+1. **Hash per file.** On uninstall a file whose hash no longer matches was edited
+   by the user; the verdict is `modify`/`skip`, not `remove`. The ledger never
+   claims a file it no longer recognises.
+2. **`Keys` for deep merges.** Uninstalling from a merged `settings.json` or
+   `config.toml` removes **only the dotted keys it added** — the file survives,
+   and every key the user added by hand survives with it. This is the property
+   that makes `default`-scope pruning safe, which §33 assumed was impossible.
+3. **One classifier for act and preview.** `--dry-run` and the real removal share
+   the same function, so the preview cannot drift from the action.
 
-**Answer: (a) / (b) / (c)**
+Consequence, and it is an improvement over the spec: **removal works in `default`
+too.** SPEC v0.5 made `default` orphans permanent by design because it had no way
+to tell its own writes from the user's. The ledger has one.
+
+## Resolved — recorded in full, because the reasoning is not re-derivable from the outcome
+
+### D5 — SETTLED: the manifest is an input, the ledger is the state
+
+The first framing of this question was wrong, and the correction changes the
+design. Recorded in full because getting it backwards is easy.
+
+**Wrong model** (proposed, rejected): the manifest is the source of truth, and
+`ap install` edits it. That makes the manifest state.
+
+**Right model:** the manifest is a *definition* — something you write once, move
+between machines, share with a team, apply, and are free to throw away. It is not
+a record of what is installed. Two ways in, one record out:
+
+```
+  a manifest file            ─┐
+  (portable, shareable,       │
+   optional, never written    ├──►  apply  ──►  the LEDGER  ◄── the only state
+   to by ap)                  │                 (per root)
+                              │
+  ap install <ref> skill <name>         ─┘
+  (no manifest, none created)
+```
+
+Consequences, each of which makes the build smaller:
+
+- **No manifest-writing code.** The rejected model needed `ap install` to edit
+  a YAML file the user wrote — preserving their comments, key order and
+  formatting. Comment-preserving YAML round-trip is hard, the hand-rolled subset
+  parser in `pkg/schema` cannot do it, and it would have forced a real YAML
+  dependency. Avoided entirely.
+- **No "where does the manifest live" question.** There is no default manifest
+  location because nothing creates one.
+- **`ach-cli`'s imperative verbs port unchanged.** They already write only
+  `installed.json`. That is exactly this model.
+- **`ap export <root>` closes the loop**: ledger → manifest, so a profile built
+  by hand becomes something portable. `ach`'s own docs already sketch this as
+  "a future `ach-cli env export` can SERIALIZE local state → CR YAML"; the ledger
+  is a superset of what it needs.
+- **Seeing what is installed is `ap list <ref>`**, reading the ledger —
+  not `render`, which renders a manifest.
+
+**Apply stays additive, and v1 ships nothing that changes it.** Applying a
+manifest that no longer mentions a resource does not remove it — §33's rule
+survives. Removal is per-resource (`ap uninstall`) and explicit.
+
+**Amended 2026-08-26: whole-root convergence (`--prune`) is deferred.** It is a
+set difference over that removal and needs nothing extra in the ledger, so it is
+purely additive. Its only named consumer is `ach-runtime`'s init container — a
+pod should match its `CapabilityProfile` exactly, a developer's laptop should not
+— and that container is Phase 9 work in another repository. Build it against a
+real caller.
+
+### Lockfile and ledger: one pins, the other records
+
+Corrected after reading `ach`. The first version of this note said "they
+overlap", which was the wrong framing.
+
+**What `ach-cli` actually does today**, verified:
+
+- `internal/cli/lock` is an **advisory single-writer mutex** — `flock(LOCK_EX)`
+  on POSIX, `LockFileEx` on Windows. It is not a dependency lockfile, despite
+  the name.
+- **`ach` has no dependency lockfile anywhere.** `installed.json` is the only
+  record.
+- Each entry carries `resolvedSHA`, and **install re-resolves every time** — it
+  does not pin to the recorded SHA. `manager.ResolveWithCache` resolves the ref
+  fresh; the stored SHA is never used as an input.
+- `outdated` re-resolves upstream and compares:
+  `if rr.ResolvedSHA != e.ResolvedSHA { status = "outdated" }`.
+
+So the ledger **records what happened**. It does not **constrain what happens
+next**. That is the whole distinction:
+
+| | lockfile | ledger |
+|---|---|---|
+| direction | **input** to resolution | **output** of materialization |
+| claim | "this ref MUST resolve to this SHA" (§32.3: "the ref is not re-resolved over the network") | "this is what landed here" |
+| scope | the workspace, beside the manifests | one materialization root |
+| keyed by | source identity | resource → files |
+| carries | requested ref → resolved SHA | `{relPath, hash, merge, keys}` + resolvedSHA |
+| lives | in git, shared with the team | on the machine, never shared |
+| answers | "what will this manifest resolve to, **for everyone**" | "what did **this machine** install, and can I remove it" |
+
+They share exactly one field — a SHA — for opposite reasons: a constraint versus
+a receipt.
+
+**Why `ach` gets away without a lockfile:** it has no manifest. Nothing is
+shared, so nothing claims two machines should agree. `ach-cli skill install X`
+on two laptops gets whatever `main` was that day and nobody notices, because no
+artifact ever promised otherwise.
+
+**Why this repository cannot:** a portable manifest is the entire point. Sharing
+a manifest with no lockfile means "everyone gets a different environment", and
+the manifest is the thing making the false promise.
+
+**Neither can do the other's job**, in both directions:
+
+- The ledger cannot pin. It is machine-local; machine B cannot see what machine
+  A recorded.
+- The lockfile cannot uninstall. It is keyed by source identity, not by files on
+  disk, and carries no hashes and no dotted keys — it cannot say which keys to
+  remove from a merged `settings.json`.
+
+**The rule that falls out: a lockfile is a property of a MANIFEST, not of a
+ROOT.** No manifest, no lockfile. An imperative `ap install` therefore produces
+no lock entry — there is nothing to pin for anyone else, and the ledger already
+carries the SHA that `outdated` needs. Consistent with §32's workspace scoping
+and with §32.7 leaving local sources unlocked.
 
 ---
 
-### D6 — `ach-runtime` as a fourth consumer *(confirm, low risk)*
+### Command grammar — SETTLED, see the command-surface document
 
-`ackstorm/ach-runtime` (`internal/hydrator/hydrator.go`) injects an init container
-named `ach-hydrator` into a pod built from a `CapabilityProfile` CRD, sharing an
-EmptyDir `workspace` volume with the main container. The image is configurable via
-`--hydrator-image` and the whole thing is disabled when that flag is empty.
+Superseded. The full surface, the use cases and the reasoning live in
+`2026-08-26-command-surface.md`. In one line:
 
-Reading: **the `ach-hydrator` image becomes `ap`.** That is a fourth consumer and
-it adds requirements:
+```
+ap install    <ref> <kind> <name>       one capability
+ap uninstall  <ref> <kind> <name>
+ap manifest   apply | render | export   a whole manifest
+ap list       <ref>                     extended to accept a qualified reference
+```
 
-- `ap` must run headless — no TTY, no terminal gate, no `$HOME` assumption.
-  Already true for `--yes`; must stay true and be tested.
-- A container image is a release artifact of this repository.
-- The materialization root is an EmptyDir given as a parameter — which is exactly
-  why `pkg/` must never read `$HOME` implicitly.
-- `CapabilityProfile` CRD → manifest is another translator, owned by `ach-runtime`.
+Split by **mode of operation** — one loose capability versus a whole manifest —
+so the command surface mirrors the two inputs the architecture has. The first
+argument after the verb is always the subject, which is a reference everywhere
+except `manifest render`, whose subject is a file and which has no root.
 
-**Confirm: is `ach-hydrator` in scope as a consumer? yes / no**
+Deferred past v1, additive whenever wanted: `ap outdated`, `ap manifest schema`.
 
----
+### D6 — DEFERRED: binary, SDK, or both
+
+Not blocking, and deliberately left open. Leaning **binary and nothing else**.
+
+What matters now is that the choice stays cheap, which needs two things adopted
+from the start:
+
+- **`cmd/ap` holds zero logic.** Argument parsing and exit codes; everything else
+  in `pkg/`. Free if done from the first commit, expensive to retrofit, and it is
+  what makes "add an SDK later" a no-op.
+- **`pkg/` stays portable and root-parameterised.** The requirement is identical
+  under either answer: `ach-cli` ships windows/amd64 and windows/arm64, so a
+  windows `ap` is needed whether `ach` imports the library or shells out to the
+  binary. The `make crossbuild` gate stands either way.
+
+Recommendation when it is time to decide: **the binary is the contract, an SDK is
+an optimization**, with a golden test asserting the CLI's result is byte-identical
+to the library's. And for `ach-runtime`, run `ap`'s own image rather than a
+per-project hydrator wrapper — the materialization path is where a tar, traversal
+or archive-verification CVE would land, and N images means N things to rebuild
+with no way to tell which are patched. Its `--hydrator-image` flag is already the
+seam.
 
 ## Not replaced — recorded so they are not revisited
 
@@ -213,12 +249,12 @@ it adds requirements:
 
 ---
 
-## What is replaced, once the above are answered
+## What is replaced
 
 | Project | Component retired |
 |---|---|
 | `ach` | `internal/cli/{adapter,hydrate,localpkg,extract,merge,namespace,conflict,gitignore}`, `internal/{gitfetch,contentkit,cachefs}` — kept: platform-API client, auth, keys, and a new Environment→manifest exporter |
-| `ach-agent` | `src/ach_agent/engine/hydrate.py` projection — kept: the manifest decode, now feeding `ap apply --manifest -` |
+| `ach-agent` | `src/ach_agent/engine/hydrate.py` projection — kept: the manifest decode, now feeding `ap manifest apply --manifest -` |
 | `ach-runtime` | nothing structural — the `ach-hydrator` image becomes `ap` (pending D6) |
 | `ccplugin` | the whole project |
 | `agent-profile` | `cmd/ap/sync.go`, `internal/manifest` |
