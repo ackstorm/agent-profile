@@ -71,13 +71,15 @@ func TestDispatchApplyRequiresATarget(t *testing.T) {
 	}
 }
 
-// stubExecutable drops an executable file named name into dir, so a PATH
+// stubExecutable drops an executable file named "claude" into dir, so a PATH
 // pointed at dir resolves it via exec.LookPath — the same technique
 // pkg/schema/preflight_test.go uses, reimplemented here because cmd/ap is a
-// different package.
-func stubExecutable(t *testing.T, dir, name string) {
+// different package. Every caller in this file resolves for claude; a name
+// parameter with one literal at every call site is unparam-flagged dead
+// flexibility, not real reuse.
+func stubExecutable(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -114,7 +116,7 @@ func TestDispatchApplyDryRunWritesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
-	stubExecutable(t, binDir, "claude")
+	stubExecutable(t, binDir)
 	t.Setenv("PATH", binDir)
 
 	before := dirSnapshot(t, dir)
@@ -128,6 +130,77 @@ func TestDispatchApplyDryRunWritesNothing(t *testing.T) {
 	}
 }
 
+// TestDispatchApplyDryRunRedactsSecretValues is the CLI-level guard on top of
+// pkg/schema's: TestDispatchApplyDryRunWritesNothing's manifest declares no
+// inputs: at all, so printResolution's redaction path never runs and this
+// test path went unexercised. This manifest binds an env secret and
+// references it from an active resource (model.auth), so --dry-run's
+// resolution phase actually resolves it, and asserts the distinctive value
+// never reaches stdout/stderr while the binding NAME does.
+func TestDispatchApplyDryRunRedactsSecretValues(t *testing.T) {
+	const secretValue = "sk-do-not-print-me-either"
+	t.Setenv("AP_TEST_DRYRUN_SECRET", secretValue)
+
+	dir := t.TempDir()
+	manifest := `version: "1"
+name: p
+targets:
+  - claude
+inputs:
+  secrets:
+    llm-token:
+      env: AP_TEST_DRYRUN_SECRET
+model:
+  type: anthropic
+  auth:
+    type: bearer
+    value_from:
+      secret: llm-token
+`
+	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir)
+
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = wOut, wErr
+
+	dispatchErr := dispatch([]string{"apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
+
+	_ = wOut.Close()
+	_ = wErr.Close()
+	os.Stdout, os.Stderr = oldStdout, oldStderr
+
+	stdout, err := io.ReadAll(rOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := io.ReadAll(rErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatchErr != nil {
+		t.Fatalf("apply --dry-run: %v", dispatchErr)
+	}
+
+	if strings.Contains(string(stdout), secretValue) || strings.Contains(string(stderr), secretValue) {
+		t.Errorf("--dry-run leaked the secret value\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(string(stdout), "llm-token") {
+		t.Errorf("--dry-run dropped the binding NAME (llm-token), which is structure, not a secret\nstdout:\n%s", stdout)
+	}
+}
+
 // Without --dry-run, apply must refuse rather than stub a fake success: F6.
 func TestDispatchApplyWithoutDryRunRefuses(t *testing.T) {
 	dir := t.TempDir()
@@ -135,7 +208,7 @@ func TestDispatchApplyWithoutDryRunRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
-	stubExecutable(t, binDir, "claude")
+	stubExecutable(t, binDir)
 	t.Setenv("PATH", binDir)
 
 	err := dispatch([]string{"apply", filepath.Join(dir, "p.yaml"), "--target", "claude"})
@@ -152,7 +225,7 @@ func TestDispatchApplyWithoutDryRunRefuses(t *testing.T) {
 // caller can pipe a generated manifest with no temp file of its own.
 func TestDispatchApplyManifestDashReadsStdin(t *testing.T) {
 	binDir := t.TempDir()
-	stubExecutable(t, binDir, "claude")
+	stubExecutable(t, binDir)
 	t.Setenv("PATH", binDir)
 
 	oldStdin := os.Stdin
