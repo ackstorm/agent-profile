@@ -375,8 +375,15 @@ func checkKey(n int, k string) error {
 // tells the author to quote the value; the error has to be specific enough for
 // that advice to be findable.
 var indicators = map[byte]string{
-	'[':  "flow sequence ([a, b]): use a block sequence, one \"- item\" per line",
-	'{':  "flow mapping ({a: b}): use a block mapping, one \"key: value\" per line",
+	'[': "flow sequence ([a, b]): use a block sequence, one \"- item\" per line",
+	'{': "flow mapping ({a: b}): use a block mapping, one \"key: value\" per line",
+	// Dead code for a mapping value: parseMap's hasInline &&
+	// strings.HasPrefix(value, "|") case intercepts "|" and "|-" before
+	// scalarNode ever sees them, and reads the block body itself. It stays
+	// here because parseSeq calls scalarNode directly with no block-scalar
+	// support of its own — this is what keeps "- |" refused rather than
+	// silently read as the one-character string "|".
+	'|':  "block scalar (|): write the value on one line, quoted if it needs to be",
 	'>':  "block scalar (>): write the value on one line, quoted if it needs to be",
 	'&':  "anchor (&): anchors, aliases and merge keys are not supported",
 	'*':  "alias (*): anchors, aliases and merge keys are not supported",

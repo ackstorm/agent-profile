@@ -106,6 +106,56 @@ func TestParseReadsLiteralBlockScalarsAndRejectsFoldedOnes(t *testing.T) {
 	if _, err := ParseYAML([]byte("a: >\n  one\n  two\n")); err == nil {
 		t.Error("folded block scalar (>) accepted; the subset must name and refuse it")
 	}
+
+	// `|` keeps the trailing newline; `|-` strips it. Nothing else in this
+	// file distinguishes the two, so a swap of one for the other would pass
+	// every other test here.
+	for _, tc := range []struct{ name, in, want string }{
+		{"| keeps the trailing newline", "a: |\n  x\n", "x\n"},
+		{"|- strips the trailing newline", "a: |-\n  x\n", "x"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := ParseYAML([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := root.Map["a"].Str; got != tc.want {
+				t.Errorf("Str = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseLiteralBlockPreservesContentAndResyncsAfterward guards the part of
+// the block-scalar reader that reads from the raw source rather than the
+// pre-scanned lines: scan() unconditionally drops blank lines and whole-line
+// comments before any block-scalar context is known, so a block body has to
+// bypass it or lose that content. It also guards that parsing resumes
+// correctly at a sibling key after the block ends — the biggest gap, since
+// the happy-path test above ends the document right after its block and never
+// exercises the resync.
+func TestParseLiteralBlockPreservesContentAndResyncsAfterward(t *testing.T) {
+	in := "a: |\n  line one\n\n  # not a comment\n  key: value\n  - not a sequence\n  line five\nb: sibling\n"
+	root, err := ParseYAML([]byte(in))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	wantA := "line one\n\n# not a comment\nkey: value\n- not a sequence\nline five\n"
+	if got := root.Map["a"].Str; got != wantA {
+		t.Errorf("a = %q, want %q", got, wantA)
+	}
+	if got := root.Map["b"].Str; got != "sibling" {
+		t.Errorf("b = %q, want %q (the sibling after the block must still parse)", got, "sibling")
+	}
+
+	// A line less indented than the block's own established indent, but still
+	// indented under the key, ends the block rather than panicking or being
+	// silently swallowed into it.
+	if _, err := ParseYAML([]byte("a: |\n    one\n  two\n")); err == nil {
+		t.Error("mid-block dedent accepted; expected an error")
+	} else if !strings.Contains(err.Error(), "unexpected indentation") {
+		t.Errorf("error %q does not name unexpected indentation", err)
+	}
 }
 
 func TestParseNamesEveryConstructItRefuses(t *testing.T) {
@@ -113,6 +163,12 @@ func TestParseNamesEveryConstructItRefuses(t *testing.T) {
 		{"flow sequence", "a: [x, y]\n", "flow sequence"},
 		{"flow mapping", "a: {x: y}\n", "flow mapping"},
 		{"folded block", "a: >\n  x\n", "block scalar (>)"},
+		// Block-scalar SUPPORT is map-value-only (parseMap intercepts "|"
+		// before scalarNode). A sequence entry has no such support, so it
+		// must still be refused rather than silently read as the
+		// one-character string "|" — the regression this case pins.
+		{"block scalar in a sequence", "items:\n  - |\n  - normal\n", "block scalar (|)"},
+		{"block scalar indentation indicator", "a: |2\n  x\n", "indentation or chomping indicator"},
 		{"anchor", "a: &x y\n", "anchors"},
 		{"alias", "a: *x\n", "anchors"},
 		{"tag", "a: !!str y\n", "tags"},
