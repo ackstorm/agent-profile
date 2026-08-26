@@ -71,8 +71,15 @@ func Effective(path, runtime string) (Profile, []Warning, error) {
 
 // commonKeysOnly lifts a runtime block's common-vocabulary keys to the root, so
 // runtimes.<r>.skills overlays skills. Runtime-native keys — plugins, variants,
-// environment — are left where they are; they have no root counterpart and
-// lifting them would invent one.
+// environment — are left where they are.
+//
+// `plugins` is the one that looks liftable and is not. There IS a common
+// plugins collection now (§24), but a runtime block's `plugins` is the
+// RUNTIME-NATIVE mechanism (§24.3): `package: "@scope/name"`, not a source or a
+// ref. Lifting it would try to decode a package declaration as a common
+// Resource and fail. §30's worked example shows both in one manifest — the
+// common skill disabled for opencode, and opencode's own package used instead —
+// which only works because these two never merge.
 func commonKeysOnly(block *Node) *Node {
 	out := &Node{Kind: Mapping, Line: block.Line, Map: map[string]*Node{}, KeyLine: map[string]int{}}
 	for _, k := range []string{"model", "prompt", "inputs", "marketplaces", "skills", "mcps", "artifacts"} {

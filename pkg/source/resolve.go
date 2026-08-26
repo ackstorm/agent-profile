@@ -135,10 +135,10 @@ func locators(p schema.Profile) []item {
 		r := p.Skills[n]
 		return r.Source, r.Ref, r.Enabled
 	})
-	// No plugins here: §24 makes them a common resource type, but
-	// schema.Profile has no top-level Plugins field yet — Decode's onlyKeys
-	// does not admit the block. Phase 6 adds the field and the routing
-	// together, and this walk gains one add() call at that point.
+	add("plugin", keysOf(p.Plugins), func(n string) (*schema.Source, string, bool) {
+		r := p.Plugins[n]
+		return r.Source, r.Ref, r.Enabled
+	})
 	add("artifact", keysOf(p.Artifacts), func(n string) (*schema.Source, string, bool) {
 		a := p.Artifacts[n]
 		return a.Source, "", a.Enabled

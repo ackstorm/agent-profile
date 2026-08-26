@@ -67,6 +67,12 @@ marketplaces:
             secret: gitlab-token
 
 
+plugins:
+
+  code-review:
+    ref: code-review@acme-plugins
+
+
 skills:
 
   pdf:

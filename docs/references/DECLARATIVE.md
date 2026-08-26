@@ -126,15 +126,16 @@ the lesson worth keeping:
   against what the parser happens to accept. That is the only reliable defence,
   because a test written against the same misreading passes.
 
-One real deviation remains, and it is a scope gap rather than a disagreement:
+**The last deviation is closed.** The fixture dropped §35's top-level `plugins:`
+block because `Decode` did not admit the key. Phase 6 added it, and the block is
+back — `code-review: {ref: code-review@acme-plugins}`, exactly as §35 writes it.
 
-- **No top-level `plugins:` block.** §35 lists a `code-review` plugin resource at
-  the manifest root. `Decode`'s `onlyKeys` does not admit `plugins` as a
-  top-level key — it becomes a common resource type in Phase 6 (open-decisions
-  S6), and `pkg/source`'s locator walk gains one `add()` call at that point. The
-  fixture drops the block rather than inventing a decoder for it. The
-  `acme-plugins` **marketplace** entry (`type: plugins`) stays, because
-  `Marketplace.Type` already accepts `"plugins"`.
+`plugins` shares `Resource` with skills, because a plugin has the same two
+locators and differs only in what the adapter does with the resolved tree. Four
+places had to change together, and forgetting any one is silent: the decoder,
+`Required` (a missed binding is one apply never checks), `Render` (§8's silent
+drop), and `pkg/source`'s locator walk. That is the same lesson Phase 1's
+catch-up recorded for adding a source branch.
 
 Two mechanical differences that are about fixture hygiene, not about the spec:
 `extends: ./spec-35-coding-base.yaml` keeps every fixture for this test prefixed
@@ -399,3 +400,14 @@ than a destination, `mode: replace` maps to nothing known, and the other three
 are unknown entirely. §8's degradation warning is a true statement where a
 guessed path is a false one. The plan file records the four `--help` invocations
 that would close it.
+
+**A runtime block's `plugins` is NOT the common collection, and must never be
+lifted into it.** `commonKeysOnly` lifts a runtime overlay's common-vocabulary
+keys to the root so `runtimes.<r>.skills` overlays `skills`. `plugins` looks
+liftable and is not: a runtime block's entry is the RUNTIME-NATIVE mechanism
+(§24.3) — `package: "@scope/name"`, not a source or a ref — so lifting it would
+try to decode a package declaration as a common `Resource` and fail.
+
+§30's worked example is the proof: it disables the common `ponytail` skill for
+opencode and declares opencode's own package instead, in one manifest. That only
+works because the two never merge.

@@ -21,9 +21,13 @@ type Profile struct {
 	Inputs       Inputs
 	Marketplaces map[string]Marketplace
 	Skills       map[string]Resource
-	MCPs         map[string]MCP
-	Artifacts    map[string]Artifact
-	Runtimes     map[string]Runtime
+	// Plugins is §24's common resource type. It shares Resource with skills
+	// because a plugin has the same two locators — a source or a marketplace
+	// ref — and differs only in what the adapter does with the resolved tree.
+	Plugins   map[string]Resource
+	MCPs      map[string]MCP
+	Artifacts map[string]Artifact
+	Runtimes  map[string]Runtime
 }
 
 // IsBase reports whether this profile can only be inherited from. §5.3: a base
@@ -180,7 +184,7 @@ func Decode(n *Node) (Profile, error) {
 		return p, fmt.Errorf("line %d: a manifest is a mapping with version, name and the rest", n.Line)
 	}
 	if err := onlyKeys(n, "version", "name", "targets", "model", "prompt", "inputs",
-		"marketplaces", "skills", "mcps", "artifacts", "runtimes"); err != nil {
+		"marketplaces", "skills", "plugins", "mcps", "artifacts", "runtimes"); err != nil {
 		return p, err
 	}
 
@@ -244,6 +248,7 @@ var profileFieldDecoders = []struct {
 	{"inputs", decodeInputsField},
 	{"marketplaces", decodeMarketplacesField},
 	{"skills", decodeSkillsField},
+	{"plugins", decodePluginsField},
 	{"mcps", decodeMCPsField},
 	{"artifacts", decodeArtifactsField},
 	{"runtimes", decodeRuntimesField},
@@ -300,6 +305,15 @@ func decodeSkillsField(p *Profile, n *Node) error {
 		return err
 	}
 	p.Skills = v
+	return nil
+}
+
+func decodePluginsField(p *Profile, n *Node) error {
+	v, err := decodeResources("plugins", n)
+	if err != nil {
+		return err
+	}
+	p.Plugins = v
 	return nil
 }
 

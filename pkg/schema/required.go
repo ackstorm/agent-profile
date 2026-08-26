@@ -30,6 +30,18 @@ func Required(p Profile) []Ref {
 		refs = append(refs, gitSourceRefs(fmt.Sprintf("skills.%s", name), r.Source)...)
 	}
 
+	// Plugins walk exactly as skills do. Adding a resource FAMILY and
+	// forgetting this walk is silent: §12 computes requirements from active
+	// resources, so a binding missed here is a binding apply never checks, and
+	// Phase 3 would fetch a private plugin with no credential.
+	for _, name := range sortedKeys(p.Plugins) {
+		r := p.Plugins[name]
+		if !r.Enabled {
+			continue
+		}
+		refs = append(refs, gitSourceRefs(fmt.Sprintf("plugins.%s", name), r.Source)...)
+	}
+
 	for _, name := range sortedKeys(p.MCPs) {
 		m := p.MCPs[name]
 		if !m.Enabled {

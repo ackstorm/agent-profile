@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -582,5 +583,75 @@ func TestArchiveIsAThirdBranchOfTheSourceUnion(t *testing.T) {
 	src = got.Map["skills"].Map["s"].Map["source"]
 	if _, ok := src.Map["archive"]; ok {
 		t.Error("the archive branch survived a switch to local")
+	}
+}
+
+// §24: plugins is a common resource type, with the same two locators as a
+// skill — a source or a marketplace ref.
+func TestPluginsIsACommonResourceCollection(t *testing.T) {
+	n, err := ParseYAML([]byte("version: \"1\"\nname: p\ntargets:\n  - claude\n" +
+		"marketplaces:\n  acme:\n    type: plugins\n    source:\n      git:\n        url: https://e/m.git\n" +
+		"plugins:\n  code-review:\n    ref: code-review@acme\n" +
+		"  ponytail:\n    source:\n      git:\n        url: https://e/p.git\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p, err := Decode(n)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(p.Plugins) != 2 {
+		t.Fatalf("plugins = %+v", p.Plugins)
+	}
+	if p.Plugins["code-review"].Ref != "code-review@acme" {
+		t.Errorf("ref = %q", p.Plugins["code-review"].Ref)
+	}
+	if p.Plugins["ponytail"].Source.Git.URL != "https://e/p.git" {
+		t.Errorf("source = %+v", p.Plugins["ponytail"].Source)
+	}
+	// Same exclusive group as every other named resource: one locator.
+	n, _ = ParseYAML([]byte("version: \"1\"\nname: p\ntargets:\n  - claude\n" +
+		"plugins:\n  x:\n    ref: a@b\n    source:\n      git:\n        url: https://e/p.git\n"))
+	if _, err := Decode(n); err == nil {
+		t.Error("a plugin with both locators was accepted")
+	}
+}
+
+// A runtime block's `plugins` is the RUNTIME-NATIVE mechanism (§24.3), not the
+// common collection. It must not be lifted to the root: §30's worked example
+// disables the common skill for opencode and uses opencode's own package
+// instead, which only works because these two never merge.
+func TestARuntimePluginsBlockIsNotLiftedToTheCommonCollection(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "p.yaml", `version: "1"
+name: p
+targets:
+  - opencode
+skills:
+  ponytail:
+    source:
+      git:
+        url: https://e/p.git
+runtimes:
+  opencode:
+    skills:
+      ponytail:
+        enabled: false
+    plugins:
+      ponytail:
+        package: "@dietrichgebert/ponytail"
+`)
+	p, _, err := Effective(filepath.Join(dir, "p.yaml"), "opencode")
+	if err != nil {
+		t.Fatalf("effective: %v", err)
+	}
+	if len(p.Plugins) != 0 {
+		t.Errorf("a runtime-native package declaration reached the common collection: %+v", p.Plugins)
+	}
+	if p.Skills["ponytail"].Enabled {
+		t.Error("the common skill was not disabled for opencode")
+	}
+	if _, ok := p.Runtimes["opencode"].Plugins["ponytail"]; !ok {
+		t.Errorf("the native declaration was lost: %+v", p.Runtimes["opencode"])
 	}
 }

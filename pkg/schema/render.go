@@ -31,6 +31,7 @@ func Render(p Profile) []byte {
 	w.inputsBlock(0, p.Inputs)
 	w.marketplacesBlock(0, "marketplaces", p.Marketplaces)
 	w.resourcesBlock(0, "skills", p.Skills)
+	w.resourcesBlock(0, "plugins", p.Plugins)
 	w.mcpsBlock(0, "mcps", p.MCPs)
 	w.artifactsBlock(0, "artifacts", p.Artifacts)
 	if len(p.Runtimes) > 0 {

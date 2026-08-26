@@ -101,20 +101,24 @@ func TestTheSpecsFullExampleResolvesOffline(t *testing.T) {
 			t.Errorf("%s did not resolve; got %v", want, keysOf(got))
 		}
 	}
-	// pdf is a marketplace ref: reported as deferred to Phase 6, never
-	// silently dropped.
-	if _, ok := got["skill pdf"]; ok {
-		t.Error("a ref-backed skill resolved; item resolution is Phase 6")
-	}
-	var sawDeferral bool
-	for _, r := range reports {
-		if r.Resource == "skill pdf" && strings.Contains(r.Text, "Phase 6") {
-			sawDeferral = true
+	// §35 declares a plugin too, and it is a ref like pdf. Both are reported
+	// as deferred to marketplace item resolution, never silently dropped.
+	for _, ref := range []string{"skill pdf", "plugin code-review"} {
+		if _, ok := got[ref]; ok {
+			t.Errorf("%s resolved; marketplace item resolution is Phase 6", ref)
 		}
-		t.Logf("%s: %s", r.Resource, r.Text)
+		var sawDeferral bool
+		for _, r := range reports {
+			if r.Resource == ref && strings.Contains(r.Text, "Phase 6") {
+				sawDeferral = true
+			}
+		}
+		if !sawDeferral {
+			t.Errorf("%s was not reported as deferred: %+v", ref, reports)
+		}
 	}
-	if !sawDeferral {
-		t.Errorf("skill pdf was not reported as deferred: %+v", reports)
+	for _, r := range reports {
+		t.Logf("%s: %s", r.Resource, r.Text)
 	}
 }
 
