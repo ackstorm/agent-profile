@@ -2,9 +2,17 @@ package schema
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// jsonNumber is JSON's number grammar (RFC 8259 §6), exactly — not Go's, which
+// strconv.ParseFloat accepts a strict superset of: Inf/NaN in any casing, a
+// leading '+', hex floats. A lexeme Number() blesses is later emitted VERBATIM
+// into a materialized JSON config, so anything not itself valid JSON must be
+// refused here rather than downstream.
+var jsonNumber = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
 
 // Kind is what a Node is. Five, because unlike the ap-sync subset this one
 // must tell `enabled: false` from `enabled: "false"` and must emit
@@ -70,12 +78,20 @@ func (n *Node) Bool() (bool, error) {
 	return false, fmt.Errorf("line %d: %q is not true or false", n.Line, n.Str)
 }
 
-// Number validates the lexeme and returns it VERBATIM. The lexeme is what
-// gets emitted into materialized JSON, so 0.20 stays 0.20 and no float
-// formatting ever alters a value the author typed.
+// Number validates the lexeme against JSON's own number grammar and returns
+// it VERBATIM. The lexeme is what gets emitted into materialized JSON, so
+// 0.20 stays 0.20 and no float formatting ever alters a value the author
+// typed — and, just as important, nothing that is not itself legal JSON
+// (Inf, NaN, a leading +, a hex float, a leading zero) is ever blessed as a
+// number here to be miswritten as one later. strconv.ParseFloat runs second,
+// only to catch magnitudes JSON's grammar admits but float64 cannot hold
+// (e.g. 1e400): a grammar match that overflows is still refused.
 func (n *Node) Number() (string, error) {
 	if n.Kind != Scalar || n.Quoted {
 		return "", fmt.Errorf("line %d: expected a number", n.Line)
+	}
+	if !jsonNumber.MatchString(n.Str) {
+		return "", fmt.Errorf("line %d: %q is not a number", n.Line, n.Str)
 	}
 	if _, err := strconv.ParseFloat(n.Str, 64); err != nil {
 		return "", fmt.Errorf("line %d: %q is not a number", n.Line, n.Str)
