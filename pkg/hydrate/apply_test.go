@@ -108,8 +108,15 @@ func TestApplyWritesRecordsAndLeavesHandAddedFilesAlone(t *testing.T) {
 		t.Error("the hand-added file was reported as touched")
 	}
 
-	// 4. The recorded hash equals the hash of what is on disk. §33.1's honesty
-	//    property: every later verdict rests on this matching.
+	assertLedgerMatchesDisk(t, root)
+}
+
+// 4. The recorded hash equals the hash of what is on disk. §33.1's honesty
+// property: every later verdict — remove, skip, report as modified — rests on
+// this matching, so a ledger whose hashes drift from the files is worse than
+// none.
+func assertLedgerMatchesDisk(t *testing.T, root string) {
+	t.Helper()
 	l, err := LoadLedger(root)
 	if err != nil {
 		t.Fatal(err)
