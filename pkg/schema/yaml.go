@@ -236,27 +236,10 @@ func parseMap(ls []srcLine, raw []string, i, indent int) (*Node, int, error) {
 		var child *Node
 		switch {
 		case hasInline && strings.HasPrefix(value, "|"):
-			// A literal block keeps every newline the author typed, which is
-			// the whole reason prompt content uses one. `|-` strips the final
-			// newline. Anything else after the pipe is an indentation or
-			// chomping indicator (`|2`, `|-2`): neither is needed, and both
-			// change what the block reads as in ways a reader of the file
-			// would not predict, so they are named and refused rather than
-			// silently misread. A folded block (`>`) is refused below, by the
-			// indicator table in scalarNode.
-			if value != "|" && value != "|-" {
-				return nil, 0, fmt.Errorf("line %d: block scalar indicator %q: only bare | and |- are supported, not an explicit indentation or chomping indicator", cur.n, value)
-			}
-			body, resumeLine := blockScalarBody(raw, cur.n, indent)
-			if value == "|-" {
-				body = strings.TrimRight(body, "\n")
-			}
-			child = &Node{Kind: Scalar, Line: cur.n, Str: body, Quoted: true}
-			// The body's lines were also scanned into ls as ordinary content
-			// (scan() has no notion of "inside a block scalar"), so they must
-			// be skipped rather than reprocessed as siblings.
-			for i < len(ls) && ls[i].n < resumeLine {
-				i++
+			var err error
+			child, i, err = parseLiteralBlockScalar(ls, raw, i, cur.n, indent, value)
+			if err != nil {
+				return nil, 0, err
 			}
 		case hasInline:
 			// The value is read BEFORE the indentation is judged, so `a: |`
@@ -297,6 +280,34 @@ func parseMap(ls []srcLine, raw []string, i, indent int) (*Node, int, error) {
 		return nil, 0, fmt.Errorf("line %d: unexpected indentation: a sibling must match its siblings exactly", ls[i].n)
 	}
 	return n, i, nil
+}
+
+// parseLiteralBlockScalar handles the `key: |` / `key: |-` case parseMap's
+// switch used to inline. Split out on its own only because it pushed parseMap
+// over gocyclo's threshold — no behavior change.
+//
+// A literal block keeps every newline the author typed, which is the whole
+// reason prompt content uses one. `|-` strips the final newline. Anything
+// else after the pipe is an indentation or chomping indicator (`|2`, `|-2`):
+// neither is needed, and both change what the block reads as in ways a
+// reader of the file would not predict, so they are named and refused rather
+// than silently misread. A folded block (`>`) is refused below, by the
+// indicator table in scalarNode. i is the index into ls of the line right
+// after the `key: |` line; the returned index has skipped past the block's
+// body, which scan() also scanned into ls as ordinary content.
+func parseLiteralBlockScalar(ls []srcLine, raw []string, i, keyLine, indent int, value string) (*Node, int, error) {
+	if value != "|" && value != "|-" {
+		return nil, i, fmt.Errorf("line %d: block scalar indicator %q: only bare | and |- are supported, not an explicit indentation or chomping indicator", keyLine, value)
+	}
+	body, resumeLine := blockScalarBody(raw, keyLine, indent)
+	if value == "|-" {
+		body = strings.TrimRight(body, "\n")
+	}
+	child := &Node{Kind: Scalar, Line: keyLine, Str: body, Quoted: true}
+	for i < len(ls) && ls[i].n < resumeLine {
+		i++
+	}
+	return child, i, nil
 }
 
 // blockScalarBody reads the literal body of a `|` or `|-` block scalar whose

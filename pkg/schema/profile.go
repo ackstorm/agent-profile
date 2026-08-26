@@ -175,70 +175,119 @@ func Decode(n *Node) (Profile, error) {
 	}
 	p.Name = name
 
-	if tn, ok := n.Map["targets"]; ok {
-		targets, err := decodeTargets(tn)
-		if err != nil {
+	// One dispatch loop instead of nine near-identical "if present, decode,
+	// assign" blocks: same behavior, most of the branching gone. Each entry's
+	// decode func is a top-level function, not a closure — gocyclo folds a
+	// closure's own branching into its enclosing function, which would have
+	// put Decode right back over the threshold this refactor exists to fix.
+	for _, fd := range profileFieldDecoders {
+		fn, ok := n.Map[fd.key]
+		if !ok {
+			continue
+		}
+		if err := fd.decode(&p, fn); err != nil {
 			return p, err
 		}
-		p.Targets = targets
-	}
-	if mn, ok := n.Map["model"]; ok {
-		m, err := decodeModel("model", mn)
-		if err != nil {
-			return p, err
-		}
-		p.Model = m
-	}
-	if pn, ok := n.Map["prompt"]; ok {
-		pr, err := decodePrompt("prompt", pn)
-		if err != nil {
-			return p, err
-		}
-		p.Prompt = pr
-	}
-	if inn, ok := n.Map["inputs"]; ok {
-		in, err := decodeInputs("inputs", inn)
-		if err != nil {
-			return p, err
-		}
-		p.Inputs = in
-	}
-	if mkn, ok := n.Map["marketplaces"]; ok {
-		mk, err := decodeMarketplaces("marketplaces", mkn)
-		if err != nil {
-			return p, err
-		}
-		p.Marketplaces = mk
-	}
-	if sn, ok := n.Map["skills"]; ok {
-		sk, err := decodeResources("skills", sn)
-		if err != nil {
-			return p, err
-		}
-		p.Skills = sk
-	}
-	if mn, ok := n.Map["mcps"]; ok {
-		mc, err := decodeMCPs("mcps", mn)
-		if err != nil {
-			return p, err
-		}
-		p.MCPs = mc
-	}
-	if an, ok := n.Map["artifacts"]; ok {
-		ar, err := decodeArtifacts("artifacts", an)
-		if err != nil {
-			return p, err
-		}
-		p.Artifacts = ar
-	}
-	if rn, ok := n.Map["runtimes"]; ok {
-		rt, err := decodeRuntimes("runtimes", rn)
-		if err != nil {
-			return p, err
-		}
-		p.Runtimes = rt
 	}
 	return p, nil
+}
+
+// profileFieldDecoders is Decode's per-key dispatch table, covering every
+// optional key after version and name.
+var profileFieldDecoders = []struct {
+	key    string
+	decode func(*Profile, *Node) error
+}{
+	{"targets", decodeTargetsField},
+	{"model", decodeModelField},
+	{"prompt", decodePromptField},
+	{"inputs", decodeInputsField},
+	{"marketplaces", decodeMarketplacesField},
+	{"skills", decodeSkillsField},
+	{"mcps", decodeMCPsField},
+	{"artifacts", decodeArtifactsField},
+	{"runtimes", decodeRuntimesField},
+}
+
+func decodeTargetsField(p *Profile, n *Node) error {
+	v, err := decodeTargets(n)
+	if err != nil {
+		return err
+	}
+	p.Targets = v
+	return nil
+}
+
+func decodeModelField(p *Profile, n *Node) error {
+	v, err := decodeModel("model", n)
+	if err != nil {
+		return err
+	}
+	p.Model = v
+	return nil
+}
+
+func decodePromptField(p *Profile, n *Node) error {
+	v, err := decodePrompt("prompt", n)
+	if err != nil {
+		return err
+	}
+	p.Prompt = v
+	return nil
+}
+
+func decodeInputsField(p *Profile, n *Node) error {
+	v, err := decodeInputs("inputs", n)
+	if err != nil {
+		return err
+	}
+	p.Inputs = v
+	return nil
+}
+
+func decodeMarketplacesField(p *Profile, n *Node) error {
+	v, err := decodeMarketplaces("marketplaces", n)
+	if err != nil {
+		return err
+	}
+	p.Marketplaces = v
+	return nil
+}
+
+func decodeSkillsField(p *Profile, n *Node) error {
+	v, err := decodeResources("skills", n)
+	if err != nil {
+		return err
+	}
+	p.Skills = v
+	return nil
+}
+
+func decodeMCPsField(p *Profile, n *Node) error {
+	v, err := decodeMCPs("mcps", n)
+	if err != nil {
+		return err
+	}
+	p.MCPs = v
+	return nil
+}
+
+func decodeArtifactsField(p *Profile, n *Node) error {
+	v, err := decodeArtifacts("artifacts", n)
+	if err != nil {
+		return err
+	}
+	p.Artifacts = v
+	return nil
+}
+
+func decodeRuntimesField(p *Profile, n *Node) error {
+	v, err := decodeRuntimes("runtimes", n)
+	if err != nil {
+		return err
+	}
+	p.Runtimes = v
+	return nil
 }
 
 func decodeTargets(n *Node) ([]string, error) {
@@ -995,77 +1044,127 @@ func decodeRuntime(path string, n *Node) (Runtime, error) {
 		"inputs", "plugins", "environment", "variants"); err != nil {
 		return r, err
 	}
-	if sn, ok := n.Map["skills"]; ok {
-		sk, err := decodeResources(path+".skills", sn)
-		if err != nil {
+	// Same dispatch-loop shape as Decode, for the same reason: ten near-
+	// identical "if present, decode, assign" blocks collapsed into one loop,
+	// with each entry a top-level function rather than a closure — see
+	// profileFieldDecoders' comment for why that matters to gocyclo.
+	for _, fd := range runtimeFieldDecoders {
+		fn, ok := n.Map[fd.key]
+		if !ok {
+			continue
+		}
+		if err := fd.decode(path, &r, fn); err != nil {
 			return r, err
 		}
-		r.Skills = sk
-	}
-	if mn, ok := n.Map["mcps"]; ok {
-		mc, err := decodeMCPs(path+".mcps", mn)
-		if err != nil {
-			return r, err
-		}
-		r.MCPs = mc
-	}
-	if an, ok := n.Map["artifacts"]; ok {
-		ar, err := decodeArtifacts(path+".artifacts", an)
-		if err != nil {
-			return r, err
-		}
-		r.Artifacts = ar
-	}
-	if mkn, ok := n.Map["marketplaces"]; ok {
-		mk, err := decodeMarketplaces(path+".marketplaces", mkn)
-		if err != nil {
-			return r, err
-		}
-		r.Marketplaces = mk
-	}
-	if mdn, ok := n.Map["model"]; ok {
-		m, err := decodeModel(path+".model", mdn)
-		if err != nil {
-			return r, err
-		}
-		r.Model = m
-	}
-	if pn, ok := n.Map["prompt"]; ok {
-		pr, err := decodePrompt(path+".prompt", pn)
-		if err != nil {
-			return r, err
-		}
-		r.Prompt = pr
-	}
-	if inn, ok := n.Map["inputs"]; ok {
-		in, err := decodeInputs(path+".inputs", inn)
-		if err != nil {
-			return r, err
-		}
-		r.Inputs = in
-	}
-	if pgn, ok := n.Map["plugins"]; ok {
-		pg, err := decodePlugins(path+".plugins", pgn)
-		if err != nil {
-			return r, err
-		}
-		r.Plugins = pg
-	}
-	if en, ok := n.Map["environment"]; ok {
-		env, err := decodeStringMap(path+".environment", en)
-		if err != nil {
-			return r, err
-		}
-		r.Environment = env
-	}
-	if vn, ok := n.Map["variants"]; ok {
-		v, err := decodeVariants(path+".variants", vn)
-		if err != nil {
-			return r, err
-		}
-		r.Variants = v
 	}
 	return r, nil
+}
+
+// runtimeFieldDecoders is decodeRuntime's per-key dispatch table.
+var runtimeFieldDecoders = []struct {
+	key    string
+	decode func(path string, r *Runtime, n *Node) error
+}{
+	{"skills", decodeRuntimeSkillsField},
+	{"mcps", decodeRuntimeMCPsField},
+	{"artifacts", decodeRuntimeArtifactsField},
+	{"marketplaces", decodeRuntimeMarketplacesField},
+	{"model", decodeRuntimeModelField},
+	{"prompt", decodeRuntimePromptField},
+	{"inputs", decodeRuntimeInputsField},
+	{"plugins", decodeRuntimePluginsField},
+	{"environment", decodeRuntimeEnvironmentField},
+	{"variants", decodeRuntimeVariantsField},
+}
+
+func decodeRuntimeSkillsField(path string, r *Runtime, n *Node) error {
+	v, err := decodeResources(path+".skills", n)
+	if err != nil {
+		return err
+	}
+	r.Skills = v
+	return nil
+}
+
+func decodeRuntimeMCPsField(path string, r *Runtime, n *Node) error {
+	v, err := decodeMCPs(path+".mcps", n)
+	if err != nil {
+		return err
+	}
+	r.MCPs = v
+	return nil
+}
+
+func decodeRuntimeArtifactsField(path string, r *Runtime, n *Node) error {
+	v, err := decodeArtifacts(path+".artifacts", n)
+	if err != nil {
+		return err
+	}
+	r.Artifacts = v
+	return nil
+}
+
+func decodeRuntimeMarketplacesField(path string, r *Runtime, n *Node) error {
+	v, err := decodeMarketplaces(path+".marketplaces", n)
+	if err != nil {
+		return err
+	}
+	r.Marketplaces = v
+	return nil
+}
+
+func decodeRuntimeModelField(path string, r *Runtime, n *Node) error {
+	v, err := decodeModel(path+".model", n)
+	if err != nil {
+		return err
+	}
+	r.Model = v
+	return nil
+}
+
+func decodeRuntimePromptField(path string, r *Runtime, n *Node) error {
+	v, err := decodePrompt(path+".prompt", n)
+	if err != nil {
+		return err
+	}
+	r.Prompt = v
+	return nil
+}
+
+func decodeRuntimeInputsField(path string, r *Runtime, n *Node) error {
+	v, err := decodeInputs(path+".inputs", n)
+	if err != nil {
+		return err
+	}
+	r.Inputs = v
+	return nil
+}
+
+func decodeRuntimePluginsField(path string, r *Runtime, n *Node) error {
+	v, err := decodePlugins(path+".plugins", n)
+	if err != nil {
+		return err
+	}
+	r.Plugins = v
+	return nil
+}
+
+func decodeRuntimeEnvironmentField(path string, r *Runtime, n *Node) error {
+	v, err := decodeStringMap(path+".environment", n)
+	if err != nil {
+		return err
+	}
+	r.Environment = v
+	return nil
+}
+
+func decodeRuntimeVariantsField(path string, r *Runtime, n *Node) error {
+	v, err := decodeVariants(path+".variants", n)
+	if err != nil {
+		return err
+	}
+	r.Variants = v
+	return nil
 }
 
 // decodePlugins captures each entry as a raw Node, no deeper than that: §24
