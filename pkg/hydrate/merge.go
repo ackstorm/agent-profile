@@ -143,3 +143,69 @@ func mergeMap(doc, contribution map[string]any, prefix string, keys *[]string) {
 		*keys = append(*keys, path)
 	}
 }
+
+// MergeOut deletes exactly these dotted keys from the structured document at
+// path, and nothing else. It is MergeInto's inverse and the second half of what
+// makes a shared configuration file safe to install into.
+//
+// Precisely these keys: a document holding four MCP servers, three of them the
+// user's, loses one. That bound is §33.3's, and it is the reason MergeInto
+// reports keys rather than leaving uninstall to recompute them from a document
+// that has since moved on.
+//
+// An emptied container is LEFT in place. Removing "mcpServers" once its last
+// entry goes would be a claim the ledger cannot support — the user may have
+// created that container, and an empty mapping costs them nothing.
+func MergeOut(path string, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	isTOML := strings.EqualFold(filepath.Ext(path), ".toml")
+
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// readDoc's refusal, for the same reason: a file that does not parse was
+	// broken by someone else, and rewriting it would destroy work this program
+	// did not create.
+	doc := map[string]any{}
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if isTOML {
+			err = toml.Unmarshal(raw, &doc)
+		} else {
+			err = json.Unmarshal(raw, &doc)
+		}
+		if err != nil {
+			return fmt.Errorf("%s does not parse, so it will not be touched: %w", path, err)
+		}
+	}
+
+	for _, k := range keys {
+		deleteDotted(doc, k)
+	}
+
+	out, err := encodeDoc(doc, isTOML)
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", path, err)
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+// deleteDotted removes one recorded key. MergeInto descends exactly one level,
+// so a recorded key is one or two segments and this walks the same shape back.
+func deleteDotted(doc map[string]any, key string) {
+	head, rest, nested := strings.Cut(key, ".")
+	if !nested {
+		delete(doc, head)
+		return
+	}
+	sub, ok := doc[head].(map[string]any)
+	if !ok {
+		return
+	}
+	delete(sub, rest)
+}

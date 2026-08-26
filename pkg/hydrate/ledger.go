@@ -50,6 +50,25 @@ type ResourceRec struct {
 	ResolvedRef string         `json:"resolvedRef,omitempty"`
 	InstalledAt string         `json:"installedAt"`
 	Files       []FileRec      `json:"files"`
+
+	// The four fields below exist for ONE reader: `ap manifest export` (§35.2),
+	// which must "produce a manifest that validates and re-applies cleanly".
+	//
+	// Three resources cannot be written back from the files alone. An MCP
+	// server and a model block materialize into four different native shapes,
+	// so reversing them means four reverse mappings run over a document the
+	// user may have edited since; an artifact's destination is many-to-one, so
+	// the rel path does not name the destination that produced it. Recording
+	// the DECLARATION is one field each and cannot drift.
+	//
+	// None of them can hold a secret VALUE (§34). They are schema types, and a
+	// schema.Profile has no field capable of holding a resolved one —
+	// resolution lands in schema.Resolved, a different type that never reaches
+	// here. The ban is structural rather than a rule someone must remember.
+	Destination string                    `json:"destination,omitempty"`
+	MCP         *schema.MCP               `json:"mcp,omitempty"`
+	Model       *schema.Model             `json:"model,omitempty"`
+	Secrets     map[string]schema.Binding `json:"secrets,omitempty"`
 }
 
 // There is deliberately NO second arm.
@@ -157,4 +176,15 @@ func (l *Ledger) Put(r ResourceRec) {
 		}
 	}
 	l.Resources = append(l.Resources, r)
+}
+
+// Delete drops a resource's record. Removal is the only caller: apply replaces
+// a record through Put and never needs to forget one.
+func (l *Ledger) Delete(kind, name string) {
+	for i, r := range l.Resources {
+		if r.Kind == kind && r.Name == name {
+			l.Resources = append(l.Resources[:i], l.Resources[i+1:]...)
+			return
+		}
+	}
 }

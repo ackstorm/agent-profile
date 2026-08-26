@@ -123,6 +123,7 @@ func applySkills(ctx context.Context, p Plan, l *Ledger, res *Result, stamp stri
 		l.Put(ResourceRec{
 			Name: name, Kind: "skill", Ref: r.Ref, Source: r.Source,
 			ResolvedRef: fetched.ResolvedRef, InstalledAt: stamp, Files: files,
+			Secrets: sourceSecrets(p.Profile, r.Source),
 		})
 	}
 	return nil
@@ -193,6 +194,7 @@ func applyPlugins(ctx context.Context, p Plan, l *Ledger, res *Result, stamp str
 		l.Put(ResourceRec{
 			Name: name, Kind: "plugin", Ref: r.Ref, Source: r.Source,
 			ResolvedRef: fetched.ResolvedRef, InstalledAt: stamp, Files: files,
+			Secrets: sourceSecrets(p.Profile, r.Source),
 		})
 	}
 	return nil
@@ -217,8 +219,9 @@ func applyArtifacts(ctx context.Context, p Plan, l *Ledger, res *Result, stamp s
 			return fmt.Errorf("artifact %q: %w", name, err)
 		}
 		l.Put(ResourceRec{
-			Name: name, Kind: "artifact", Source: a.Source,
+			Name: name, Kind: "artifact", Source: a.Source, Destination: a.Destination,
 			ResolvedRef: fetched.ResolvedRef, InstalledAt: stamp, Files: files,
+			Secrets: sourceSecrets(p.Profile, a.Source),
 		})
 	}
 	return nil
@@ -267,9 +270,11 @@ func applyMCPs(p Plan, l *Ledger, res *Result, stamp string) error {
 		if err != nil {
 			return err
 		}
+		decl := p.Profile.MCPs[name]
 		l.Put(ResourceRec{
-			Name: name, Kind: "mcp", InstalledAt: stamp,
-			Files: []FileRec{{RelPath: filepath.ToSlash(rel), Hash: hash, Merge: "deep", Keys: keys}},
+			Name: name, Kind: "mcp", InstalledAt: stamp, MCP: &decl,
+			Files:   []FileRec{{RelPath: filepath.ToSlash(rel), Hash: hash, Merge: "deep", Keys: keys}},
+			Secrets: pickSecrets(p.Profile, mcpSecretNames(decl)),
 		})
 		res.Changes = append(res.Changes, Change{Path: filepath.Join(rel, key+"."+name), Op: "merge"})
 	}
@@ -323,11 +328,76 @@ func applyModel(p Plan, l *Ledger, res *Result, stamp string) error {
 		return err
 	}
 	l.Put(ResourceRec{
-		Name: "model", Kind: "model", InstalledAt: stamp,
-		Files: []FileRec{{RelPath: filepath.ToSlash(target.File), Hash: hash, Merge: "deep", Keys: keys}},
+		Name: "model", Kind: "model", InstalledAt: stamp, Model: p.Profile.Model,
+		Files:   []FileRec{{RelPath: filepath.ToSlash(target.File), Hash: hash, Merge: "deep", Keys: keys}},
+		Secrets: pickSecrets(p.Profile, modelSecretNames(*p.Profile.Model)),
 	})
 	res.Changes = append(res.Changes, Change{Path: filepath.Join(target.File, target.Block), Op: "merge"})
 	return nil
+}
+
+// sourceSecrets is the bindings ONE source references, ready for the ledger.
+//
+// Recording every input the manifest declared would put unrelated bindings into
+// every record; recording none would leave an exported manifest referencing a
+// secret nothing declares, which fails its own validation (§13.1). What a
+// resource references is exactly what export has to re-declare for it.
+func sourceSecrets(p schema.Profile, s *schema.Source) map[string]schema.Binding {
+	return pickSecrets(p, sourceSecretNames(s))
+}
+
+func pickSecrets(p schema.Profile, names []string) map[string]schema.Binding {
+	var out map[string]schema.Binding
+	for _, n := range names {
+		b, ok := p.Inputs.Secrets[n]
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]schema.Binding{}
+		}
+		out[n] = b
+	}
+	return out
+}
+
+func sourceSecretNames(s *schema.Source) []string {
+	if s == nil {
+		return nil
+	}
+	var auth *schema.GitAuth
+	switch {
+	case s.Git != nil:
+		auth = s.Git.Auth
+	case s.Archive != nil:
+		auth = s.Archive.Auth
+	}
+	if auth == nil || auth.ValueFrom.Secret == "" {
+		return nil
+	}
+	return []string{auth.ValueFrom.Secret}
+}
+
+func mcpSecretNames(m schema.MCP) []string {
+	return headerSecretNames(m.Transport.Headers)
+}
+
+func modelSecretNames(m schema.Model) []string {
+	names := headerSecretNames(m.Headers)
+	if m.Auth != nil && m.Auth.ValueFrom.Secret != "" {
+		names = append(names, m.Auth.ValueFrom.Secret)
+	}
+	return names
+}
+
+func headerSecretNames(h map[string]schema.HeaderValue) []string {
+	var names []string
+	for _, k := range sortedKeys(h) {
+		if v := h[k]; v.ValueFrom != nil && v.ValueFrom.Secret != "" {
+			names = append(names, v.ValueFrom.Secret)
+		}
+	}
+	return names
 }
 
 // bindingVars maps an input NAME to the environment variable a reference

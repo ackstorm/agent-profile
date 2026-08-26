@@ -181,10 +181,7 @@ func (w *yw) archiveSourceBlock(indent int, a *ArchiveSource) {
 	}
 	if a.Auth != nil {
 		w.key(indent, "auth")
-		if a.Auth.Scheme != "" {
-			w.scalar(indent+1, "scheme", a.Auth.Scheme)
-		}
-		w.valueFrom(indent+1, a.Auth.ValueFrom)
+		w.gitAuthBlock(indent+1, a.Auth)
 	}
 }
 
@@ -198,14 +195,28 @@ func (w *yw) gitSourceBlock(indent int, g *GitSource) {
 	}
 	if g.Auth != nil {
 		w.key(indent, "auth")
-		// An inferred scheme is NOT filled in here. render shows what the
-		// manifest says; §35.2's export is the operation that emits resolved
-		// values, and it works from the ledger, not from this.
-		if g.Auth.Scheme != "" {
-			w.scalar(indent+1, "scheme", g.Auth.Scheme)
-		}
-		w.valueFrom(indent+1, g.Auth.ValueFrom)
+		w.gitAuthBlock(indent+1, g.Auth)
 	}
+}
+
+// gitAuthBlock is §17's auth block, and the nesting is not cosmetic: the
+// decoder requires "value_from" and refuses a bare "secret" at this level.
+//
+// Both source families emitted the bare form until the export round trip
+// (§35.2) first fed render's own output back to the parser, which rejected it
+// at the line this function now writes. A renderer nothing re-reads drifts from
+// the grammar it claims to print, and that is the second time this repository
+// has found the same class of defect.
+//
+// An inferred scheme is still NOT filled in here. render shows what the
+// manifest says; export is the operation that emits resolved values, and it
+// works from the ledger rather than from this.
+func (w *yw) gitAuthBlock(indent int, a *GitAuth) {
+	if a.Scheme != "" {
+		w.scalar(indent, "scheme", a.Scheme)
+	}
+	w.key(indent, "value_from")
+	w.valueFrom(indent+1, a.ValueFrom)
 }
 
 func (w *yw) localSourceBlock(indent int, l *LocalSource) {
@@ -400,8 +411,33 @@ func scalarText(n *Node) string {
 // quoteIfNeeded quotes a value that would otherwise be misread on a later
 // parse — empty, a boolean/null keyword, or something that looks like a
 // number — using this subset's own two escapes (\\ and \"), never Go's.
+// quoteIfNeeded emits a scalar bare when the parser reads it back UNCHANGED,
+// and quotes it otherwise.
+//
+// The list below is scalarNode's, read off the parser rather than guessed at,
+// and every entry is a value that survives being written and comes back
+// different — silently, which is the whole problem:
+//
+//	trailing space   TrimRight eats it. `prefix: "Bearer "` — the single most
+//	                 common header prefix there is — came back as "Bearer" and
+//	                 materialized "Bearer${TOKEN}" with no separator.
+//	" #"             starts a comment; everything after it is dropped.
+//	a leading quote  reads as a quoted scalar, so its own quotes vanish.
+//	an indicator     the first byte is refused outright, so the manifest render
+//	                 wrote does not even parse.
+//
+// Quoting more than strictly necessary costs a pair of quotes. Quoting less
+// costs a value, without saying so.
 func quoteIfNeeded(s string) string {
-	if s != "" && s != "true" && s != "false" && s != "null" && s != "~" && !jsonNumber.MatchString(s) {
+	if s == "" {
+		return `""`
+	}
+	_, indicator := indicators[s[0]]
+	plain := s != "true" && s != "false" && s != "null" && s != "~" &&
+		!jsonNumber.MatchString(s) &&
+		s == strings.TrimRight(s, " ") && !strings.HasPrefix(s, " ") &&
+		!strings.Contains(s, " #") && s[0] != '"' && !indicator
+	if plain {
 		return s
 	}
 	var b strings.Builder
