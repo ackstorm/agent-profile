@@ -470,3 +470,49 @@ func TestDecodeEnforcesVersionAndNameRules(t *testing.T) {
 		})
 	}
 }
+
+// §17.1: the two v1 schemes, and — the part that matters — absent must stay
+// absent. A default written here would make the host inference unreachable,
+// and §17.1 requires the scheme actually used to be reportable, which it
+// cannot be if the decoder already picked one.
+func TestGitAuthSchemeAcceptsOnlyTheTwoV1Values(t *testing.T) {
+	manifest := func(auth string) []byte {
+		return []byte("version: \"1\"\nname: x\ntargets:\n  - claude\n" +
+			"inputs:\n  secrets:\n    t:\n      env: T\n" +
+			"skills:\n  s:\n    source:\n      git:\n        url: https://gl/x.git\n" +
+			"        auth:\n" + auth)
+	}
+	for _, scheme := range []string{"bearer", "basic-oauth2"} {
+		n, err := ParseYAML(manifest("          scheme: " + scheme + "\n          value_from:\n            secret: t\n"))
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		p, err := Decode(n)
+		if err != nil {
+			t.Fatalf("decode %s: %v", scheme, err)
+		}
+		if got := p.Skills["s"].Source.Git.Auth.Scheme; got != scheme {
+			t.Errorf("scheme = %q, want %q", got, scheme)
+		}
+	}
+
+	n, err := ParseYAML(manifest("          value_from:\n            secret: t\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p, err := Decode(n)
+	if err != nil {
+		t.Fatalf("decode without scheme: %v", err)
+	}
+	if got := p.Skills["s"].Source.Git.Auth.Scheme; got != "" {
+		t.Errorf("scheme = %q, want empty — the schema must not default it", got)
+	}
+
+	n, err = ParseYAML(manifest("          scheme: ntlm\n          value_from:\n            secret: t\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if _, err := Decode(n); err == nil || !strings.Contains(err.Error(), "ntlm") {
+		t.Errorf("err = %v; an unknown scheme must be refused by name", err)
+	}
+}

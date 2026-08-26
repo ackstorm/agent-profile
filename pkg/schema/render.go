@@ -177,7 +177,13 @@ func (w *yw) gitSourceBlock(indent int, g *GitSource) {
 	}
 	if g.Auth != nil {
 		w.key(indent, "auth")
-		w.valueFrom(indent+1, *g.Auth)
+		// An inferred scheme is NOT filled in here. render shows what the
+		// manifest says; §35.2's export is the operation that emits resolved
+		// values, and it works from the ledger, not from this.
+		if g.Auth.Scheme != "" {
+			w.scalar(indent+1, "scheme", g.Auth.Scheme)
+		}
+		w.valueFrom(indent+1, g.Auth.ValueFrom)
 	}
 }
 

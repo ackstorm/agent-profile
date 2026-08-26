@@ -88,7 +88,7 @@ func gitSourceRefs(resource string, src *Source) []Ref {
 	if src == nil || src.Git == nil || src.Git.Auth == nil {
 		return nil
 	}
-	return []Ref{refFromValueFrom(resource, *src.Git.Auth)}
+	return []Ref{refFromValueFrom(resource, src.Git.Auth.ValueFrom)}
 }
 
 // headerRefs collects the one reference a sourced header carries. A literal

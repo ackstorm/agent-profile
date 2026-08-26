@@ -62,7 +62,9 @@ marketplaces:
         ref: main
 
         auth:
-          secret: gitlab-token
+          scheme: basic-oauth2
+          value_from:
+            secret: gitlab-token
 
 
 skills:
@@ -85,7 +87,8 @@ skills:
         subpath: review
 
         auth:
-          secret: gitlab-token
+          value_from:
+            secret: gitlab-token
 
 
 mcps:

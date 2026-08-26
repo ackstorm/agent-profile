@@ -45,8 +45,27 @@ type Source struct {
 
 type GitSource struct {
 	URL, Ref, Subpath string
-	Auth              *ValueFrom
+	Auth              *GitAuth
 }
+
+// GitAuth is §17's credential plus §17.1's transport scheme.
+//
+// Scheme is deliberately NOT defaulted here. Absent means "infer it from the
+// host at fetch time" (§17.1): a host containing "gitlab", or beginning
+// "git.", yields basic-oauth2 and anything else yields bearer. A default
+// written into the decoder would make that inference unreachable — and
+// unreportable, which §17.1 requires it to be, because a self-hosted GitLab
+// answers Bearer with 401 and the 401 has to name the scheme that was tried.
+type GitAuth struct {
+	// Scheme is "bearer", "basic-oauth2", or "" for inferred.
+	Scheme    string
+	ValueFrom ValueFrom
+}
+
+// gitAuthSchemes is §17.1's closed set. Anything else is refused by name
+// rather than silently ignored: a manifest asking for a scheme this does not
+// implement would otherwise be fetched with a different one.
+var gitAuthSchemes = []string{"bearer", "basic-oauth2"}
 
 type LocalSource struct{ Path, Subpath string }
 
@@ -619,13 +638,45 @@ func decodeGitSource(path string, n *Node) (*GitSource, error) {
 		}
 	}
 	if an, ok := n.Map["auth"]; ok {
-		vf, err := decodeValueFrom(path+".auth", an)
-		if err != nil {
+		if g.Auth, err = decodeGitAuth(path+".auth", an); err != nil {
 			return nil, err
 		}
-		g.Auth = &vf
 	}
 	return g, nil
+}
+
+// decodeGitAuth reads §17's auth block: value_from, plus §17.1's optional
+// scheme. It cannot reuse decodeValueFrom directly because that one owns its
+// own onlyKeys check and would refuse "scheme".
+func decodeGitAuth(path string, n *Node) (*GitAuth, error) {
+	if n.Kind != Mapping {
+		return nil, fmt.Errorf("line %d: %s: expected a mapping with value_from", n.Line, path)
+	}
+	if err := onlyKeys(n, "scheme", "value_from"); err != nil {
+		return nil, err
+	}
+	a := &GitAuth{}
+	if sn, ok := n.Map["scheme"]; ok {
+		s, err := sn.Text()
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %s.scheme: %w", sn.Line, path, err)
+		}
+		if !slices.Contains(gitAuthSchemes, s) {
+			return nil, fmt.Errorf("line %d: %s.scheme: unknown scheme %q (v1: %s)",
+				sn.Line, path, s, strings.Join(gitAuthSchemes, ", "))
+		}
+		a.Scheme = s
+	}
+	vfn, ok := n.Map["value_from"]
+	if !ok {
+		return nil, fmt.Errorf("line %d: %s: value_from is required", n.Line, path)
+	}
+	vf, err := decodeValueFrom(path+".value_from", vfn)
+	if err != nil {
+		return nil, err
+	}
+	a.ValueFrom = vf
+	return a, nil
 }
 
 func decodeLocalSource(path string, n *Node) (*LocalSource, error) {

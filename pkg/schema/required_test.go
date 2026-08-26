@@ -23,7 +23,8 @@ skills:
       git:
         url: https://gitlab.company.com/skills.git
         auth:
-          secret: gitlab-token
+          value_from:
+            secret: gitlab-token
 runtimes:
   opencode:
     skills:
