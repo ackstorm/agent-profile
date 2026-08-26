@@ -14,12 +14,12 @@ import (
 )
 
 // exportFixture is one root holding one of everything the ledger can record.
-func exportFixture(t *testing.T) (root string, prof schema.Profile, fetched map[string]source.Resolved) {
+func exportFixture(t *testing.T) (root string, fetched map[string]source.Resolved) {
 	t.Helper()
 	src := writeTree(t, t.TempDir(), map[string]string{"SKILL.md": "# pdf"})
 	art := writeTree(t, t.TempDir(), map[string]string{"style.md": "house style"})
 
-	prof = schema.Profile{
+	prof := schema.Profile{
 		Version: "1", Name: "plan", Targets: []string{"claude"},
 		Inputs: schema.Inputs{Secrets: map[string]schema.Binding{
 			"memory-token": {Env: "MEMORY_TOKEN"},
@@ -53,13 +53,13 @@ func exportFixture(t *testing.T) (root string, prof schema.Profile, fetched map[
 	}); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	return root, prof, fetched
+	return root, fetched
 }
 
 // The exit criterion: a root's ledger becomes a manifest that validates and
 // re-applies to the same thing (§35.2).
 func TestExportRoundTripsThroughTheParserAndReAppliesIdentically(t *testing.T) {
-	root, _, fetched := exportFixture(t)
+	root, fetched := exportFixture(t)
 
 	exported, err := Export(root, "plan", []string{"claude"})
 	if err != nil {
@@ -114,7 +114,7 @@ func TestExportRoundTripsThroughTheParserAndReAppliesIdentically(t *testing.T) {
 // no scheme; a reader on a host that does not look like GitLab would infer the
 // other one and get a 401 whose cause is invisible.
 func TestExportEmitsTheResolvedAuthScheme(t *testing.T) {
-	root, _, _ := exportFixture(t)
+	root, _ := exportFixture(t)
 	exported, err := Export(root, "plan", []string{"claude"})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestExportEmitsTheResolvedAuthScheme(t *testing.T) {
 // the manifest references a secret nothing declares and fails its own
 // validation. And §34: the binding NAME, never the value.
 func TestExportSynthesisesOnlyTheBindingsItsResourcesReference(t *testing.T) {
-	root, _, _ := exportFixture(t)
+	root, _ := exportFixture(t)
 	exported, err := Export(root, "plan", []string{"claude"})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestExportSynthesisesOnlyTheBindingsItsResourcesReference(t *testing.T) {
 // sorted last would win and the loser would authenticate with the wrong
 // credential.
 func TestExportRefusesTwoRecordsThatBindOneNameTwoWays(t *testing.T) {
-	root, _, _ := exportFixture(t)
+	root, _ := exportFixture(t)
 
 	l, err := LoadLedger(root)
 	if err != nil {

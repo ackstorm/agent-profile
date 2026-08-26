@@ -248,60 +248,70 @@ The sandbox check for it is asserted on `arg:[…]`, never on `argv:`. The stub'
 argument from two — which is the entire property under test. That check was
 written against `argv:` first and would have been vacuous.
 
-## `ap sync` runs other people's shell commands, on purpose
+## The ledger is the only state, and it bounds every removal
 
-`git clone` a repository and `ap sync` runs the commands inside it as you. That
-is arbitrary code execution by design and cannot be engineered away — it is the
-feature. Everything in `cmd/ap/sync.go` exists to stop it happening by surprise,
-and four rules hold it together. The reasoning is in
-`docs/specs/ap-sync-v1.md`; these are the parts that must not drift.
+`ap sync` is gone, and with it the one thing in this program that ran other
+people's shell commands. A capability is now DECLARED and ap materializes it,
+which is what lets one declaration work on four runtimes and what lets
+`ap uninstall` know precisely what to take back. Running a tool's own installer
+is no longer expressible — `ap env <ref> -- <installer>` is the honest
+replacement, and it is the user's command, not ap's.
 
-- **`install` goes to `sh -c`; a variant's `args` goes to a tokenizer.** The two
-  fields are both strings and look alike, so the difference is stated rather
-  than inferred. An install command is a shell one-liner by nature; an agent's
-  argv is data. `--prompt $HOME` reaches the agent as those characters. Never
-  give `args` a shell, and never take one away from `install`.
-- **`args` is tokenized BEFORE `{}` is substituted.** Substituting first would
-  let a caller's argument change how many tokens a variant has — one prompt
-  silently becoming three arguments, which claude then drops without a word.
-  `TestSyncVariantArgsTokenizeBeforeSubstituting` fails with four tokens if
-  anyone reverses it.
-- **An inherited variable is stripped by VALUE, never by name.** A value that
-  resolves inside `profile.Root()` goes; everything else stays. Stripping the
-  four config variables by name would delete `XDG_CONFIG_HOME` for a claude
-  install — that string is opencode's config variable *and* the one every other
-  program on the machine reads — and break `npm` for everyone.
-  `TestSyncKeepsAConfigVariableThatPointsOutsideTheProfileRoot` is the guard.
-- **`bootstrap` runs before any profile exists, with no agent variable set.**
-  Not a convention: it is what makes "install this into all my profiles at once"
-  inexpressible. An earlier draft ran a profile-level list once per platform,
-  and its own example leaked into the real home — `npx … --claude --global`
-  during codex's turn sees no `CLAUDE_CONFIG_DIR` and writes to `~/.claude`.
+Four rules hold the state surface together. The reasoning is in
+`docs/specs/agent-profile-declarative-spec-v0.6.3.md` §33 and §35.
 
-`name: default` runs against the configuration the developer uses every day,
-which ap cannot undo. It used to be gated **separately** from `--yes`; that
-second flag, `--allow-default`, was removed on request — one run, one question.
-`--yes` now covers it. What must not be lost with it is the display: a default
-target is printed with its resolved absolute path and named as the real config,
-in `--dry-run` and in the prompt, because that display is now the only thing
-distinguishing the two blast radii. Off a terminal the single gate still
-refuses; a pipe is not consent, checked with `stdinIsTerminal` and not with
-`answered()`. Nothing is ever created for the sentinel — no directory, no
-links, no shim, no wrapper — and `TestSyncDefaultNeverCreatesLinksOrShims`
-holds that line.
+- **A manifest is an INPUT; the ledger is the STATE.** Nothing writes back to a
+  manifest, and applying one does not make it authoritative. `ap list <ref>`
+  reads the ledger, never a manifest, because a manifest says nothing about what
+  is installed. `ap manifest export <ref>` closes the loop the other way.
+- **The preview and the action share ONE classifier.** `hydrate.Remove` is the
+  only entry point and calls `classify` exactly once, so `--dry-run` cannot
+  drift from what happens. Do not add a second path that "just previews".
+- **The hash gates a whole-file record. It CANNOT gate a merged one.** Apply
+  merges each MCP server into one document in turn, so installing a second
+  server invalidates the first one's recorded hash the moment it lands. On a
+  root with two servers every recorded hash but the last is already stale.
+  Gating on it would refuse every merged uninstall on any root holding more
+  than one server — the ledger's headline feature, dead on arrival. A merged
+  record is bounded by its recorded KEYS, which is what `MergeInto` returns
+  them for. `TestUninstallingOneMCPServerLeavesEveryOtherKeyIntact` is the
+  guard, and it goes red if anyone "makes removal consistent".
+- **The credential value is never written down.** `--auth-secret-env VAR` and
+  `--auth-secret-file <path>` record the BINDING only (§13.1, §34) — this is a
+  deliberate divergence from `ach-cli`, which persists tokens in a
+  `credentials.json`. The cost is stated rather than discovered: the variable
+  must be present on every run, where a tool that stores the token asks once.
 
-Two limits are stated in the spec rather than defended here, and neither is a
-bug to be fixed: **ap cannot tell whether an install command honoured the
-variable** (§8.5 — a tool that resolves `~/.claude` directly writes to the real
-home and reports success; the fix belongs upstream, and sandboxing it was
-rejected on four counts), and **a manifest is only as reproducible as its
-install commands** (§14 — `@latest` is whatever it was that day; ap does not pin
-and does not lock).
+Removal is safe against `<agent>:default` — the agent's real configuration
+directory, the case SPEC v0.5 gave up on — precisely because the ledger can tell
+ap's writes from the user's. There is no gate on `ap uninstall`: it is bounded
+by a record, not by a question.
 
-`ap sync` is additive. Nothing is pruned, nothing is uninstalled, and there is
-no ownership tracking. The one exception is a variant of the same name, which is
-overwritten — reported as `updated`, in both the report and `--dry-run`, because
-it is the only place v1 destroys something a user typed.
+Apply stays **additive**, and v1 ships no flag that changes it. A manifest that
+stops declaring a resource leaves it alone. Whole-root convergence (`--prune`)
+is deferred to its first real consumer, `ach-runtime`'s init container.
+
+`ap install` takes a direct source, never a bare `<item>@<marketplace>`: v1
+records no marketplace definition, so there is nothing on the root to resolve
+the catalogue name against. It is refused BY NAME — without that refusal the ref
+is treated as a literal resource name and the user gets a contract error naming
+a cache directory.
+
+## Render's output must parse
+
+Two defects lived in `pkg/schema/render.go` because its tests compared emitted
+text to expected text, so a renderer and a parser that disagreed about the
+grammar both stayed green:
+
+- a git or archive `auth` block emitted `secret:` where the decoder requires a
+  nested `value_from:`, so the manifest did not parse at all;
+- a header `prefix` of `"Bearer "` came back as `"Bearer"`, because a bare
+  scalar is right-trimmed — silent, and it materialized `Bearer${TOKEN}` with no
+  separator.
+
+`TestRenderRoundTripsThroughTheParser` feeds render's output to `Effective` and
+asserts a fixed point. Any new emitter belongs in that fixture, and
+`quoteIfNeeded`'s list is read off `scalarNode`, not guessed at.
 
 ## install.sh is a `curl | bash` target, so treat it as one
 

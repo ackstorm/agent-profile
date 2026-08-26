@@ -35,7 +35,8 @@ Commands:
   sessions  List recent sessions across agents and profiles
   resume    Resume a past session in its directory
   create    Create a profile and a wrapper you can type as a command
-  sync      Create profiles, variants and installs from a manifest repository
+  install   Install one capability into a profile
+  uninstall Remove one capability from a profile
   variant   Name a set of launch arguments over an existing profile
   which     Print the profile directory
   env       Print the environment override, or run a command under it
@@ -52,7 +53,7 @@ There is no active profile: every command names one explicitly.
 
 Examples:
   ap create claude:plan
-  ap sync ./agent-profiles --dry-run
+  ap manifest apply claude:plan ./agent-profile.yaml
   ap run claude:plan --effort xhigh
   ap sessions
   ap resume 05d8188f
@@ -76,14 +77,86 @@ disables every permission prompt is never invisible.
 
 Every reference is qualified, so any line is pasteable after "ap run".
 
+Given a qualified reference, it answers the same question one level deeper:
+what that profile has INSTALLED, read from the ledger. That is not what a
+manifest says — a manifest is an input, and applying one is what put these
+here. Each row shows what the resource wrote, because that is what
+"ap uninstall" will act on.
+
 Flags:
-  --raw   one tab-separated line per reference, for scripts: the reference in
-          field 1 and one argument per field after it, no tree and no padding
+  --raw   one tab-separated line per row, for scripts: for an agent listing,
+          the reference in field 1 and one argument per field after it; for a
+          profile's resources, kind, name and the resolved ref
 
 Examples:
   ap list
   ap list claude
+  ap list claude:plan
   ap list --raw
+`,
+
+	"install": `ap install - install one capability into a profile
+
+Usage:
+  ap install <agent>:<profile> <kind> <name> [locator] [--auth] [--yes]
+
+Installs ONE resource with no manifest anywhere on disk, and records it in the
+profile's ledger, which is what "ap list" reads and "ap uninstall" is bounded
+by. It is the same resolution and the same materialization "ap manifest apply"
+runs; only the input is smaller.
+
+Kinds: skill, plugin, artifact. An mcp server and the model block have no
+source to install from — declare them in a manifest and apply it.
+
+A locator is required, and exactly one:
+  --git <url> [--ref <r>] [--subpath <p>]   a git repository
+  --local <path> [--subpath <p>]            a directory on this machine
+  --url <url> --digest sha256:<64 hex>      an archive, verified before it is
+                                            extracted
+
+Flags:
+  --dest <d>               where an artifact's content lands; required for one
+  --auth-secret-env <VAR>  environment variable holding the source credential
+  --auth-secret-file <p>   file holding the source credential
+  --strict                 promote every degradation warning to an error
+  --yes                    install into <agent>:default without asking
+
+The credential VALUE is never written down: only the variable name or the file
+path is recorded. The cost is stated rather than discovered — the variable has
+to be present on every run, where a tool that stores the token asks once.
+
+Examples:
+  ap install claude:plan skill pdf --git https://github.com/anthropics/skills.git --subpath pdf
+  ap install claude:plan skill review --git https://gitlab.acme.com/t/s.git --auth-secret-env GITLAB_TOKEN
+  ap install claude:plan artifact style --local ./style --dest memory
+`,
+
+	"uninstall": `ap uninstall - remove one capability from a profile
+
+Usage:
+  ap uninstall <agent>:<profile> <kind> <name> [--dry-run]
+
+Removes what the ledger owns, and nothing else. Two rules follow from what the
+ledger records:
+
+  - a file whose hash no longer matches was edited by you, so it is kept and
+    reported, never removed;
+  - a file this profile only merged INTO loses exactly the keys it contributed,
+    so every server, setting and key you added by hand survives.
+
+That is also why this is safe against <agent>:default, your agent's real
+configuration: the ledger can tell ap's writes from yours.
+
+--dry-run prints the same verdicts the real run acts on. There is one
+classifier, so the preview cannot disagree with what happens.
+
+Flags:
+  --dry-run   print what would be removed; touch nothing
+
+Examples:
+  ap uninstall claude:plan skill xlsx --dry-run
+  ap uninstall claude:plan mcp memory
+  ap uninstall claude:default skill company-review
 `,
 
 	"sessions": `ap sessions - list recent sessions across agents and profiles
@@ -178,44 +251,6 @@ Examples:
       --only-settings statusLine --only-settings theme
 `,
 
-	"sync": `ap sync - create profiles from manifests kept in Git
-
-Usage:
-  ap sync [--dry-run] [--yes] <file-or-directory>
-
-Reads YAML manifests describing profiles, the commands that populate them and
-the launch variants over them, then materialises all of it. A directory is
-scanned for *.yaml and *.yml, not recursively, in filename order.
-
-Everything is parsed and checked before anything is created, so a typo in one
-manifest leaves the run with nothing done.
-
-Flags:
-  --dry-run  print the whole plan and change nothing
-  --yes, -y  run the manifests' commands without asking
-
-A manifest's commands are shell commands, and syncing a repository runs them as
-you. That is the feature, not an oversight — but ap will not do it by surprise:
-off a terminal it refuses unless --yes is given, and a pipe is not an answer.
-
-"name: default" is not a profile. It names the agent you already had, so its
-install commands run against ~/.claude, ~/.codex and the rest, which ap cannot
-undo. There is one gate, not two: --yes covers it as well, and --dry-run prints
-the resolved directory so you can see what is at stake first.
-
-Sync is additive. Removing a line from a manifest does not undo it: a variant
-dropped from the YAML stays on disk, and nothing an install command did is
-reversed. "ap delete" is still how things are removed.
-
-A variant of the same name IS overwritten, and the report says "updated" rather
-than "created" when it was.
-
-Examples:
-  ap sync ./agent-profiles --dry-run
-  ap sync ./agent-profiles
-  ap sync ./agent-profiles/execute.yaml
-  ap sync ./agent-profiles --yes            # in a script
-`,
 	"variant": `ap variant - name a set of launch arguments over a profile
 
 Usage:
@@ -445,16 +480,17 @@ func dispatch(args []string) error {
 // one for one; no command's behavior changes.
 var commandTable = map[string]func([]string) error{
 	"list": cmdList, "ls": cmdList,
-	"sessions": cmdSessions,
-	"resume":   cmdResume,
-	"create":   cmdCreate,
-	"sync":     cmdSync,
-	"variant":  cmdVariant,
-	"which":    cmdWhich,
-	"env":      cmdEnv,
-	"run":      cmdRun,
-	"manifest": cmdManifest,
-	"delete":   cmdDelete, "rm": cmdDelete,
+	"sessions":  cmdSessions,
+	"resume":    cmdResume,
+	"create":    cmdCreate,
+	"install":   cmdInstall,
+	"uninstall": cmdUninstall,
+	"variant":   cmdVariant,
+	"which":     cmdWhich,
+	"env":       cmdEnv,
+	"run":       cmdRun,
+	"manifest":  cmdManifest,
+	"delete":    cmdDelete, "rm": cmdDelete,
 	"link":    cmdLink,
 	"unlink":  cmdUnlink,
 	"version": cmdVersion, "--version": cmdVersion, "-v": cmdVersion,
@@ -988,6 +1024,16 @@ func cmdList(args []string) error {
 	// `ap list claude --raw` work as well as `ap list --raw claude`. list has no
 	// passthrough, so there is nothing for either order to be ambiguous about.
 	if rest := fs.Args(); len(rest) > 0 {
+		// A qualified reference asks the same question one level deeper: not
+		// "which profiles exist" but "what does this one hold". It is the same
+		// command because it is the same tree, and `ap status` as a second
+		// name for a deeper row is a command surface growing for no reason.
+		//
+		// It reads the LEDGER, never a manifest: a manifest is an input and
+		// says nothing about what is installed (§1.1).
+		if strings.Contains(rest[0], ":") {
+			return listResources(rest[0], fs, *raw)
+		}
 		if _, ok := agentreg.Lookup(rest[0]); !ok {
 			return fmt.Errorf("unknown agent %q: supported are %s", rest[0], strings.Join(agentreg.Names(), ", "))
 		}

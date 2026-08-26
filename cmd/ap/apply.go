@@ -131,7 +131,15 @@ func resolvePhase(path, runtime string, strict bool) (
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	return fetchPhase(res, resolved, filepath.Dir(path))
+}
 
+// fetchPhase is the half of §37.1 that does not care where the profile came
+// from: acquire every active source, then validate contracts. `ap install`
+// builds its profile in memory and joins here.
+func fetchPhase(res *schema.Resolution, resolved *schema.Resolved, manifestDir string) (
+	*schema.Resolution, *schema.Resolved, map[string]source.Resolved, []source.Report, error,
+) {
 	// The cache root is a parameter, like every root in pkg/. It is the one
 	// thing an apply may create outside the target root: a cache is not a
 	// materialization root, and §37.1 says source acquisition during
@@ -146,7 +154,7 @@ func resolvePhase(path, runtime string, strict bool) (
 	}
 	fetched, reports, err := source.Resolve(context.Background(), res.Profile, source.Opts{
 		Cache:       cache,
-		ManifestDir: filepath.Dir(path),
+		ManifestDir: manifestDir,
 		Secret: func(name string) (string, error) {
 			v, ok := resolved.Value("secret", name)
 			if !ok {
@@ -329,4 +337,17 @@ func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resol
 	fmt.Fprintln(&b, "\n  --dry-run authenticated and fetched; nothing was written.")
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// askYes asks one question. Only ever reached after stdinIsTerminal, so a pipe
+// never gets here — see gate, and see the sandbox check that feeds a literal
+// "1" down one.
+//
+// readLine rather than bufio, for the reason readLine documents: buffering
+// reads past the newline, and everything it swallowed would be missing from the
+// stdin an install command or an agent inherits moments later.
+func askYes(q string) bool {
+	fmt.Fprintf(os.Stderr, "\n  %s [y/N] ", q)
+	s := strings.ToLower(strings.TrimSpace(readLine(os.Stdin)))
+	return s == "y" || s == "yes"
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/pkg/hydrate"
 	"github.com/ackstorm/agent-profile/pkg/schema"
 )
 
@@ -29,7 +31,7 @@ func cmdManifest(args []string) error {
 	case "apply":
 		return manifestApply(args[1:])
 	case "export":
-		return fmt.Errorf("`ap manifest export` is Phase 7 and does not exist yet")
+		return manifestExport(args[1:])
 	default:
 		return fmt.Errorf("unknown manifest subcommand %q\nusage: ap %s", args[0], use)
 	}
@@ -81,4 +83,41 @@ func manifestRender(args []string) error {
 		}
 	}
 	return nil
+}
+
+// manifestExport turns a root's ledger back into a manifest (§35.2), closing
+// the loop:
+//
+//	manifest → apply → ledger → export → manifest
+//
+// It is what makes "a manifest is an INPUT" workable: a profile assembled one
+// `ap install` at a time becomes portable without ever having been written
+// down. It prints to stdout and writes nothing, because nothing in this program
+// writes a manifest — the user decides where it lands.
+func manifestExport(args []string) error {
+	const use = "manifest export <agent>:<profile> [--name <name>]"
+	fs := flagSet("manifest")
+	nameFlag := fs.String("name", "", "the manifest's name; defaults to the profile's")
+	stop, ref, err := parseAroundRef(fs, args, use)
+	if stop {
+		return err
+	}
+	agent, name, variant, err := profile.ParseVariantRefAllowDefault(ref)
+	if err != nil {
+		return err
+	}
+	if variant != "" {
+		return fmt.Errorf("export takes a profile, not a variant: drop %q from %q", variant, ref)
+	}
+
+	manifestName := *nameFlag
+	if manifestName == "" {
+		manifestName = name
+	}
+	p, err := hydrate.Export(profile.Dir(agent, name), manifestName, []string{agent.Name})
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(schema.Render(p))
+	return err
 }

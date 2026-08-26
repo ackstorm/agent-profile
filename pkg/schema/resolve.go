@@ -34,6 +34,22 @@ func Resolve(path, runtime string, strict bool) (*Resolution, *Resolved, error) 
 		return nil, nil, errors.Join(errs...)
 	}
 
+	res, resolved, err := ResolveProfile(p, runtime)
+	if err != nil {
+		return nil, nil, err
+	}
+	res.Warnings = warns
+	return res, resolved, nil
+}
+
+// ResolveProfile is steps 9-11 over a profile that is already effective.
+//
+// It exists because `ap install` builds its one-resource profile in memory and
+// has no manifest to compose: there is no file, so steps 1-8 have nothing to
+// do. Sharing the rest is what keeps an imperative install running the same
+// required-inputs, resolve-inputs and preflight sequence — in the same order,
+// which §37 makes a contract — as an apply.
+func ResolveProfile(p Profile, runtime string) (*Resolution, *Resolved, error) {
 	refs := Required(p)
 
 	resolved, err := ResolveInputs(p, refs)
@@ -45,5 +61,5 @@ func Resolve(path, runtime string, strict bool) (*Resolution, *Resolved, error) 
 		return nil, nil, err
 	}
 
-	return &Resolution{Profile: p, Runtime: runtime, Refs: refs, Warnings: warns}, resolved, nil
+	return &Resolution{Profile: p, Runtime: runtime, Refs: refs}, resolved, nil
 }

@@ -237,9 +237,7 @@ model:
 
 Nothing here is a flaw in `resolveBinding` — it does exactly what §13 asks:
 read the file a binding names and hand back its bytes. The risk is
-compositional, the same way `ap sync` running a manifest's `install:` command
-is arbitrary code execution *by design* (`CLAUDE.md`, `docs/specs/ap-sync-v1.md`
-§11): a declarative manifest from an untrusted repository, read by a tool that
+compositional: a declarative manifest from an untrusted repository, read by a tool that
 follows paths and speaks HTTP on the user's behalf, is inherently a channel
 for whatever that manifest's author put in it. It cannot be engineered away by
 tightening `resolveBinding` — refusing `~/.ssh/*` refuses one path among an
@@ -411,3 +409,82 @@ try to decode a package declaration as a common `Resource` and fail.
 §30's worked example is the proof: it disables the common `ponytail` skill for
 opencode and declares opencode's own package instead, in one manifest. That only
 works because the two never merge.
+
+---
+
+## Phase 7: what the ledger was for, and the two rules that make it work
+
+Phases 1-6 wrote the ledger and nothing read it. Phase 7 spends it, and two of
+its decisions are not free consequences of what came before.
+
+### The hash gates a whole-file record. It CANNOT gate a merged one
+
+Phase 4's rule — a file whose hash no longer matches was edited by the user, so
+it is left alone — is correct for a whole-file record and **already always
+false** for a merged one:
+
+```
+applyMCPs merges "a" into config.toml  → records hash H1 for "a"
+applyMCPs merges "b" into config.toml  → records hash H2 for "b"
+                                          H1 is now stale, on disk
+```
+
+Two servers in one file is the ordinary case, not a corner. A hash gate on
+merged records would refuse every merged uninstall on any root holding more than
+one server — the ledger's headline feature, dead on arrival.
+
+So a merged record is bounded by its recorded KEYS instead, which is exactly the
+bound §33.3 states and exactly what `MergeInto` reports them for.
+`TestUninstallingOneMCPServerLeavesEveryOtherKeyIntact` installs "memory" first
+precisely so its recorded hash is stale by the time it is removed; adding a hash
+check to the `deep` branch turns it red.
+
+### Export cannot reconstruct a declaration it never recorded
+
+`ap manifest export` must produce a manifest that re-applies (§35.2), and three
+resources cannot be written back from the files alone:
+
+| Kind | Missing | Why reversing the materialized file is wrong |
+|---|---|---|
+| `mcp` | the transport | four native shapes, so four reverse mappings, each read from a file the user may have edited |
+| `model` | the model block | same, plus `auth` recovered from a reference |
+| `artifact` | `destination` | `ArtifactDest` is many-to-one; the rel path does not name the destination that produced it |
+
+`ResourceRec` therefore records the DECLARATION alongside the files —
+`Destination`, `MCP`, `Model`, `Secrets`. They are `schema` types, and a
+`schema.Profile` has no field capable of holding a *resolved* secret (resolution
+lands in `schema.Resolved`, a different type that never reaches the ledger), so
+§34's ban is structural rather than a rule someone has to remember.
+
+`Secrets` also solves §35.2's stability requirement. A `--auth-secret-env
+GITLAB_TOKEN` install supplies a binding with **no logical name**, and export
+must synthesise one *stably*. Deriving it at export time means deriving it from
+data spread across records, with colliding names resolved by a rewrite pass over
+already-emitted sources. So the name is derived at INSTALL time, against the
+ledger — the only state there is — and recorded: an identical binding reuses its
+name, a different one that derives the same name takes the first free suffix.
+
+### Two render bugs that only a round trip could find
+
+`render.go`'s tests compared emitted text to expected text, so a renderer and a
+parser that disagreed about the grammar both stayed green. Feeding one to the
+other found two:
+
+- a git or archive `auth` block emitted `secret:` where `decodeGitAuth` requires
+  a nested `value_from:`, so the manifest did not parse at all;
+- a header `prefix` of `"Bearer "` came back as `"Bearer"`, because `scalarNode`
+  right-trims a bare scalar. That one is silent, and materialized
+  `Bearer${TOKEN}` with no separator.
+
+`quoteIfNeeded`'s must-quote list is now read off `scalarNode` — trailing space,
+`" #"`, a leading quote, an indicator — rather than guessed at, and
+`TestRenderRoundTripsThroughTheParser` asserts a fixed point.
+
+### What `ap sync` took with it
+
+`install:` shell one-liners have no declarative equivalent, by design: nothing
+in this program runs a shell any more. That removes the ability to run a tool's
+own bootstrap, which was most of what the old example manifests did. The honest
+replacement is the user's own command under the profile's environment —
+`ap env <ref> -- <installer>` — and `examples/agent-profiles/README.md` states
+the trade rather than pretending the format grew a way to express it.

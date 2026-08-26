@@ -242,7 +242,6 @@ fuzz: ## Fuzz the path-validation and manifest-parsing surfaces, 30s each (the t
 _fuzz:
 	go test -run '^$$' -fuzz FuzzValidName -fuzztime $(FUZZTIME) ./internal/profile/
 	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime $(FUZZTIME) ./internal/profile/
-	go test -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME) ./internal/manifest/
 	go test -run '^$$' -fuzz FuzzParseYAML -fuzztime $(FUZZTIME) ./pkg/schema/
 	go test -run '^$$' -fuzz FuzzResolveExtends -fuzztime $(FUZZTIME) ./pkg/schema/
 	go test -run '^$$' -fuzz FuzzValidRelPath -fuzztime $(FUZZTIME) ./pkg/schema/

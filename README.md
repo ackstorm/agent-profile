@@ -62,7 +62,12 @@ exactly that reason — see "`default`" below.
 | `ap resume [<id>] [args...]` | resume a session by full ID or prefix, changing to its directory first; when no ID is given on a terminal, prompts with a numbered list |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant [--yes] <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it. May leave `{}` where your run-time arguments should be substituted, which is how a variant becomes a prompt prefix. Over a variant that exists it asks first, showing both argument lists; `--yes` answers |
-| `ap sync [--dry-run] [--yes] <file-or-directory>` | create profiles, their variants and whatever their install commands put in them, from YAML manifests kept in Git. `--dry-run` prints the whole plan and changes nothing. A manifest's commands are shell commands and run as you, so ap shows them and asks; off a terminal it refuses unless `--yes`. `name: default` targets the agent you already had — its commands reach `~/.claude` and the rest, and `--dry-run` prints that directory in full |
+| `ap list [--raw] <agent>:<profile>` | what that profile has INSTALLED, read from its ledger — kind, name and what each resource wrote. Not what a manifest says: a manifest is an input, and applying one is what put these here |
+| `ap install <agent>:<profile> <kind> <name> [locator]` | install one skill, plugin or artifact with no manifest at all, from `--git`, `--local` or `--url` (with `--digest`). A private source takes `--auth-secret-env VAR` or `--auth-secret-file <path>`; only the binding is recorded, never the value |
+| `ap uninstall [--dry-run] <agent>:<profile> <kind> <name>` | remove one capability, bounded by the ledger. A file you edited is kept and reported; a file this profile only merged into loses exactly the keys it contributed. Safe against `default` for that reason. `--dry-run` prints the same verdicts the real run acts on |
+| `ap manifest render [--target <runtime>] <manifest>` | what a manifest MEANS. With no target it composes every target it declares and prints nothing; the exit status is the contract check |
+| `ap manifest apply [--dry-run] [--strict] [--yes] <agent>:<profile> <manifest>` | materialise a whole manifest into that profile. Additive: a manifest that stops mentioning something does not remove it. `--manifest -` reads it from stdin |
+| `ap manifest export <agent>:<profile>` | the profile's ledger, back as a manifest, so an environment assembled by hand becomes portable |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
 | `ap env <agent>:<profile>[:<variant>]` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile>[:<variant>] <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory. `cmd` never receives a variant's arguments: those are the agent's flags |
@@ -385,66 +390,89 @@ agent is already stated to the left of the name.
 
 ## Reproducing a team's profiles
 
-Keep the profiles in Git and materialise them with one command:
+Keep the declaration in Git and materialise it with one command:
 
 ```bash
 git clone git@github.com:company/agent-profiles.git
-ap sync ./agent-profiles --dry-run    # see the whole plan first
-ap sync ./agent-profiles
+ap manifest render ./agent-profiles/execute.yaml                  # does it compose?
+ap manifest apply claude:execute ./agent-profiles/execute.yaml --dry-run
+ap manifest apply claude:execute ./agent-profiles/execute.yaml
 ```
 
-A manifest is one file per logical profile:
+A manifest declares capabilities; ap materialises them natively per runtime:
 
 ```yaml
-version: 1
+version: "1"
 name: execute
+targets: [claude, codex, opencode, pi]
 
-bootstrap:                                  # once, on this machine
-  - npm install -g @ackstorm/ach-cli
+marketplaces:
+  superpowers:
+    type: skills
+    source:
+      git: { url: https://github.com/obra/superpowers.git, ref: main, subpath: skills }
 
-platforms:
-  claude:
-    install:                                # inside claude:execute
-      - ach-cli skill install pdf@anthropics --global
-    variants:
-      opus:
-        args: --model=claude-opus-5 --effort=xhigh
-      execute-plan:
-        args: --effort=xhigh "/superpowers:executing-plans {}"
-  codex:
-    install:
-      - npx get-shit-done-cc@latest --codex --global
+skills:
+  executing-plans:
+    ref: executing-plans@superpowers
+
+mcps:
+  memory:
+    transport:
+      type: http
+      url: https://memory.company.com/mcp
+      headers:
+        Authorization:
+          prefix: "Bearer "
+          value_from: { secret: memory-token }
+
+inputs:
+  secrets:
+    memory-token: { env: MEMORY_TOKEN }
 ```
 
-which produces `claude:execute`, `claude:execute:opus`,
-`claude:execute:execute-plan` and `codex:execute`.
+One declaration, four runtimes: the same MCP server lands in claude's
+`.claude.json`, codex's `config.toml`, opencode's `opencode.json` and pi's
+`mcp.json`, in each one's native shape, with the credential as a **reference**
+its runtime expands — never as a value on disk.
 
-`bootstrap` puts tools on the machine; `install` puts content in one profile,
-and runs with that profile's config variable set, so a tool that honours it
-lands inside. `ap` does not interpret either list — between them they can
-install skills, plugins, hooks or MCP servers without the format growing a
-concept per artifact.
+`examples/agent-profiles/` is a working set: a shared base and three stages.
 
-Syncing a repository runs its commands as you. `ap sync` shows them and asks
-first; off a terminal it refuses unless you pass `--yes`. A manifest whose name
-is `default` targets the agent you already had rather than a profile: its
-commands run against `~/.claude`, `~/.codex` or the rest, which `ap delete`
-cannot undo. `--dry-run` prints that directory in full, and the prompt names it
-for what it is.
+### A manifest is an input, not the state
 
-Sync is additive: removing a line does not undo it, and `ap delete` is still how
-things are removed. A variant of the same name is overwritten, and the report
-says `updated` when it was.
+Nothing writes back to a manifest and you may throw it away. What the profile
+holds is recorded in its own ledger:
+
+```bash
+ap list claude:execute                        # what is installed
+ap uninstall claude:execute skill xlsx --dry-run
+ap manifest export claude:execute > mine.yaml # the ledger, back as a manifest
+```
+
+That ledger is why removal is safe even against the agent you already had: it
+records every file's hash and every key merged into a shared config, so a file
+you edited is kept and reported, and uninstalling one MCP server takes that one
+key and leaves the rest of the file — yours included — alone.
+
+You can skip the manifest entirely:
+
+```bash
+ap install claude:execute skill pdf \
+  --git https://github.com/anthropics/skills.git --subpath pdf
+```
+
+Apply is **additive**: removing a line does not undo it, and `ap uninstall` is
+how things are removed. A variant of the same name is overwritten.
 
 Two limits worth knowing before you write a manifest:
 
-- `ap` sets one environment variable and cannot make a third-party tool read it.
-  A tool that resolves `~/.claude` directly writes into your real configuration
-  and reports success. Check a new tool once with
-  `ap env claude:probe <command>` and see where the files land.
-- Nothing is pinned. `npx …@latest` is whatever it was that day, so two people
-  syncing a week apart can get different environments. Pin in the command if
-  you need to.
+- **Nothing runs a shell.** A capability is declared, not installed by its own
+  bootstrap. If a tool must run one, run it yourself under the profile:
+  `ap env claude:execute -- <installer>`, and check where the files land — ap
+  sets one environment variable and cannot make a third-party tool read it.
+- **Nothing is pinned.** `ref: main` is whatever it was that day, so two people
+  applying a week apart can get different content. Pin a tag or a commit if you
+  need to; there is no lockfile.
 
 ## How it works
 

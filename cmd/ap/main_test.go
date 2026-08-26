@@ -2448,7 +2448,23 @@ func TestFmtTimeIgnoresTheIncomingZone(t *testing.T) {
 // whole manual. A single shared usage string did the latter and made the help
 // unusable.
 func TestEachCommandHasItsOwnHelp(t *testing.T) {
-	for _, name := range []string{"list", "sessions", "resume", "create", "variant", "run", "env", "which", "delete", "link", "unlink"} {
+	// Derived from commandTable, not hand-listed: a hand-listed set does not
+	// notice a new command, which is the only way this can actually fail.
+	// Aliases share their canonical command's help, and the help verbs print
+	// the global usage on purpose.
+	skip := map[string]bool{
+		"help": true, "-h": true, "--help": true,
+		"version": true, "--version": true, "-v": true,
+		"ls": true, "rm": true,
+	}
+	var names []string
+	for name := range commandTable {
+		if !skip[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		h := helpFor(name)
 		if h == usage {
 			t.Errorf("ap %s --help prints the global usage instead of its own", name)
