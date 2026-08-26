@@ -128,7 +128,12 @@ func ParseYAML(b []byte) (*Node, error) {
 	if ls[0].indent != 0 {
 		return nil, fmt.Errorf("line %d: the document starts indented", ls[0].n)
 	}
-	root, i, err := parseBlock(ls, 0, 0)
+	// raw is the unfiltered source, one element per line, kept only for
+	// reading literal block scalar bodies: inside one, a blank line and a
+	// line starting with '#' are content, not the whole-line blank and
+	// comment lines scan() strips everywhere else.
+	raw := strings.Split(string(b), "\n")
+	root, i, err := parseBlock(ls, raw, 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -169,11 +174,11 @@ func scan(s string) ([]srcLine, error) {
 // parseBlock parses the run of lines at exactly indent. Which of the two block
 // forms it is, is decided by the first line and never revisited: a sequence
 // entry appearing among mapping keys is an error, not a switch.
-func parseBlock(ls []srcLine, i, indent int) (*Node, int, error) {
+func parseBlock(ls []srcLine, raw []string, i, indent int) (*Node, int, error) {
 	if isSeqEntry(ls[i].text) {
 		return parseSeq(ls, i, indent)
 	}
-	return parseMap(ls, i, indent)
+	return parseMap(ls, raw, i, indent)
 }
 
 func isSeqEntry(t string) bool { return t == "-" || strings.HasPrefix(t, "- ") }
@@ -205,7 +210,7 @@ func parseSeq(ls []srcLine, i, indent int) (*Node, int, error) {
 	return n, i, nil
 }
 
-func parseMap(ls []srcLine, i, indent int) (*Node, int, error) {
+func parseMap(ls []srcLine, raw []string, i, indent int) (*Node, int, error) {
 	n := &Node{Kind: Mapping, Line: ls[i].n, KeyLine: map[string]int{}, Map: map[string]*Node{}}
 	for i < len(ls) && ls[i].indent == indent {
 		cur := ls[i]
@@ -230,6 +235,29 @@ func parseMap(ls []srcLine, i, indent int) (*Node, int, error) {
 
 		var child *Node
 		switch {
+		case hasInline && strings.HasPrefix(value, "|"):
+			// A literal block keeps every newline the author typed, which is
+			// the whole reason prompt content uses one. `|-` strips the final
+			// newline. Anything else after the pipe is an indentation or
+			// chomping indicator (`|2`, `|-2`): neither is needed, and both
+			// change what the block reads as in ways a reader of the file
+			// would not predict, so they are named and refused rather than
+			// silently misread. A folded block (`>`) is refused below, by the
+			// indicator table in scalarNode.
+			if value != "|" && value != "|-" {
+				return nil, 0, fmt.Errorf("line %d: block scalar indicator %q: only bare | and |- are supported, not an explicit indentation or chomping indicator", cur.n, value)
+			}
+			body, resumeLine := blockScalarBody(raw, cur.n, indent)
+			if value == "|-" {
+				body = strings.TrimRight(body, "\n")
+			}
+			child = &Node{Kind: Scalar, Line: cur.n, Str: body, Quoted: true}
+			// The body's lines were also scanned into ls as ordinary content
+			// (scan() has no notion of "inside a block scalar"), so they must
+			// be skipped rather than reprocessed as siblings.
+			for i < len(ls) && ls[i].n < resumeLine {
+				i++
+			}
 		case hasInline:
 			// The value is read BEFORE the indentation is judged, so `a: |`
 			// reports the block scalar it is rather than the misindentation it
@@ -249,7 +277,7 @@ func parseMap(ls []srcLine, i, indent int) (*Node, int, error) {
 			}
 		case indented:
 			var err error
-			child, i, err = parseBlock(ls, i, ls[i].indent)
+			child, i, err = parseBlock(ls, raw, i, ls[i].indent)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -269,6 +297,46 @@ func parseMap(ls []srcLine, i, indent int) (*Node, int, error) {
 		return nil, 0, fmt.Errorf("line %d: unexpected indentation: a sibling must match its siblings exactly", ls[i].n)
 	}
 	return n, i, nil
+}
+
+// blockScalarBody reads the literal body of a `|` or `|-` block scalar whose
+// indicator sat on line keyLine, indented deeper than keyIndent. It reads the
+// raw source directly rather than []srcLine, since inside a literal block a
+// blank line and a line starting with '#' are content, not the whole-line
+// blank and comment lines scan() strips everywhere else. The indentation of
+// the first body line is stripped from every line; a shallower line ends the
+// block, matching a chomped body rather than panicking on a short slice. A
+// blank line is kept as an empty line. resumeLine is the 1-based number of
+// the first line after the block, for the caller to skip past in []srcLine.
+func blockScalarBody(raw []string, keyLine, keyIndent int) (body string, resumeLine int) {
+	var out []string
+	blockIndent := -1
+	i := keyLine // raw is 0-indexed, so raw[keyLine] is the line right after keyLine
+	for ; i < len(raw); i++ {
+		text := strings.TrimRight(raw[i], " \t\r")
+		if text == "" {
+			out = append(out, "")
+			continue
+		}
+		ind := 0
+		for ind < len(text) && text[ind] == ' ' {
+			ind++
+		}
+		if ind <= keyIndent || (blockIndent >= 0 && ind < blockIndent) {
+			break
+		}
+		if blockIndent < 0 {
+			blockIndent = ind
+		}
+		out = append(out, text[blockIndent:])
+	}
+	for len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	if len(out) == 0 {
+		return "", i + 1
+	}
+	return strings.Join(out, "\n") + "\n", i + 1
 }
 
 // cutKey splits "key: value" or "key:" at the first colon that is followed by a
@@ -309,7 +377,6 @@ func checkKey(n int, k string) error {
 var indicators = map[byte]string{
 	'[':  "flow sequence ([a, b]): use a block sequence, one \"- item\" per line",
 	'{':  "flow mapping ({a: b}): use a block mapping, one \"key: value\" per line",
-	'|':  "block scalar (|): write the value on one line, quoted if it needs to be",
 	'>':  "block scalar (>): write the value on one line, quoted if it needs to be",
 	'&':  "anchor (&): anchors, aliases and merge keys are not supported",
 	'*':  "alias (*): anchors, aliases and merge keys are not supported",

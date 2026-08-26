@@ -87,3 +87,20 @@ func TestNumberAcceptsOnlyJSONGrammar(t *testing.T) {
 		})
 	}
 }
+
+func TestParseReadsLiteralBlockScalarsAndRejectsFoldedOnes(t *testing.T) {
+	root, err := ParseYAML([]byte("prompt:\n  content: |\n    line one\n    line two\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := root.Map["prompt"].Map["content"].Str
+	if got != "line one\nline two\n" {
+		t.Errorf("content = %q, want %q", got, "line one\nline two\n")
+	}
+	// A folded block reflows text. Nothing in the spec needs it, and silently
+	// joining a user's prompt lines is exactly the misreading this subset exists
+	// to refuse.
+	if _, err := ParseYAML([]byte("a: >\n  one\n  two\n")); err == nil {
+		t.Error("folded block scalar (>) accepted; the subset must name and refuse it")
+	}
+}
