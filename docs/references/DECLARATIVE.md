@@ -95,7 +95,7 @@ package:
 | 1 | `Node`/parsing (`yaml.go`), `Merge` (`compose.go`), `extends` folding (`extends.go`), `Decode`/`Profile` (`profile.go`), `Effective` (`effective.go`), `Render` (`render.go`), `ap manifest render` |
 | 2 | Input *resolution* (reading a bound secret/variable's value), `--strict` promoting `Warning` to error |
 | 3 | `pkg/source`: the cache, the credential guards, git/archive/local fetching, `Resolve` over an effective profile, `ap manifest apply --dry-run` |
-| 4 | Materialization into a root, the ledger, `SKILL.md` contract checks (§23), apply lifecycle (§33, §37) |
+| 4 | `pkg/hydrate`: the root lock, the ledger, per-runtime destinations, `SKILL.md` contracts, `ap manifest apply` for real |
 | 5 | MCP and model materialization, secret references, the TOML dependency (§9, §25, §34) |
 | 6 | Marketplace item resolution (§21–§22), the `ref` grammar, top-level `plugins:` as a common resource type, runtime-native plugin schemas (`Runtime.Plugins` stays an unvalidated `*Node` tree until then, open question §40.1) |
 
@@ -240,3 +240,70 @@ belongs at whichever later phase adds the network call this primitive needs to
 become live — restricting *outbound destinations*, not *readable paths* — and
 is out of scope for Phase 1/2, which is why this section states the model
 rather than attempting one.
+
+## Phase 4: what the ledger is for, and why apply is boring on purpose
+
+**Apply is additive, and that is the whole design.** A manifest that stops
+declaring a resource does not remove it, and a file the user added by hand
+survives an apply that overwrites its siblings. The test that says what apply IS
+is the hand-added file: put `notes.md` in the destination, apply, and it is still
+there. Wiping the destination first would make this a sync, and a sync is a
+different product.
+
+Every overwrite is logged. §33 requires it, and the reason is that an additive
+policy has no undo: the user's only evidence that apply did not quietly eat
+something is that list.
+
+**The ledger is written LAST, and that is a correctness property, not an
+ordering preference (§37.2).** A ledger claiming files that were never written is
+worse than no ledger, because every later verdict — remove, skip, report as
+modified — would rest on a record that was never true. A crash between
+materialization and the ledger write leaves files unclaimed, and re-running the
+apply repairs it: the same files are overwritten and the ledger is written. The
+mutation that proves it is writing the ledger first and watching a failed apply
+leave one behind.
+
+**The recorded hash is of what was WRITTEN, not of the source.** It is computed
+through an `io.MultiWriter` on the bytes going to disk. Hashing the source is one
+indirection away from the truth, and §33.1's every later verdict rests on this
+hash matching what is actually there.
+
+**The ledger's second arm is not optional (F3).** A marketplace materializes no
+file. A manifest is an INPUT and is not kept. So a file-only ledger loses the
+marketplace the moment the manifest is gone, and a later
+`ap install claude:plan skill xlsx@anthropic-skills` would have nothing to
+resolve the name against. The arm records the binding's NAME and has no field
+capable of holding a value — the test asserts that through the marshalled bytes,
+because a field added later would slip past a field check.
+
+**One lock, and it is an advisory lock, not a sentinel file.** A process killed
+mid-apply releases an advisory lock when its handles close; a sentinel file would
+strand every later run behind a lock nobody holds.
+`TestALeftoverLockFileDoesNotBlockALaterRun` asserts the lock file SURVIVES
+release, because removing it would look tidy and would be the sentinel design in
+disguise. It is `syscall.Flock` and kernel32's `LockFileEx` rather than
+`golang.org/x/sys`, because `pkg/` is imported by another module and a dependency
+added here is added to `ach` too.
+
+**codex has no skills destination inside its config directory, and that is a
+measured fact, not an omission.** It reads skills from `~/.agents/skills`,
+OUTSIDE `CODEX_HOME`, so pointing that variable at a profile does not isolate
+them — writing there anyway would leak one profile's skills into every other
+profile and into the user's bare codex. `agentreg.Agent.Skills` is empty for it,
+and hydrating a skill for codex is a §8 degradation: warn and skip, naming the
+runtime, because "why is my skill missing" has exactly one useful answer.
+`TestCodexHasNoConfigDirSkillDestination` pins it as a named case, since the
+tempting fix is to make the table uniform.
+
+**Contracts are checked in the resolution phase, and the test for that goes
+through `--dry-run`.** §37.1 step 14 puts contract validation before any
+mutation, because apply overwrites and a violation found halfway through leaves a
+root partly written. From outside, the only way to tell the two halves apart is
+that `--dry-run` fails on a broken `SKILL.md` — so that is the assertion, and
+moving the check after the dry run returns turns it red.
+
+**Prompt materialization is NOT in Phase 4**, though the roadmap put it there. It
+is not a file for every runtime — claude takes `--append-system-prompt` at
+launch, which is a launch-argument concern — so it moves to Phase 5, where the
+per-runtime materialization table (§34) already lives. Guessing a file path for
+it would be the same mistake as guessing codex's skills directory.

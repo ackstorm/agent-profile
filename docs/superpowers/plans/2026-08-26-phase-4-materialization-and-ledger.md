@@ -1,6 +1,6 @@
 # Phase 4 — Materialization and the Ledger
 
-> **For agentic workers:** execute task by task. Steps use `- [ ]` for tracking.
+> **For agentic workers:** execute task by task. Steps use `- [x]` for tracking.
 
 **Goal:** Write a resolved profile into a root, record exactly what was written,
 and make `ap manifest apply` real — additive, logged, and with the ledger as the
@@ -12,6 +12,10 @@ writes. An `Adapter` per runtime owns where each kind of thing lands; the ledger
 records what landed. `pkg/schema` and `pkg/source` are consumed, never modified.
 
 **Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.2.md`
+
+**Status: COMPLETE.** Seven tasks landed. Gates: `verify`, `crossbuild`,
+`secrets`, `sandbox` (unchanged), `smoke` — all green. Thirteen mutation tests
+across the phase. What the plan got wrong is written up at the end.
 
 **Tech Stack:** Go 1.25, standard library only. `pkg/hydrate` carries **no build
 tag** except the two lock halves, and must compile for windows.
@@ -61,11 +65,11 @@ is the one thing here that cannot be retrofitted.
 
 **Interfaces:** `LockRoot(root string) (release func() error, err error)`.
 
-- [ ] **Step 1** Write `lock_test.go`: a second `LockRoot` on the same root while
+- [x] **Step 1** Write `lock_test.go`: a second `LockRoot` on the same root while
   the first is held fails or blocks (assert with a timeout, never an unbounded
   wait); after release it succeeds; two DIFFERENT roots lock independently.
-- [ ] **Step 2** Run it, watch it fail.
-- [ ] **Step 3** Implement. Port `ach/internal/cli/lock`, **both halves**. The
+- [x] **Step 2** Run it, watch it fail.
+- [x] **Step 3** Implement. Port `ach/internal/cli/lock`, **both halves**. The
   lock file lives inside the root at `.ap-lock`, created `0600`.
 
   **There is exactly one lock.** SPEC §37.3: the cache is unlocked because
@@ -73,8 +77,8 @@ is the one thing here that cannot be retrofitted.
   fetch and cannot corrupt. Do not port `ach`'s workspace lock. A second lock
   would buy that fetch back for the price of a lock-ordering rule and the
   deadlock the rule exists to exclude.
-- [ ] **Step 4** Run it, watch it pass. `make crossbuild`.
-- [ ] **Step 5** Commit: `feat(hydrate): one root lock, held across the write`
+- [x] **Step 4** Run it, watch it pass. `make crossbuild`.
+- [x] **Step 5** Commit: `feat(hydrate): one root lock, held across the write`
 
 ---
 
@@ -112,7 +116,7 @@ func LoadLedger(root string) (*Ledger, error)
 func (l *Ledger) Save(root string) error
 ```
 
-- [ ] **Step 1** Write `ledger_test.go`:
+- [x] **Step 1** Write `ledger_test.go`:
   - an absent ledger loads as empty, not as an error — a root nothing has been
     applied to is the normal first case;
   - round-trip preserves both arms;
@@ -121,8 +125,8 @@ func (l *Ledger) Save(root string) error
   - **no secret value can be stored**: `DefinitionRec` has no field for one, and
     a test asserts the marshalled JSON of a ledger built from §35's fixture
     contains no value from the environment.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement. `<root>/.ap-ledger.json`, mode `0600`, written with
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement. `<root>/.ap-ledger.json`, mode `0600`, written with
   the same temp-plus-rename shape `source.Cache.Publish` uses and for the same
   reason: a half-written ledger claims files that may not exist.
 
@@ -136,10 +140,10 @@ func (l *Ledger) Save(root string) error
   tokens in a `credentials.json` at `0600`; this deliberately does not, and the
   UX cost — the variable must be present on every run — is stated, not
   discovered.
-- [ ] **Step 4** Run, watch pass.
-- [ ] **Step 5** **Mutation-test the atomic write**: replace it with a plain
+- [x] **Step 4** Run, watch pass.
+- [x] **Step 5** **Mutation-test the atomic write**: replace it with a plain
   `os.WriteFile`, confirm the concurrency test goes red, restore.
-- [ ] **Step 6** Commit: `feat(hydrate): the ledger, two arms, per root`
+- [x] **Step 6** Commit: `feat(hydrate): the ledger, two arms, per root`
 
 ---
 
@@ -149,20 +153,20 @@ func (l *Ledger) Save(root string) error
 
 **Interfaces:** `CheckContracts(p schema.Profile, fetched map[string]source.Resolved) error`
 
-- [ ] **Step 1** Write the test: a resolved skill root with no `SKILL.md` fails,
+- [x] **Step 1** Write the test: a resolved skill root with no `SKILL.md` fails,
   naming the skill AND the resolved path; one with it passes; an **artifact** is
   not subject to the check, because §26 is deliberately the opaque type.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement. §23: the resolved skill root MUST contain `SKILL.md`.
-- [ ] **Step 4** Wire it into `manifestApply` **after** `source.Resolve` and
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement. §23: the resolved skill root MUST contain `SKILL.md`.
+- [x] **Step 4** Wire it into `manifestApply` **after** `source.Resolve` and
   **before** materialization, so `--dry-run` reports it too. §37.1 step 14 puts
   contract validation in the resolution phase for exactly this reason: a
   contract violation found halfway through an overwriting apply leaves a root
   partly written.
-- [ ] **Step 5** Test that `--dry-run` fails on a contract violation. That is the
+- [x] **Step 5** Test that `--dry-run` fails on a contract violation. That is the
   assertion that proves the check is in the resolution phase and not in the
   materialization one.
-- [ ] **Step 6** Commit: `feat(hydrate): the SKILL.md contract, in the resolution phase`
+- [x] **Step 6** Commit: `feat(hydrate): the SKILL.md contract, in the resolution phase`
 
 ---
 
@@ -183,12 +187,12 @@ type Adapter interface {
 func AdapterFor(a agentreg.Agent) (Adapter, error)
 ```
 
-- [ ] **Step 1** Write `adapter_test.go`: a table of the four runtimes' skill
+- [x] **Step 1** Write `adapter_test.go`: a table of the four runtimes' skill
   destinations, asserted against `pkg/agentreg`, not against a hand-written
   duplicate. A runtime with no destination for a kind returns `false`, and the
   caller's job is to WARN, never to skip silently (§8).
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement. The destinations come from `agentreg`, which is
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement. The destinations come from `agentreg`, which is
   already the single copy of "what does this agent read". Do not add a second
   table.
 
@@ -196,8 +200,8 @@ func AdapterFor(a agentreg.Agent) (Adapter, error)
   a named profile's namespace. They are ONE mechanism — point the agent's
   config-directory variable at a directory — which is why there are two and not
   three. Do not infer a root from the environment; `pkg/` cannot see one anyway.
-- [ ] **Step 4** Run, watch pass.
-- [ ] **Step 5** Commit: `feat(hydrate): per-runtime destinations from the registry`
+- [x] **Step 4** Run, watch pass.
+- [x] **Step 5** Commit: `feat(hydrate): per-runtime destinations from the registry`
 
 ---
 
@@ -218,7 +222,7 @@ type Result struct{ Changes []Change; Warnings []string }
 func Apply(ctx context.Context, p Plan) (Result, error)
 ```
 
-- [ ] **Step 1** Write `apply_test.go`, and these five assertions are the phase:
+- [x] **Step 1** Write `apply_test.go`, and these five assertions are the phase:
   - a skill's files land under the adapter's destination, with content intact;
   - a **hand-added file survives** an apply that overwrites its siblings — apply
     is additive (§33), and this is the assertion that proves it;
@@ -231,16 +235,16 @@ func Apply(ctx context.Context, p Plan) (Result, error)
     leaves the ledger untouched, because a ledger claiming files that were never
     written is worse than no ledger: Phase 7's verdicts would remove or skip on
     the strength of a record that was never true.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement. Acquire the root lock, materialize, write the ledger,
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement. Acquire the root lock, materialize, write the ledger,
   release. A disabled resource is not materialized (§4) — and if its ledger
   record still holds files, apply MUST warn, ledger-driven (v0.6.1's change to
   §4), because merged keys are invisible to the filesystem.
-- [ ] **Step 4** Run, watch pass.
-- [ ] **Step 5** **Mutation-test the ledger's position**: write it before
+- [x] **Step 4** Run, watch pass.
+- [x] **Step 5** **Mutation-test the ledger's position**: write it before
   materialization, confirm the crash test goes red, restore. Then mutation-test
   the overwrite log: drop the `overwrite` op, confirm red, restore.
-- [ ] **Step 6** Commit: `feat(hydrate): apply into a root, ledger written last`
+- [x] **Step 6** Commit: `feat(hydrate): apply into a root, ledger written last`
 
 ---
 
@@ -248,34 +252,34 @@ func Apply(ctx context.Context, p Plan) (Result, error)
 
 **Files:** Modify `cmd/ap/apply.go`, `cmd/ap/main.go`, `cmd/ap/main_test.go`
 
-- [ ] **Step 1** Write the test: applying into a named profile writes the skill
+- [x] **Step 1** Write the test: applying into a named profile writes the skill
   and the ledger; applying twice is idempotent and the second run reports
   `overwrite`; `--dry-run` still writes nothing.
-- [ ] **Step 2** Run, watch fail.
-- [ ] **Step 3** Implement. Resolve the reference to a root **without inferring
+- [x] **Step 2** Run, watch fail.
+- [x] **Step 3** Implement. Resolve the reference to a root **without inferring
   one**. `claude:default` is the user's real configuration and cannot be undone
   by deleting a profile: display its **resolved absolute path**, name it as the
   real configuration, and gate it behind `--yes`. Off a terminal it MUST refuse —
   a pipe is not consent, checked with `stdinIsTerminal` and never with
   `answered()`, which is the rule `ap sync` already follows.
-- [ ] **Step 4** Run, watch pass.
-- [ ] **Step 5** Sandbox check: apply into a throwaway home with stub agents, and
+- [x] **Step 4** Run, watch pass.
+- [x] **Step 5** Sandbox check: apply into a throwaway home with stub agents, and
   assert nothing outside the root is touched.
-- [ ] **Step 6** Commit: `feat(ap): ap manifest apply materializes into a root`
+- [x] **Step 6** Commit: `feat(ap): ap manifest apply materializes into a root`
 
 ---
 
 ### Task 7: Gates and docs
 
-- [ ] **Step 1** `make verify`, `crossbuild`, `secrets`, `fuzz`, `sandbox`,
+- [x] **Step 1** `make verify`, `crossbuild`, `secrets`, `fuzz`, `sandbox`,
   `smoke`. A red gate is reported with its output, never worked around.
-- [ ] **Step 2** Document in `docs/references/DECLARATIVE.md`: why the ledger is
+- [x] **Step 2** Document in `docs/references/DECLARATIVE.md`: why the ledger is
   written last, why there is one lock and not two, why a hand-added file survives
   and a declared one does not, and what the second ledger arm exists for.
-- [ ] **Step 3** Update `CLAUDE.md`'s MANDATORY reading table with
+- [x] **Step 3** Update `CLAUDE.md`'s MANDATORY reading table with
   `pkg/hydrate/*`.
-- [ ] **Step 4** Mark this plan complete and write up what it did not predict.
-- [ ] **Step 5** Commit.
+- [x] **Step 4** Mark this plan complete and write up what it did not predict.
+- [x] **Step 5** Commit.
 
 ## Self-Review
 
@@ -291,3 +295,71 @@ ledger written without them would need a migration.
 **Deferred with owners:** `--prune` and the project root — past v1 (§38); MCP,
 model and secret references — Phase 5; plugins and marketplace items — Phase 6;
 `list`, `uninstall`, `export` — Phase 7.
+
+---
+
+## What Phase 4 turned up that the plan did not predict
+
+### codex has no skills destination inside its config directory
+
+The plan assumed four runtimes with four skill destinations. codex reads skills
+from `~/.agents/skills`, **outside `CODEX_HOME`**, so pointing that variable at
+a profile does not isolate them — and writing there anyway would leak one
+profile's skills into every other profile and into the user's bare codex, which
+is the opposite of what this tool exists for.
+
+`agentreg.Agent.Skills` is empty for codex, and hydrating a skill for it is a §8
+degradation: warn and skip, naming the runtime.
+`TestCodexHasNoConfigDirSkillDestination` pins it as a named case rather than
+leaving it to the table, because the tempting fix is to make the table uniform
+and the reason not to is invisible from the code.
+
+Measured by `ach` (`internal/cli/adapter/codex/codex.go` calls it "the stub
+bug"); `smoke` is what re-verifies it against the real binary.
+
+### Prompt materialization does not belong in Phase 4
+
+The roadmap put `prompt` append/replace here. It is not a FILE for every
+runtime: claude takes `--append-system-prompt` at launch, which is a
+launch-argument concern, not a destination. Guessing a path would be the same
+mistake as guessing codex's skills directory. Moved to Phase 5, where §34's
+per-runtime materialization table already lives.
+
+### `ach`'s lock brings a dependency, and it did not have to
+
+`ach/internal/cli/lock` uses `golang.org/x/sys/unix` and
+`golang.org/x/sys/windows`. `pkg/` is imported by another module, so a
+dependency added here is added to `ach` too. `syscall.Flock` is the same call
+without it, and the windows half reaches `LockFileEx` through `syscall`'s lazy
+DLL loader. Roughly sixty lines, no dependency, same semantics.
+
+The property worth protecting is that it is an **advisory** lock and not a
+sentinel file. A process killed mid-apply releases an advisory lock when its
+handles close; a sentinel would strand every later run behind a lock nobody
+holds. The test asserts the lock file SURVIVES release, because removing it
+would look tidy and would be the sentinel design in disguise.
+
+### The `<agent>:default` gate belongs BEFORE the resolution phase
+
+It was first written after `schema.Resolve`, which meant a user was asked
+whether ap could touch their real configuration only after a full fetch. The
+question does not depend on the manifest resolving. Moved to just after the
+reference is parsed.
+
+Its test needed `os.Stdin` swapped for a closed pipe: `go test`'s own stdin is a
+character device, so without that the gate finds a "terminal", asks, reads
+nothing, and cancels — which passes for the wrong reason and would go on passing
+with the terminal check removed.
+
+### Two tests asserted "materialization is Phase 4"
+
+`TestDispatchManifestApplyWithoutDryRunRefuses` (Phase 2) and
+`TestManifestApplyWithoutDryRunRefusesUntilPhase4` (Phase 3). Both deleted. A
+placeholder test outlives its placeholder unless the phase that fills it in goes
+looking, and `make quick` is what went looking.
+
+### gocyclo found a real boundary
+
+`manifestApply` crossed 20 branches. The split it wanted is the honest one: the
+command is argument handling and the gate, `resolvePhase` is §37.1 steps 1-14 as
+one readable sequence. The lint was not noise.

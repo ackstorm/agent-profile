@@ -49,6 +49,7 @@ Read the file before touching the code. Not suggestions.
 | "the profile behaves oddly", `Agent.FirstRun`, onboarding flags | `docs/references/CLAUDE-JSON.md` |
 | `pkg/schema/*`, composition, the YAML subset                    | `docs/references/DECLARATIVE.md` |
 | `pkg/source/*`, the credential guards, the cache, fetching       | `docs/references/DECLARATIVE.md` |
+| `pkg/hydrate/*`, the ledger, the root lock, materialization      | `docs/references/DECLARATIVE.md` |
 
 Everything else in this file is a standing rule: it applies before you know
 which file you are about to touch.
