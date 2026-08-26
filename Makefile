@@ -235,6 +235,8 @@ _fuzz:
 	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime 30s ./internal/profile/
 	go test -run '^$$' -fuzz FuzzParse -fuzztime 30s ./internal/manifest/
 	go test -run '^$$' -fuzz FuzzParseYAML -fuzztime 30s ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzResolveExtends -fuzztime 30s ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzValidRelPath -fuzztime 30s ./pkg/schema/
 
 # The agents run in their own image, not on your machine. That image is where the
 # four real binaries live, so this target needs none of them installed on the

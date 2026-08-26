@@ -30,3 +30,19 @@ func FuzzResolveExtends(f *testing.F) {
 		}
 	})
 }
+
+func FuzzValidRelPath(f *testing.F) {
+	f.Add("a/b")
+	f.Add("../x")
+	f.Fuzz(func(t *testing.T, p string) {
+		if err := validRelPath("destination", p); err != nil {
+			return
+		}
+		// Anything accepted must stay under the root when joined to it.
+		root := "/profile"
+		got := filepath.Join(root, p)
+		if !strings.HasPrefix(got, root+string(filepath.Separator)) && got != root {
+			t.Fatalf("accepted %q escapes: %q", p, got)
+		}
+	})
+}

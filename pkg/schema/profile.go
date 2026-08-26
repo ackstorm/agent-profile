@@ -565,6 +565,9 @@ func decodeGitSource(path string, n *Node) (*GitSource, error) {
 		if g.Subpath, err = sn.Text(); err != nil {
 			return nil, fmt.Errorf("line %d: %s.subpath: %w", sn.Line, path, err)
 		}
+		if err := validRelPath(path+".subpath", g.Subpath); err != nil {
+			return nil, err
+		}
 	}
 	if an, ok := n.Map["auth"]; ok {
 		vf, err := decodeValueFrom(path+".auth", an)
@@ -591,6 +594,9 @@ func decodeLocalSource(path string, n *Node) (*LocalSource, error) {
 	if sn, ok := n.Map["subpath"]; ok {
 		if l.Subpath, err = sn.Text(); err != nil {
 			return nil, fmt.Errorf("line %d: %s.subpath: %w", sn.Line, path, err)
+		}
+		if err := validRelPath(path+".subpath", l.Subpath); err != nil {
+			return nil, err
 		}
 	}
 	return l, nil
@@ -813,18 +819,20 @@ func decodeArtifact(path string, n *Node) (Artifact, error) {
 	if err != nil {
 		return a, err
 	}
-	// §26.1: relative, and must not escape via "..". validDestination is a
-	// placeholder for validRelPath, which Task 10 shares with subpath.
-	if err := validDestination(path+".destination", dest); err != nil {
+	// §26.1: relative, and must not escape via "..".
+	if err := validRelPath(path+".destination", dest); err != nil {
 		return a, err
 	}
 	a.Destination = dest
 	return a, nil
 }
 
-// validDestination enforces §26.1's path rule on its own. Task 10 replaces
-// this with validRelPath, shared with subpath's identical rule (§20).
-func validDestination(field, p string) error {
+// validRelPath enforces the one path rule §20 and §26.1 share: relative, and
+// it may not escape its root with "..". Checked on the CLEANED path, because
+// "a/../../b" is only visibly an escape after cleaning — and an escape here
+// would write outside a profile namespace, which is the whole containment
+// boundary this shares with the --from traversal guard.
+func validRelPath(field, p string) error {
 	if p == "" {
 		return fmt.Errorf("%s: must not be empty", field)
 	}

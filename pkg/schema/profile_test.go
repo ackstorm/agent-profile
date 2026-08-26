@@ -134,3 +134,18 @@ func TestDecodeRefusesAPromptSourceThatSelectsBothBranches(t *testing.T) {
 		t.Errorf("err = %q; does not name prompt.source", err)
 	}
 }
+
+func TestSubpathAndDestinationMayNotEscapeTheirRoot(t *testing.T) {
+	for _, p := range []string{
+		"../etc/passwd", "a/../../b", "/absolute", "a/b/../../..", "..",
+	} {
+		if err := validRelPath("destination", p); err == nil {
+			t.Errorf("%q accepted as a destination", p)
+		}
+	}
+	for _, p := range []string{"AGENTS.md", "references/CODING.md", "a/b/c"} {
+		if err := validRelPath("destination", p); err != nil {
+			t.Errorf("%q refused: %v", p, err)
+		}
+	}
+}
