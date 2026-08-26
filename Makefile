@@ -213,7 +213,7 @@ _test:
 
 .PHONY: quick
 quick: ## Inner-loop gate: vet + tests, no race, no coverage. Use `verify` before done.
-	$(call in_container,_quick)
+	$(call in_container,_quick P='$(P)')
 _quick:
 	go vet ./...
 	go test -count=1 $(if $(P),$(P),./...)
