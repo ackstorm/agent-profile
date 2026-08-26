@@ -516,3 +516,71 @@ func TestGitAuthSchemeAcceptsOnlyTheTwoV1Values(t *testing.T) {
 		t.Errorf("err = %v; an unknown scheme must be refused by name", err)
 	}
 }
+
+// §18: an archive's digest is REQUIRED and is not a checksum bolted on. A git
+// source is content-addressed — fetching by SHA is verified by git itself —
+// and an archive is not, so the digest is its only integrity claim and there
+// is no flag to skip it.
+func TestArchiveSourceRequiresASha256Digest(t *testing.T) {
+	manifest := func(extra string) []byte {
+		return []byte("version: \"1\"\nname: x\ntargets:\n  - claude\n" +
+			"skills:\n  s:\n    source:\n      archive:\n" +
+			"        url: https://ach/c/9f2a/skill.tar.gz\n" + extra)
+	}
+	want := "sha256:" + strings.Repeat("a", 64)
+	n, err := ParseYAML(manifest("        digest: " + want + "\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	p, err := Decode(n)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := p.Skills["s"].Source.Archive.Digest; got != want {
+		t.Errorf("digest = %q, want %q", got, want)
+	}
+
+	for _, bad := range []struct{ name, extra string }{
+		{"absent", ""},
+		{"wrong algorithm", "        digest: md5:" + strings.Repeat("a", 32) + "\n"},
+		{"short hex", "        digest: sha256:abc\n"},
+		{"uppercase hex", "        digest: sha256:" + strings.Repeat("A", 64) + "\n"},
+	} {
+		n, err := ParseYAML(manifest(bad.extra))
+		if err != nil {
+			t.Fatalf("%s: parse: %v", bad.name, err)
+		}
+		if _, err := Decode(n); err == nil || !strings.Contains(err.Error(), "digest") {
+			t.Errorf("%s: err = %v; want an error naming digest", bad.name, err)
+		}
+	}
+}
+
+// §3.5.1: a different branch replaces the union wholesale, and the union is
+// now one of three rather than one of two. The branch-keyed union is driven by
+// the schema oracle, not by a per-type rule, so this is what proves adding a
+// branch needed no change to the merge engine.
+func TestArchiveIsAThirdBranchOfTheSourceUnion(t *testing.T) {
+	got := mergeYAML(t,
+		"skills:\n  s:\n    source:\n      git:\n        url: https://e/r.git\n        ref: main\n",
+		"skills:\n  s:\n    source:\n      archive:\n        url: https://e/a.tgz\n"+
+			"        digest: sha256:"+strings.Repeat("b", 64)+"\n")
+	src := got.Map["skills"].Map["s"].Map["source"]
+	if _, ok := src.Map["git"]; ok {
+		t.Error("the git branch survived a switch to archive")
+	}
+	if _, ok := src.Map["archive"]; !ok {
+		t.Fatal("the archive branch is missing")
+	}
+
+	// And back the other way, because a union that only replaces in one
+	// direction would pass a one-way test.
+	got = mergeYAML(t,
+		"skills:\n  s:\n    source:\n      archive:\n        url: https://e/a.tgz\n"+
+			"        digest: sha256:"+strings.Repeat("b", 64)+"\n",
+		"skills:\n  s:\n    source:\n      local:\n        path: ./here\n")
+	src = got.Map["skills"].Map["s"].Map["source"]
+	if _, ok := src.Map["archive"]; ok {
+		t.Error("the archive branch survived a switch to local")
+	}
+}

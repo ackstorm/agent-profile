@@ -82,13 +82,29 @@ func Required(p Profile) []Ref {
 	return refs
 }
 
-// gitSourceRefs collects the one reference a git source's auth can carry.
-// A local source, or a git source with no auth, contributes nothing.
+// gitSourceRefs collects the one reference a source's auth can carry. Both
+// remote families have one; a local source, or a remote one with no auth,
+// contributes nothing.
+//
+// Archive is here and not only in git because §12 computes required inputs
+// from ACTIVE resources: a binding this misses is a binding apply never
+// checks, and Phase 3 would then fetch a private archive with no credential
+// and report a 401 that names nothing.
 func gitSourceRefs(resource string, src *Source) []Ref {
-	if src == nil || src.Git == nil || src.Git.Auth == nil {
+	if src == nil {
 		return nil
 	}
-	return []Ref{refFromValueFrom(resource, src.Git.Auth.ValueFrom)}
+	var auth *GitAuth
+	switch {
+	case src.Git != nil:
+		auth = src.Git.Auth
+	case src.Archive != nil:
+		auth = src.Archive.Auth
+	}
+	if auth == nil {
+		return nil
+	}
+	return []Ref{refFromValueFrom(resource, auth.ValueFrom)}
 }
 
 // headerRefs collects the one reference a sourced header carries. A literal

@@ -164,6 +164,26 @@ func (w *yw) sourceBlock(indent int, s *Source) {
 	if s.Local != nil {
 		w.key(indent, "local")
 		w.localSourceBlock(indent+1, s.Local)
+		return
+	}
+	if s.Archive != nil {
+		w.key(indent, "archive")
+		w.archiveSourceBlock(indent+1, s.Archive)
+	}
+}
+
+func (w *yw) archiveSourceBlock(indent int, a *ArchiveSource) {
+	w.scalar(indent, "url", a.URL)
+	w.scalar(indent, "digest", a.Digest)
+	if a.Subpath != "" {
+		w.scalar(indent, "subpath", a.Subpath)
+	}
+	if a.Auth != nil {
+		w.key(indent, "auth")
+		if a.Auth.Scheme != "" {
+			w.scalar(indent+1, "scheme", a.Auth.Scheme)
+		}
+		w.valueFrom(indent+1, a.Auth.ValueFrom)
 	}
 }
 

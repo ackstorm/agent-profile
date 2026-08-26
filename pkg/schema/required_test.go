@@ -2,6 +2,7 @@ package schema
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +110,41 @@ func TestRequiredReturnsNothingForAProfileWithNoReferences(t *testing.T) {
 	}
 	if refs := Required(p); len(refs) != 0 {
 		t.Errorf("refs = %+v, want none", refs)
+	}
+}
+
+// §12 computes required inputs from ACTIVE resources, and an archive's auth is
+// one. A binding this misses is a binding apply never checks, so Phase 3 would
+// fetch a private archive with no credential and report a 401 naming nothing.
+func TestRequiredCollectsAnArchiveSourcesAuth(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "p.yaml", `version: "1"
+name: p
+targets:
+  - claude
+inputs:
+  secrets:
+    ach-key:
+      env: ACH_KEY
+skills:
+  s:
+    source:
+      archive:
+        url: https://ach/c/9f2a/skill.tar.gz
+        digest: sha256:`+strings.Repeat("d", 64)+`
+        auth:
+          value_from:
+            secret: ach-key
+`)
+	p, _, err := Effective(filepath.Join(dir, "p.yaml"), "claude")
+	if err != nil {
+		t.Fatalf("effective: %v", err)
+	}
+	refs := Required(p)
+	if len(refs) != 1 {
+		t.Fatalf("refs = %v, want the archive's auth binding", refs)
+	}
+	if refs[0].Name != "ach-key" || refs[0].Resource != "skills.s" {
+		t.Errorf("ref = %+v, want skills.s -> ach-key", refs[0])
 	}
 }

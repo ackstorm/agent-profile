@@ -3,6 +3,7 @@ package schema
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -39,8 +40,9 @@ type Resource struct {
 
 // Source is §16's branch-keyed union: exactly one of Git or Local.
 type Source struct {
-	Git   *GitSource
-	Local *LocalSource
+	Git     *GitSource
+	Local   *LocalSource
+	Archive *ArchiveSource
 }
 
 type GitSource struct {
@@ -68,6 +70,25 @@ type GitAuth struct {
 var gitAuthSchemes = []string{"bearer", "basic-oauth2"}
 
 type LocalSource struct{ Path, Subpath string }
+
+// ArchiveSource is §18, reintroduced in v0.6 because ACH serves every context
+// item as an archive download URL — the exact trigger v0.5 recorded when it
+// removed the family.
+//
+// Digest is REQUIRED, and it is not a checksum bolted on. A git source is
+// content-addressed: fetching a SHA is verified by git itself. An archive is
+// not, so the digest is the only integrity claim it has, which is why there is
+// no flag to skip it and why it participates in cache identity (Phase 3).
+type ArchiveSource struct {
+	URL     string
+	Digest  string // "sha256:<64 lowercase hex>", required
+	Subpath string
+	Auth    *GitAuth
+}
+
+// digestPattern is §18's v1 algorithm and nothing else. Lowercase hex only:
+// accepting both cases would make two spellings of one digest two cache keys.
+var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 type Model struct {
 	Type, BaseURL, Model string
@@ -584,32 +605,75 @@ func decodeSource(path string, n *Node) (*Source, error) {
 	if n.Kind != Mapping {
 		return nil, fmt.Errorf("line %d: %s: expected a mapping with git or local", n.Line, path)
 	}
-	if err := onlyKeys(n, "git", "local"); err != nil {
+	branches := []string{"git", "local", "archive"}
+	if err := onlyKeys(n, branches...); err != nil {
 		return nil, err
 	}
-	gn, hasGit := n.Map["git"]
-	ln, hasLocal := n.Map["local"]
-	switch {
-	case hasGit && hasLocal:
-		return nil, fmt.Errorf("line %d: %s: both git and local selected; use exactly one", n.Line, path)
-	case !hasGit && !hasLocal:
-		return nil, fmt.Errorf("line %d: %s: no source selected; use git or local", n.Line, path)
+	var selected []string
+	for _, b := range branches {
+		if _, ok := n.Map[b]; ok {
+			selected = append(selected, b)
+		}
 	}
+	switch len(selected) {
+	case 0:
+		return nil, fmt.Errorf("line %d: %s: no source selected; use %s",
+			n.Line, path, strings.Join(branches, ", "))
+	case 1:
+	default:
+		return nil, fmt.Errorf("line %d: %s: %s selected together; use exactly one",
+			n.Line, path, strings.Join(selected, " and "))
+	}
+
 	src := &Source{}
-	if hasGit {
-		g, err := decodeGitSource(path+".git", gn)
-		if err != nil {
-			return nil, err
-		}
-		src.Git = g
-	} else {
-		l, err := decodeLocalSource(path+".local", ln)
-		if err != nil {
-			return nil, err
-		}
-		src.Local = l
+	var err error
+	switch selected[0] {
+	case "git":
+		src.Git, err = decodeGitSource(path+".git", n.Map["git"])
+	case "local":
+		src.Local, err = decodeLocalSource(path+".local", n.Map["local"])
+	default:
+		src.Archive, err = decodeArchiveSource(path+".archive", n.Map["archive"])
+	}
+	if err != nil {
+		return nil, err
 	}
 	return src, nil
+}
+
+func decodeArchiveSource(path string, n *Node) (*ArchiveSource, error) {
+	if n.Kind != Mapping {
+		return nil, fmt.Errorf("line %d: %s: expected a mapping", n.Line, path)
+	}
+	if err := onlyKeys(n, "url", "digest", "subpath", "auth"); err != nil {
+		return nil, err
+	}
+	a := &ArchiveSource{}
+	var err error
+	if a.URL, err = requiredTextField(n, path, "url"); err != nil {
+		return nil, err
+	}
+	if a.Digest, err = requiredTextField(n, path, "digest"); err != nil {
+		return nil, err
+	}
+	if !digestPattern.MatchString(a.Digest) {
+		return nil, fmt.Errorf("line %d: %s.digest: %q is not a v1 digest; want sha256: followed by 64 lowercase hex characters",
+			n.KeyLine["digest"], path, a.Digest)
+	}
+	if sn, ok := n.Map["subpath"]; ok {
+		if a.Subpath, err = sn.Text(); err != nil {
+			return nil, fmt.Errorf("line %d: %s.subpath: %w", sn.Line, path, err)
+		}
+		if err := validRelPath(path+".subpath", a.Subpath); err != nil {
+			return nil, err
+		}
+	}
+	if an, ok := n.Map["auth"]; ok {
+		if a.Auth, err = decodeGitAuth(path+".auth", an); err != nil {
+			return nil, err
+		}
+	}
+	return a, nil
 }
 
 func decodeGitSource(path string, n *Node) (*GitSource, error) {
