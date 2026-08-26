@@ -24,7 +24,18 @@ func Load(path string) (*Node, []string, error) {
 	return load(path, nil)
 }
 
+// maxExtendsDepth bounds the chain the way seen already bounds a cycle: seen
+// catches a file appearing twice, but nothing capped a long chain of files
+// that never repeat. No real profile extends more than a handful of parents,
+// so this is generous headroom against a runaway chain, not a limit any real
+// manifest should ever approach.
+const maxExtendsDepth = 32
+
 func load(path string, seen []string) (*Node, []string, error) {
+	if len(seen) >= maxExtendsDepth {
+		return nil, nil, fmt.Errorf("%s: extends chain longer than %d, the maximum (maxExtendsDepth)",
+			filepath.Base(path), maxExtendsDepth)
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, nil, err
@@ -73,10 +84,20 @@ func load(path string, seen []string) (*Node, []string, error) {
 // manifest directory: a bare name goes through agentreg.ValidName, and a
 // relative path is rejected if it climbs out. `extends` is user input becoming
 // a path, which is the class of thing --from got wrong.
+//
+// Known limit: containment is checked on the path STRING, not the filesystem
+// — a symlink planted inside the manifest directory that points outside it is
+// not detected, unlike internal/profile/share.go's os.Root-based containment.
+// It grants no new privilege (anyone who can plant a symlink there can plant
+// the file itself), but the limit is real and stated here rather than left to
+// be found later.
 func resolveExtends(dir string, ex *Node) (string, error) {
 	name, err := ex.Text()
 	if err != nil {
 		return "", fmt.Errorf("extends: %w", err)
+	}
+	if filepath.IsAbs(name) {
+		return "", fmt.Errorf("extends %q: must be relative", name)
 	}
 	if strings.ContainsRune(name, '/') || strings.HasSuffix(name, ".yaml") {
 		p := filepath.Join(dir, filepath.Clean(name))

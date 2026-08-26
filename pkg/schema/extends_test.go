@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,5 +73,41 @@ func TestLoadRefusesAParentOutsideTheManifestDirectory(t *testing.T) {
 	write(t, sub, "leaf2.yaml", "version: \"1\"\nname: leaf\nextends: ../base\n")
 	if _, _, err := Load(filepath.Join(sub, "leaf2.yaml")); err == nil {
 		t.Fatal("`extends: ../base` (no .yaml suffix) reached a real, loadable file outside the manifest directory")
+	}
+}
+
+func TestLoadRefusesAnAbsoluteExtendsValue(t *testing.T) {
+	// validRelPath (profile.go, §20/§26.1) explicitly refuses an absolute
+	// value for subpath/destination; resolveExtends is user input becoming a
+	// path the same way and must refuse the same shape of input, even though
+	// filepath.Join happens to leave it contained (it concatenates rather
+	// than root-replacing an absolute second argument).
+	dir := t.TempDir()
+	write(t, dir, "leaf.yaml", "version: \"1\"\nname: leaf\nextends: /etc/passwd\n")
+	_, _, err := Load(filepath.Join(dir, "leaf.yaml"))
+	if err == nil {
+		t.Fatal("an absolute extends value was accepted")
+	}
+	if !strings.Contains(err.Error(), "must be relative") {
+		t.Errorf("err = %q; want it to say the value must be relative", err)
+	}
+}
+
+func TestLoadRefusesAChainLongerThanMaxExtendsDepth(t *testing.T) {
+	// seen only catches a file reappearing; this covers a chain of distinct
+	// files that never repeats and so never trips that check.
+	dir := t.TempDir()
+	n := maxExtendsDepth + 5
+	write(t, dir, "f0.yaml", "version: \"1\"\nname: f0\n")
+	for i := 1; i <= n; i++ {
+		write(t, dir, fmt.Sprintf("f%d.yaml", i),
+			fmt.Sprintf("version: \"1\"\nname: f%d\nextends: f%d.yaml\n", i, i-1))
+	}
+	_, _, err := Load(filepath.Join(dir, fmt.Sprintf("f%d.yaml", n)))
+	if err == nil {
+		t.Fatal("an extends chain far longer than maxExtendsDepth was accepted")
+	}
+	if !strings.Contains(err.Error(), "maxExtendsDepth") {
+		t.Errorf("err = %q; want it to name maxExtendsDepth", err)
 	}
 }
