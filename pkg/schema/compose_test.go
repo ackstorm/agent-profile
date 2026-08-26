@@ -54,3 +54,64 @@ func TestMergeTreatsNullAsResetToAbsent(t *testing.T) {
 		t.Error("model still listed in Keys; render would emit it")
 	}
 }
+
+func TestMergeReplacesAUnionWholesaleWhenTheBranchChanges(t *testing.T) {
+	// §3.5.1: git → local replaces the node. Branches never coexist.
+	got := mergeYAML(t,
+		"skills:\n  pdf:\n    source:\n      git:\n        url: https://example.com/r.git\n        ref: main\n",
+		"skills:\n  pdf:\n    source:\n      local:\n        path: ./repo\n")
+	src := got.Map["skills"].Map["pdf"].Map["source"]
+	if _, ok := src.Map["git"]; ok {
+		t.Error("git branch survived a switch to local; branches never coexist")
+	}
+	if src.Map["local"].Map["path"].Str != "./repo" {
+		t.Error("local branch missing")
+	}
+
+	// Same branch composes: the base's url survives the child's ref override.
+	got = mergeYAML(t,
+		"skills:\n  pdf:\n    source:\n      git:\n        url: https://example.com/r.git\n        ref: main\n",
+		"skills:\n  pdf:\n    source:\n      git:\n        ref: v2\n")
+	git := got.Map["skills"].Map["pdf"].Map["source"].Map["git"]
+	if git.Map["url"].Str != "https://example.com/r.git" {
+		t.Error("url lost on a same-branch override")
+	}
+	if git.Map["ref"].Str != "v2" {
+		t.Errorf("ref = %q, want v2", git.Map["ref"].Str)
+	}
+}
+
+func TestMergeDiscardsTheOtherLocatorWhenAnOverlayPicksOne(t *testing.T) {
+	// §3.5.2's worked example. Without this the resource carries ref AND
+	// source and fails locator validation, so a marketplace-backed skill could
+	// never be overridden with a direct source.
+	got := mergeYAML(t,
+		"skills:\n  pdf:\n    ref: pdf@anthropic-skills\n",
+		"skills:\n  pdf:\n    source:\n      git:\n        url: https://example.com/fork.git\n")
+	pdf := got.Map["skills"].Map["pdf"]
+	if _, ok := pdf.Map["ref"]; ok {
+		t.Error("inherited ref survived an overlay declaring source")
+	}
+	if _, ok := pdf.Map["source"]; !ok {
+		t.Fatal("source missing")
+	}
+
+	// Keys OUTSIDE the group compose normally: `enabled: false` must not
+	// disturb the locator, and a replaced prompt content inherits mode.
+	got = mergeYAML(t,
+		"skills:\n  pdf:\n    ref: pdf@anthropic-skills\n",
+		"skills:\n  pdf:\n    enabled: false\n")
+	if _, ok := got.Map["skills"].Map["pdf"].Map["ref"]; !ok {
+		t.Error("`enabled: false` discarded the locator; it is outside the group")
+	}
+	got = mergeYAML(t,
+		"prompt:\n  mode: replace\n  source:\n    local:\n      path: ./p.md\n",
+		"prompt:\n  content: |\n    inline\n")
+	p := got.Map["prompt"]
+	if _, ok := p.Map["source"]; ok {
+		t.Error("prompt source survived an overlay declaring content")
+	}
+	if p.Map["mode"].Str != "replace" {
+		t.Error("mode lost; it is outside the content|source group")
+	}
+}

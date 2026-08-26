@@ -80,8 +80,34 @@ func sameBranch(base, overlay *Node) bool {
 	return base.Keys[0] == overlay.Keys[0]
 }
 
-// discardedGroupMembers returns the inherited exclusive-group members that this
-// overlay displaces. Task 6 fills it in; until then nothing is discarded.
+// discardedGroupMembers returns the inherited exclusive-group members this
+// overlay displaces. §3.5.2: declaring ANY member of a group discards every
+// other inherited member; declaring the same member composes normally. Keys
+// outside the group are untouched, which is what lets `enabled: false` leave a
+// locator alone and a replaced prompt content inherit its mode.
 func discardedGroupMembers(base, overlay *Node, s Schema, path []string) []string {
-	return nil
+	members := s.Group(path)
+	if members == nil {
+		return nil
+	}
+	var declared bool
+	for _, m := range members {
+		if _, ok := overlay.Map[m]; ok {
+			declared = true
+			break
+		}
+	}
+	if !declared {
+		return nil
+	}
+	var drop []string
+	for _, m := range members {
+		if _, inOverlay := overlay.Map[m]; inOverlay {
+			continue
+		}
+		if _, inBase := base.Map[m]; inBase {
+			drop = append(drop, m)
+		}
+	}
+	return drop
 }
