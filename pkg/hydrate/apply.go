@@ -78,6 +78,9 @@ func Apply(ctx context.Context, p Plan) (Result, error) {
 	if err := applyMCPs(p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
+	if err := applyModelEnv(p, ledger, &res, stamp); err != nil {
+		return res, err
+	}
 	recordDefinitions(p, ledger, stamp)
 	warnDisabledButMaterialized(p, ledger, &res)
 
@@ -198,6 +201,44 @@ func applyMCPs(p Plan, l *Ledger, res *Result, stamp string) error {
 		})
 		res.Changes = append(res.Changes, Change{Path: filepath.Join(rel, key+"."+name), Op: "merge"})
 	}
+	return nil
+}
+
+// applyModelEnv writes the profile-local env file the launcher exports.
+//
+// §9 and §15.1 describe VARIABLES, not files: there is no configuration key to
+// merge a base URL and a credential reference into. Apply and launch are
+// separate invocations, so something has to hold the answer between them, and
+// the profile is the only place that survives both — a manifest is an input and
+// may be thrown away.
+//
+// Nothing is written when there is nothing to write: an absent model with no
+// runtime environment is the subscription case, and creating an empty file
+// there would make every profile look configured.
+func applyModelEnv(p Plan, l *Ledger, res *Result, stamp string) error {
+	env, notices, err := ModelEnv(p.Adapter.Name(), p.Profile, bindingVars(p.Profile))
+	if err != nil {
+		return err
+	}
+	res.Warnings = append(res.Warnings, notices...)
+	if len(env) == 0 {
+		return nil
+	}
+	path := filepath.Join(p.Root, EnvFile)
+	body := FormatEnvFile(env)
+	op := "create"
+	if _, err := os.Stat(path); err == nil {
+		op = "overwrite"
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		return err
+	}
+	sum := sha256.Sum256(body)
+	res.Changes = append(res.Changes, Change{Path: EnvFile, Op: op})
+	l.Put(ResourceRec{
+		Name: "model", Kind: "environment", InstalledAt: stamp,
+		Files: []FileRec{{RelPath: EnvFile, Hash: hex.EncodeToString(sum[:])}},
+	})
 	return nil
 }
 
