@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -2521,5 +2522,138 @@ func TestSessionsAndResumeHelpPointAtEachOther(t *testing.T) {
 		if !strings.Contains(h, other) {
 			t.Errorf("ap %s --help shows no example of %q", tc.cmd, other)
 		}
+	}
+}
+
+// seedRepo builds a real git repository in a temp dir. cmd/ap's tests cannot
+// reach pkg/source's helper, and duplicating twenty lines is cheaper than
+// exporting a test fixture from a published package.
+func seedRepo(t *testing.T, files map[string]string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	work := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = work
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+			"GIT_CONFIG_NOSYSTEM=1", "HOME="+work)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "--quiet", "--initial-branch=main")
+	for rel, body := range files {
+		p := filepath.Join(work, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("add", "-A")
+	run("commit", "--quiet", "-m", "seed")
+	return work
+}
+
+// captureStdout runs fn with os.Stdout redirected and returns what it wrote.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fnErr := fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out), fnErr
+}
+
+// Phase 3's payoff: --dry-run runs the whole resolution phase, fetches real
+// bytes, and touches no root.
+func TestManifestApplyDryRunResolvesRealSourcesAndWritesNothing(t *testing.T) {
+	repo := seedRepo(t, map[string]string{"skills/pdf/SKILL.md": "# pdf"})
+	data, cache := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	// Prepend rather than replace: the resolution phase shells out to git, and
+	// binDir first still means the stub claude wins preflight.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	manifest := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
+	path := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", "claude:plan", path, "--dry-run"})
+	})
+	if err != nil {
+		t.Fatalf("dry run: %v\n%s", err, out)
+	}
+	for _, want := range []string{"claude:plan", "skill pdf"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+	// §37.1 makes this line mandatory: "dry run" reads as "does nothing", and
+	// this one resolves secrets, authenticates and fetches.
+	if !strings.Contains(out, "--dry-run authenticated and fetched; nothing was written.") {
+		t.Errorf("the mandatory §37.1 disclosure is missing:\n%s", out)
+	}
+
+	// Non-mutating is the other half. Apply overwrites, so a dry run that
+	// half-created a root would be worse than no dry run at all.
+	if _, err := os.Stat(filepath.Join(data, "agent-profile", "profiles", "claude", "plan")); !os.IsNotExist(err) {
+		t.Errorf("--dry-run created the profile namespace: %v", err)
+	}
+	// The cache IS written: §37.1 says source acquisition during resolution is
+	// not mutation, and a cache is not a materialization root.
+	if ents, err := os.ReadDir(filepath.Join(cache, "agent-profile", "sources", "objects")); err != nil || len(ents) == 0 {
+		t.Errorf("nothing was cached, so nothing was really fetched: %v %v", ents, err)
+	}
+}
+
+// A stub that silently does nothing is worse than an unimplemented command.
+func TestManifestApplyWithoutDryRunRefusesUntilPhase4(t *testing.T) {
+	repo := seedRepo(t, map[string]string{"a/SKILL.md": "#"})
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  a:\n    source:\n      git:\n        url: " + repo + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := dispatch([]string{"manifest", "apply", "claude:plan", path})
+	if err == nil {
+		t.Fatal("apply without --dry-run succeeded")
+	}
+	if !strings.Contains(err.Error(), "Phase 4") {
+		t.Errorf("error %q does not say materialization is Phase 4", err)
+	}
+	// And it must refuse BEFORE fetching: there is nothing to fetch for.
+	if ents, _ := os.ReadDir(filepath.Join(os.Getenv("XDG_CACHE_HOME"), "agent-profile", "sources", "objects")); len(ents) != 0 {
+		t.Errorf("a refused apply fetched %d entries anyway", len(ents))
 	}
 }

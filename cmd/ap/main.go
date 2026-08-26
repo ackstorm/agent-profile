@@ -287,11 +287,18 @@ manifest that composes for claude and not codex is broken, and one call says
 so.
 
 apply takes a reference, not --target — the reference already names the agent
-and the root. It runs the resolution phase (§37 steps 1-11): composes the
-effective profile, computes which inputs it actually needs, resolves them, and
-runs derived preflight. It fetches nothing; source resolution is Phase 3.
+and the root. It runs the resolution phase (§37 steps 1-13): composes the
+effective profile, computes which inputs it actually needs, resolves them, runs
+derived preflight, and fetches every active source into the cache.
+
 --dry-run prints the result and exits 0. Without it, apply says materialization
 is Phase 4 and exits 1 — there is no fake apply to stub.
+
+A DRY RUN IS NOT OFFLINE. It resolves secrets, authenticates to private sources
+and downloads content, because that is the only way to check a contract before
+an overwriting apply touches anything. What it does not do is write to a root.
+The cache is not a root: acquiring a source during resolution is not mutation,
+and a cached entry costs a re-fetch to discard.
 
 export is Phase 7.
 

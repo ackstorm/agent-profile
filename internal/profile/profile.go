@@ -23,6 +23,26 @@ func Root() string {
 	return filepath.Join(h, ".local", "share", "agent-profile", "profiles")
 }
 
+// CacheDir is where fetched sources are cached. It sits beside the profiles
+// rather than inside one: a source fetched for claude:plan is the same bytes
+// when codex:review asks for it, and content addressed by SHA or digest cannot
+// collide between them.
+//
+// It follows XDG_CACHE_HOME, not XDG_DATA_HOME. A cache is reconstructible by
+// definition — deleting it costs a re-fetch and nothing else — which is
+// exactly what that variable means, and it keeps a cache out of whatever the
+// user backs up.
+func CacheDir() (string, error) {
+	if d := os.Getenv("XDG_CACHE_HOME"); d != "" {
+		return filepath.Join(d, "agent-profile", "sources"), nil
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(h, ".cache", "agent-profile", "sources"), nil
+}
+
 // Dir is the directory for one agent+profile pair, or, for agentreg.Default,
 // the agent's real config directory.
 func Dir(a agentreg.Agent, name string) string {

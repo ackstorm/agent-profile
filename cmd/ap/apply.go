@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/pkg/schema"
+	"github.com/ackstorm/agent-profile/pkg/source"
 )
 
 // manifestApply is the CLI's window onto the resolution phase: `--dry-run`
@@ -86,7 +88,34 @@ func manifestApply(args []string) error {
 		return fmt.Errorf("materialization is Phase 4 and does not exist yet; rerun with --dry-run")
 	}
 
-	return printResolution(os.Stdout, res, resolved, agent.Name, name)
+	// The cache root is a parameter, like every root in pkg/. It is the one
+	// thing a dry run may create: a cache is not a materialization root, and
+	// §37.1 says source acquisition during resolution is not mutation.
+	cacheRoot, err := profile.CacheDir()
+	if err != nil {
+		return err
+	}
+	cache, err := source.NewCache(cacheRoot)
+	if err != nil {
+		return err
+	}
+
+	fetched, reports, err := source.Resolve(context.Background(), res.Profile, source.Opts{
+		Cache:       cache,
+		ManifestDir: filepath.Dir(path),
+		Secret: func(name string) (string, error) {
+			v, ok := resolved.Value("secret", name)
+			if !ok {
+				return "", source.ErrSecretUnset
+			}
+			return v, nil
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	return printResolution(os.Stdout, res, resolved, agent.Name, name, fetched, reports)
 }
 
 // parsePositionals is parseAroundRef generalised to at most max positional
@@ -146,22 +175,42 @@ func manifestPath(v string) (path string, cleanup func(), err error) {
 // printResolution is --dry-run's entire output: which root it would have
 // written to, every input the effective profile actually needs (by binding
 // NAME only — Resolved's String method redacts, so even printing the value
-// itself here could not leak one), and every degradation warning. Nothing
-// below reads a resolved value.
-func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resolved, agent, root string) error {
+// itself here could not leak one), what each locator resolved to, and every
+// degradation warning. Nothing below reads a resolved value.
+func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resolved,
+	agent, root string, fetched map[string]source.Resolved, reports []source.Report,
+) error {
 	var b strings.Builder
-	fmt.Fprintln(&b, "dry run: the resolution phase only — nothing is fetched (source fetching is Phase 3)")
-	fmt.Fprintf(&b, "profile %q for %s:%s\n", res.Profile.Name, agent, root)
+	fmt.Fprintf(&b, "%s:%s\n", agent, root)
+	fmt.Fprintf(&b, "  %-10s %s\n", "profile", res.Profile.Name)
+
 	if len(res.Refs) == 0 {
-		fmt.Fprintln(&b, "no inputs required")
+		fmt.Fprintf(&b, "  %-10s %s\n", "inputs", "none required")
 	}
 	for _, r := range res.Refs {
-		fmt.Fprintf(&b, "  %s references %s %q\n", r.Resource, r.Kind, r.Name)
+		fmt.Fprintf(&b, "  ✓ %-10s %s %q → %s\n", "input", r.Kind, r.Name, r.Resource)
+	}
+
+	// Reports come back in resolution order, which is sorted: a report nobody
+	// can diff is a report nobody reads.
+	for _, rep := range reports {
+		mark := "✓"
+		if _, ok := fetched[rep.Resource]; !ok {
+			// Resolved but not fetched — a marketplace ref, whose item lookup
+			// is Phase 6. Marked as a skip rather than omitted, because §8
+			// forbids a silent drop.
+			mark = "–"
+		}
+		fmt.Fprintf(&b, "  %s %-10s %s\n", mark, rep.Resource, rep.Text)
 	}
 	for _, warn := range res.Warnings {
-		fmt.Fprintln(&b, "warning:", warn.Text)
+		fmt.Fprintln(&b, "  ! warning:", warn.Text)
 	}
-	fmt.Fprintln(&b, resolved)
+
+	// §37.1 makes this line mandatory. "Dry run" reads as "does nothing", and
+	// this one resolves secrets, authenticates to private sources and fetches
+	// content — because that is the only way to check a contract.
+	fmt.Fprintln(&b, "\n  --dry-run authenticated and fetched; nothing was written.")
 	_, err := io.WriteString(w, b.String())
 	return err
 }
