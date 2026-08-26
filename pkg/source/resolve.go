@@ -16,8 +16,28 @@ import (
 var ErrSecretUnset = errors.New("secret is not set")
 
 // errRefDeferred marks a ref-backed resource. It is not a failure: Phase 6
-// resolves it against a marketplace catalogue.
+// resolves it against a marketplace catalogue declared in the SAME manifest.
 var errRefDeferred = errors.New("marketplace ref")
+
+// ErrForeignEntry is a marketplace entry naming a source outside the
+// marketplace's own repository.
+//
+// v1 scopes catalogues to same-repo entries, which is how the real ones are
+// built: one clone, N plugins. An external entry is refused by NAME rather than
+// fetched, and refusing it is what removed §21.2 from the specification — with
+// no cross-repo hop there is no foreign host for a credential to reach, so the
+// guard has nothing to guard. Reintroduction trigger: a real catalogue needing
+// cross-repo entries.
+type ErrForeignEntry struct {
+	Marketplace, Entry, EntryURL string
+}
+
+func (e ErrForeignEntry) Error() string {
+	return fmt.Sprintf(
+		"marketplace %q: entry %q names a source outside the marketplace's own repository (%s); "+
+			"v1 catalogues are same-repo only",
+		e.Marketplace, e.Entry, e.EntryURL)
+}
 
 // Opts is everything Resolve needs from its caller. ManifestDir is a parameter
 // like every other root in pkg/: nothing here reads $HOME.

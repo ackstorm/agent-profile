@@ -227,43 +227,6 @@ func TestADisabledResourceWithLedgerStateWarns(t *testing.T) {
 	}
 }
 
-// A marketplace materializes no file, so a file-only ledger would lose it the
-// moment the manifest is gone — and a manifest is an input that is not kept.
-func TestAMarketplaceIsRecordedAsADefinition(t *testing.T) {
-	root := t.TempDir()
-	res, err := Apply(t.Context(), Plan{
-		Root: root, Adapter: claudeAdapter(t), Now: fixedNow,
-		Profile: schema.Profile{Marketplaces: map[string]schema.Marketplace{
-			"acme-plugins": {Enabled: true, Type: "plugins", Source: &schema.Source{Git: &schema.GitSource{
-				URL:  "https://gl.acme.internal/a.git",
-				Auth: &schema.GitAuth{Scheme: "basic-oauth2", ValueFrom: schema.ValueFrom{Secret: "gitlab-token"}},
-			}}},
-		}},
-		Fetched: map[string]source.Resolved{
-			"marketplace acme-plugins": {ResolvedRef: "3f9d10b", SchemeUsed: "basic-oauth2"},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = res
-	l, err := LoadLedger(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(l.Definitions) != 1 {
-		t.Fatalf("definitions = %+v", l.Definitions)
-	}
-	d := l.Definitions[0]
-	if d.Name != "acme-plugins" || d.ResolvedRef != "3f9d10b" || d.AuthScheme != "basic-oauth2" {
-		t.Errorf("definition = %+v", d)
-	}
-	// The binding NAME, never a value (§34).
-	if d.AuthBinding != "gitlab-token" {
-		t.Errorf("auth binding = %q, want the binding name", d.AuthBinding)
-	}
-}
-
 // Re-applying replaces the record rather than appending, or the ledger grows a
 // duplicate on every run and a later removal only finds the first.
 func TestApplyTwiceIsIdempotentInTheLedger(t *testing.T) {
@@ -437,5 +400,75 @@ func TestAFileSourcedSecretReferencesTheLauncherExportedName(t *testing.T) {
 	}
 	if strings.Contains(string(body), "/run/secrets") {
 		t.Errorf("the file PATH reached the configuration:\n%s", body)
+	}
+}
+
+// §9 lands in a FILE, so whoever starts the agent reads it — including a main
+// container that execs the runtime directly after an init container hydrated.
+// The env-file draft this replaced was read only by `ap run`.
+func TestModelIsMaterializedIntoTheRuntimesFileAndRecorded(t *testing.T) {
+	root := t.TempDir()
+	res, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: claudeAdapter(t), Now: fixedNow,
+		Profile: schema.Profile{
+			Inputs: schema.Inputs{Secrets: map[string]schema.Binding{"llm-token": {Env: "LITELLM_TOKEN"}}},
+			Model:  &schema.Model{Type: "anthropic", BaseURL: "https://llm.company.com", Model: "claude-opus-5"},
+			Runtimes: map[string]schema.Runtime{"claude": {Environment: map[string]string{
+				"ANTHROPIC_BASE_URL": "http://localhost:4000",
+				"COMPANY_REGION":     "eu-west-1",
+			}}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "settings.json"))
+	if err != nil {
+		t.Fatalf("no settings.json: %v", err)
+	}
+	// §15.1: the user's entry wins, and the notice says so.
+	if !strings.Contains(string(body), "http://localhost:4000") {
+		t.Errorf("the user's override lost:\n%s", body)
+	}
+	if !strings.Contains(string(body), "eu-west-1") {
+		t.Errorf("a non-colliding user variable was dropped:\n%s", body)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, " "), "ANTHROPIC_BASE_URL") {
+		t.Errorf("no override notice: %v", res.Warnings)
+	}
+
+	// Recorded as a deep merge with its dotted key, like every other write
+	// into a file the user also owns.
+	l, _ := LoadLedger(root)
+	rec, ok := l.Resource("model", "model")
+	if !ok {
+		t.Fatalf("model was not recorded: %+v", l)
+	}
+	f := rec.Files[0]
+	if f.RelPath != "settings.json" || f.Merge != "deep" || len(f.Keys) == 0 {
+		t.Errorf("record = %+v", f)
+	}
+
+	// And nothing writes an env file any more.
+	if _, err := os.Stat(filepath.Join(root, ".ap-env")); !os.IsNotExist(err) {
+		t.Error(".ap-env was written; model materializes into files now")
+	}
+}
+
+// pi has no measured model destination. A guessed path writes to a name the
+// agent never opens, so §8's warning is the honest answer.
+func TestARuntimeWithNoModelDestinationWarns(t *testing.T) {
+	a, _ := agentreg.Lookup("pi")
+	ad, _ := AdapterFor(a)
+	root := t.TempDir()
+	res, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: ad, Now: fixedNow,
+		Profile: schema.Profile{Model: &schema.Model{BaseURL: "https://llm.company.com"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, " "), "pi") {
+		t.Errorf("pi silently dropped the model block: %v", res.Warnings)
 	}
 }

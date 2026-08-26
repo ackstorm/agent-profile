@@ -1,13 +1,11 @@
 package run
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ackstorm/agent-profile/pkg/agentreg"
-	"github.com/ackstorm/agent-profile/pkg/hydrate"
 )
 
 func envMap(t *testing.T, env []string) map[string]string {
@@ -244,47 +242,5 @@ func TestEnvSetsOneVariablePerShim(t *testing.T) {
 		if got[k] != want {
 			t.Errorf("%s = %q, want %q", k, got[k], want)
 		}
-	}
-}
-
-// §9 and §15.1's derived environment reaches the child. It is read from the
-// profile rather than recomputed, because a manifest is an INPUT and may be
-// gone by launch time.
-func TestEnvExportsWhatApplyDerivedIntoTheProfile(t *testing.T) {
-	a, ok := agentreg.Lookup("claude")
-	if !ok {
-		t.Fatal("claude is not in the registry")
-	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, hydrate.EnvFile),
-		[]byte("# c\nANTHROPIC_BASE_URL=https://llm.company.com\nANTHROPIC_AUTH_TOKEN=${LITELLM_TOKEN}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]string{}
-	for _, e := range Env(a, dir, []string{"PATH=/usr/bin"}) {
-		if k, v, ok := strings.Cut(e, "="); ok {
-			got[k] = v
-		}
-	}
-	if got["ANTHROPIC_BASE_URL"] != "https://llm.company.com" {
-		t.Errorf("base url = %q", got["ANTHROPIC_BASE_URL"])
-	}
-	// A REFERENCE reaches the child, not a value: apply never read one.
-	if got["ANTHROPIC_AUTH_TOKEN"] != "${LITELLM_TOKEN}" {
-		t.Errorf("token = %q", got["ANTHROPIC_AUTH_TOKEN"])
-	}
-	// The config variable still points inside the profile — the env file is an
-	// addition, not a replacement for what makes a profile a profile.
-	if !strings.HasPrefix(got[a.ConfigEnv], dir) {
-		t.Errorf("%s = %q, want it inside %q", a.ConfigEnv, got[a.ConfigEnv], dir)
-	}
-}
-
-// Most profiles declare no model and have no env file. A missing one must not
-// stop anyone launching an agent.
-func TestEnvWorksWithNoProfileEnvFile(t *testing.T) {
-	a, _ := agentreg.Lookup("claude")
-	if len(Env(a, t.TempDir(), []string{"PATH=/usr/bin"})) == 0 {
-		t.Error("Env returned nothing for a profile with no env file")
 	}
 }

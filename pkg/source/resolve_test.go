@@ -261,3 +261,19 @@ skills:
 		t.Errorf("order = %v, want %v", first, want)
 	}
 }
+
+// v1 catalogues are same-repo only, which is how the real ones are built: one
+// clone, N plugins. An external entry is refused by NAME — and refusing it is
+// what removed §21.2 from the spec, since with no cross-repo hop there is no
+// foreign host for a credential to reach.
+func TestAForeignMarketplaceEntryIsRefusedByName(t *testing.T) {
+	err := ErrForeignEntry{
+		Marketplace: "acme-plugins", Entry: "code-review",
+		EntryURL: "https://github.com/attacker/evil.git",
+	}
+	for _, want := range []string{"acme-plugins", "code-review", "github.com/attacker/evil.git", "same-repo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err.Error(), want)
+		}
+	}
+}

@@ -19,7 +19,7 @@ func TestAnAbsentLedgerLoadsAsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an absent ledger errored: %v", err)
 	}
-	if len(l.Resources) != 0 || len(l.Definitions) != 0 {
+	if len(l.Resources) != 0 {
 		t.Errorf("an absent ledger is not empty: %+v", l)
 	}
 }
@@ -35,11 +35,6 @@ func TestLedgerRoundTripsBothArms(t *testing.T) {
 				{RelPath: "settings.json", Hash: "def", Merge: "deep", Keys: []string{"a.b", "a.c"}},
 			},
 		}},
-		Definitions: []DefinitionRec{{
-			Name: "acme-plugins", Kind: "marketplace", ResolvedRef: "3f9d10b",
-			AuthScheme: "basic-oauth2", AuthBinding: "gitlab-token",
-			Source: &schema.Source{Git: &schema.GitSource{URL: "https://gl/a.git"}},
-		}},
 	}
 	if err := want.Save(root); err != nil {
 		t.Fatal(err)
@@ -51,7 +46,7 @@ func TestLedgerRoundTripsBothArms(t *testing.T) {
 	if got.Version != ledgerVersion {
 		t.Errorf("version = %d", got.Version)
 	}
-	if len(got.Resources) != 1 || len(got.Definitions) != 1 {
+	if len(got.Resources) != 1 {
 		t.Fatalf("arms lost: %+v", got)
 	}
 	r := got.Resources[0]
@@ -63,12 +58,6 @@ func TestLedgerRoundTripsBothArms(t *testing.T) {
 	if r.Files[1].Merge != "deep" || len(r.Files[1].Keys) != 2 {
 		t.Errorf("merge metadata lost: %+v", r.Files[1])
 	}
-	// The second arm exists so a marketplace survives the manifest that
-	// declared it (F3): a manifest is an INPUT and is not kept.
-	d := got.Definitions[0]
-	if d.Name != "acme-plugins" || d.AuthScheme != "basic-oauth2" || d.AuthBinding != "gitlab-token" {
-		t.Errorf("definition = %+v", d)
-	}
 }
 
 // §13 and §34: a binding's NAME is structure and may be recorded; its VALUE may
@@ -77,16 +66,14 @@ func TestLedgerRoundTripsBothArms(t *testing.T) {
 func TestNoSecretValueCanReachTheLedger(t *testing.T) {
 	const secret = "glpat-DO-NOT-PERSIST-ME"
 	root := t.TempDir()
-	l := &Ledger{
-		Definitions: []DefinitionRec{{
-			Name: "acme-plugins", Kind: "marketplace",
-			AuthScheme: "basic-oauth2", AuthBinding: "gitlab-token",
-			Source: &schema.Source{Git: &schema.GitSource{
-				URL:  "https://gl/a.git",
-				Auth: &schema.GitAuth{Scheme: "basic-oauth2", ValueFrom: schema.ValueFrom{Secret: "gitlab-token"}},
-			}},
+	l := &Ledger{Resources: []ResourceRec{{
+		Name: "company-review", Kind: "skill", InstalledAt: "t",
+		Source: &schema.Source{Git: &schema.GitSource{
+			URL:  "https://gl/a.git",
+			Auth: &schema.GitAuth{Scheme: "basic-oauth2", ValueFrom: schema.ValueFrom{Secret: "gitlab-token"}},
 		}},
-	}
+		Files: []FileRec{{RelPath: "skills/company-review/SKILL.md", Hash: "h"}},
+	}}}
 	if err := l.Save(root); err != nil {
 		t.Fatal(err)
 	}
@@ -97,13 +84,12 @@ func TestNoSecretValueCanReachTheLedger(t *testing.T) {
 	if strings.Contains(string(raw), secret) {
 		t.Fatalf("a secret value reached the ledger:\n%s", raw)
 	}
-	// The binding NAME must survive, or export cannot synthesise an inputs
-	// block from it (§35.2) and the exported manifest references a secret
-	// nothing declares.
+	// The binding NAME survives: it is structure, and §35.2's export needs it
+	// to synthesise an inputs block.
 	if !strings.Contains(string(raw), "gitlab-token") {
 		t.Errorf("the binding name was dropped:\n%s", raw)
 	}
-	// And the shape must have no field capable of carrying one.
+	// And the shape must have no field capable of carrying a value.
 	var probe map[string]any
 	if err := json.Unmarshal(raw, &probe); err != nil {
 		t.Fatal(err)
@@ -112,6 +98,23 @@ func TestNoSecretValueCanReachTheLedger(t *testing.T) {
 		if strings.Contains(strings.ToLower(string(raw)), `"`+forbidden+`"`) {
 			t.Errorf("the ledger has a %q field; there must be nowhere to put a value", forbidden)
 		}
+	}
+}
+
+// The second arm was designed and is out of v1 with the thing that needed it:
+// ad-hoc `ap install x@y` with no manifest. A ref is only ever resolved inside
+// the manifest that declares its marketplace, so nothing outlives it.
+func TestTheLedgerHasNoSecondArm(t *testing.T) {
+	root := t.TempDir()
+	if err := (&Ledger{}).Save(root); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ledgerName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "definitions") {
+		t.Errorf("the ledger still carries a definitions arm:\n%s", raw)
 	}
 }
 
@@ -191,11 +194,6 @@ func TestPutReplacesRatherThanAppends(t *testing.T) {
 	got, ok := l.Resource("skill", "pdf")
 	if !ok || got.ResolvedRef != "new" {
 		t.Errorf("resource = %+v, %v", got, ok)
-	}
-	l.PutDefinition(DefinitionRec{Name: "m", Kind: "marketplace", ResolvedRef: "1"})
-	l.PutDefinition(DefinitionRec{Name: "m", Kind: "marketplace", ResolvedRef: "2"})
-	if len(l.Definitions) != 1 || l.Definitions[0].ResolvedRef != "2" {
-		t.Errorf("definitions = %+v", l.Definitions)
 	}
 }
 

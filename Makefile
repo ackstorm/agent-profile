@@ -326,11 +326,16 @@ _vulncheck:
 	govulncheck ./...
 
 .PHONY: crossbuild
-crossbuild: ## Build the exported library for windows — ach imports it and ships there.
+crossbuild: ## Build the portable half for windows — ach imports it and ships there.
 	$(call in_container,_crossbuild)
 _crossbuild:
 	GOOS=windows GOARCH=amd64 go build ./pkg/...
 	GOOS=darwin  GOARCH=arm64 go build ./pkg/...
+	# internal/run is portable too, and it is the one package where that is a
+	# CLAIM rather than a convenience: handoff_windows.go is the spawn path a
+	# windows ap would take, and vet is what stops it rotting while unshipped.
+	GOOS=windows GOARCH=amd64 go vet ./internal/run/
+	GOOS=windows GOARCH=amd64 go vet ./pkg/...
 
 .PHONY: secrets
 secrets: ## Scan the full git history for secrets.

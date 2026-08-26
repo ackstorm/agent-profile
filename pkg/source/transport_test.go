@@ -76,3 +76,21 @@ func TestSameEndpointComparesHostAndEffectivePort(t *testing.T) {
 		}
 	}
 }
+
+// SameEndpoint is currently unused: §21.2 was removed with the cross-repo
+// second hop it guarded (v0.6.3, same-repo catalogues only). The tests stay,
+// and so does the function.
+//
+// Keeping tested code that answers a question we will ask again is cheaper than
+// rewriting it, and a guard rebuilt from memory under time pressure is how the
+// subdomain case gets missed the second time. This test exists so the package
+// does not look like it has dead weight nobody thought about.
+func TestSameEndpointIsKeptForTheCrossRepoTrigger(t *testing.T) {
+	same, err := SameEndpoint("https://gl.acme.internal/a.git", "https://evil.gl.acme.internal/b.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same {
+		t.Error("the guard no longer rejects a subdomain; it is the case it exists for")
+	}
+}

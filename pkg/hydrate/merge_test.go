@@ -215,3 +215,15 @@ func TestANonMappingAtAContainerKeyIsReplacedAndRecordedWhole(t *testing.T) {
 		t.Errorf("keys = %v, want %v", keys, want)
 	}
 }
+
+func dump(v any) string {
+	out, _ := json.MarshalIndent(v, "", "  ")
+	return string(out)
+}
+
+func assertDeepEqual(t *testing.T, got, want any) {
+	t.Helper()
+	if g, w := dump(got), dump(want); g != w {
+		t.Errorf("document differs:\ngot:\n%s\nwant:\n%s", g, w)
+	}
+}

@@ -78,10 +78,9 @@ func Apply(ctx context.Context, p Plan) (Result, error) {
 	if err := applyMCPs(p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
-	if err := applyModelEnv(p, ledger, &res, stamp); err != nil {
+	if err := applyModel(p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
-	recordDefinitions(p, ledger, stamp)
 	warnDisabledButMaterialized(p, ledger, &res)
 
 	if err := ledger.Save(p.Root); err != nil {
@@ -204,41 +203,57 @@ func applyMCPs(p Plan, l *Ledger, res *Result, stamp string) error {
 	return nil
 }
 
-// applyModelEnv writes the profile-local env file the launcher exports.
+// applyModel merges §9's model block into the runtime's own configuration
+// file, alongside the MCP servers, and records the dotted keys it contributed.
 //
-// §9 and §15.1 describe VARIABLES, not files: there is no configuration key to
-// merge a base URL and a credential reference into. Apply and launch are
-// separate invocations, so something has to hold the answer between them, and
-// the profile is the only place that survives both — a manifest is an input and
-// may be thrown away.
-//
-// Nothing is written when there is nothing to write: an absent model with no
-// runtime environment is the subscription case, and creating an empty file
-// there would make every profile look configured.
-func applyModelEnv(p Plan, l *Ledger, res *Result, stamp string) error {
-	env, notices, err := ModelEnv(p.Adapter.Name(), p.Profile, bindingVars(p.Profile))
+// It is a FILE, not an environment the launcher carries. An earlier draft used
+// a profile-local env file that only `ap run` read, which silently lost the
+// whole model block in the topology it most needed to work in: an init
+// container hydrates, the main container execs the runtime directly, and
+// nothing reads the launcher's environment.
+func applyModel(p Plan, l *Ledger, res *Result, stamp string) error {
+	if p.Profile.Model == nil {
+		// Absent model means native defaults AND native credentials — the
+		// subscription case. Writing anything would break it.
+		return nil
+	}
+	target, block, err := ModelConfig(p.Adapter.Name(), *p.Profile.Model, bindingVars(p.Profile))
+	if errors.Is(err, errNoModelTarget) {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"runtime %q has no measured model destination; skipping the model block",
+			p.Adapter.Name()))
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	res.Warnings = append(res.Warnings, notices...)
-	if len(env) == 0 {
+	if len(block) == 0 {
 		return nil
 	}
-	path := filepath.Join(p.Root, EnvFile)
-	body := FormatEnvFile(env)
-	op := "create"
-	if _, err := os.Stat(path); err == nil {
-		op = "overwrite"
+
+	// §15's runtime environment shares claude's destination with model, so
+	// §15.1's precedence is a property of ONE merge rather than of two
+	// mechanisms that might disagree about who ran last.
+	if envTarget, ok := RuntimeEnvTarget(p.Adapter.Name()); ok && envTarget == target {
+		merged, notices := MergeRuntimeEnv(block, p.Profile.Runtimes[p.Adapter.Name()].Environment)
+		block = merged
+		res.Warnings = append(res.Warnings, notices...)
 	}
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+
+	path := filepath.Join(p.Root, target.File)
+	keys, err := MergeInto(path, map[string]any{target.Block: block})
+	if err != nil {
+		return fmt.Errorf("model: %w", err)
+	}
+	hash, err := hashFile(path)
+	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(body)
-	res.Changes = append(res.Changes, Change{Path: EnvFile, Op: op})
 	l.Put(ResourceRec{
-		Name: "model", Kind: "environment", InstalledAt: stamp,
-		Files: []FileRec{{RelPath: EnvFile, Hash: hex.EncodeToString(sum[:])}},
+		Name: "model", Kind: "model", InstalledAt: stamp,
+		Files: []FileRec{{RelPath: filepath.ToSlash(target.File), Hash: hash, Merge: "deep", Keys: keys}},
 	})
+	res.Changes = append(res.Changes, Change{Path: filepath.Join(target.File, target.Block), Op: "merge"})
 	return nil
 }
 
@@ -275,29 +290,6 @@ func hashFile(path string) (string, error) {
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:]), nil
-}
-
-// recordDefinitions fills the ledger's second arm. A marketplace writes no file
-// into the root, so without this it would vanish with the manifest that
-// declared it — and a manifest is an input that is not kept (F3).
-func recordDefinitions(p Plan, l *Ledger, _ string) {
-	for _, name := range sortedKeys(p.Profile.Marketplaces) {
-		m := p.Profile.Marketplaces[name]
-		if !m.Enabled {
-			continue
-		}
-		d := DefinitionRec{Name: name, Kind: "marketplace", Source: m.Source}
-		if f, ok := p.Fetched["marketplace "+name]; ok {
-			d.ResolvedRef = f.ResolvedRef
-			d.AuthScheme = string(f.SchemeUsed)
-		}
-		// The binding NAME only. §34 forbids persisting the value, and there
-		// is no field for one.
-		if m.Source != nil && m.Source.Git != nil && m.Source.Git.Auth != nil {
-			d.AuthBinding = m.Source.Git.Auth.ValueFrom.Secret
-		}
-		l.PutDefinition(d)
-	}
 }
 
 // warnDisabledButMaterialized is §4, and v0.6.1 made the detection

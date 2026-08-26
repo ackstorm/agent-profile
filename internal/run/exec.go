@@ -1,18 +1,17 @@
-//go:build unix
-
 package run
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 
 	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
-// Exec replaces the current process with the agent binary, so the agent owns
-// the TTY and signals directly. It does not return on success.
+// Exec hands the agent binary the terminal. On unix it REPLACES this process,
+// so the agent owns the TTY and signals directly and this call does not return.
+// On Windows it spawns and proxies the exit code — see exec_windows.go for what
+// that costs.
 func Exec(a agentreg.Agent, dir string, args []string) error {
 	return ExecBin(a, dir, a.Bin, args)
 }
@@ -30,5 +29,5 @@ func ExecBin(a agentreg.Agent, dir, bin string, args []string) error {
 		return fmt.Errorf("cannot find %q on PATH: %w", bin, err)
 	}
 	argv := append([]string{bin}, args...)
-	return syscall.Exec(path, argv, Env(a, dir, os.Environ()))
+	return handOff(path, argv, Env(a, dir, os.Environ()))
 }

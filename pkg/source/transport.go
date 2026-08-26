@@ -41,8 +41,14 @@ func CheckCredentialTransport(rawURL string) error {
 	return nil
 }
 
-// SameEndpoint reports whether two URLs name the same host AND effective port
-// (§21.2, tightened in v0.6.1). The effective port is the explicit one or the
+// SameEndpoint reports whether two URLs name the same host AND effective port.
+//
+// CURRENTLY UNUSED, and deliberately kept. It was §21.2's guard, and §21.2 was
+// removed in v0.6.3 along with the thing it guarded: a marketplace entry may
+// only name a source INSIDE its own repository, so there is no cross-host
+// second hop for a credential to reach. The guard is day-one machinery for the
+// moment that trigger fires — cross-repo catalogue entries — and tested code
+// that answers a question we will ask again is cheaper to keep than to rewrite. The effective port is the explicit one or the
 // scheme's default, so https://h and https://h:443 are one endpoint — while a
 // different port on the same host may be an entirely different service, and
 // does not inherit the credential.

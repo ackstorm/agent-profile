@@ -2,13 +2,11 @@
 package run
 
 import (
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/ackstorm/agent-profile/pkg/agentreg"
-	"github.com/ackstorm/agent-profile/pkg/hydrate"
 )
 
 // ConfigDir is the value a.ConfigEnv is set to: the profile itself, or the
@@ -60,17 +58,6 @@ func Env(a agentreg.Agent, dir string, base []string) []string {
 		for k, v := range shimEnv(a, dir) {
 			overrides[k] = v
 		}
-		// §9 and §15.1's derived environment, written by apply. It is read
-		// here rather than recomputed because a manifest is an INPUT and may
-		// be gone by launch time — the profile is the only thing that survives
-		// both invocations.
-		//
-		// A profile with a model block therefore requires launching through
-		// ap, the same class of consequence §34 states for file-sourced
-		// secrets. Invoking the agent's own CLI reads none of this.
-		for k, v := range profileEnvFile(dir) {
-			overrides[k] = v
-		}
 	}
 
 	out := make([]string, 0, len(base)+len(overrides))
@@ -100,19 +87,4 @@ func Env(a agentreg.Agent, dir string, base []string) []string {
 		out = append(out, k+"="+overrides[k])
 	}
 	return out
-}
-
-// profileEnvFile reads the environment apply derived into the profile.
-//
-// A missing or unreadable file is not an error: most profiles declare no model
-// and have none, and a profile the user has been poking at should still
-// launch. Whatever it holds is applied as an override, so it loses to nothing
-// except a later shim entry — which is correct, since a shim variable is what
-// makes the profile a profile.
-func profileEnvFile(dir string) map[string]string {
-	body, err := os.ReadFile(filepath.Join(dir, hydrate.EnvFile))
-	if err != nil {
-		return nil
-	}
-	return hydrate.ParseEnvFile(body)
 }

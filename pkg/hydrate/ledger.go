@@ -52,34 +52,22 @@ type ResourceRec struct {
 	Files       []FileRec      `json:"files"`
 }
 
-// DefinitionRec is a resolved definition that materializes NO file: the second
-// arm.
+// There is deliberately NO second arm.
 //
-// It is not optional, and the reason is the interaction between two other rules
-// (F3). A manifest is an INPUT and is not kept (§1.1). A marketplace declared in
-// one writes no file into the root. So a file-only ledger loses the marketplace
-// the moment the manifest is gone, and a later single-capability install of
-// <item>@<that-marketplace> would have nothing to resolve the name against.
+// One was designed — resolved marketplace definitions, so an ad-hoc
+// `ap install claude:plan skill xlsx@anthropic-skills` could resolve the
+// marketplace name a week after the manifest that declared it was thrown away.
+// It is out of v1 with the thing that needed it: install requires a manifest or
+// a direct source, and a ref is only ever resolved inside the manifest that
+// declares its marketplace. Reintroduction trigger: ad-hoc install by ref.
 //
-// AuthBinding is the binding's NAME. There is deliberately no field for a
-// value: ach-cli stores tokens in a credentials.json at 0600, and §34 forbids
-// that — a resolution-time consumer "MUST NOT persist it". The cost is stated
-// rather than discovered: the variable must be present in the environment on
-// every run, where a tool that stores the token asks once.
-type DefinitionRec struct {
-	Name        string         `json:"name"`
-	Kind        string         `json:"kind"`
-	Source      *schema.Source `json:"source,omitempty"`
-	ResolvedRef string         `json:"resolvedRef,omitempty"`
-	AuthScheme  string         `json:"authScheme,omitempty"`
-	AuthBinding string         `json:"authBinding,omitempty"`
-}
+// A marketplace therefore records nothing here — it materializes no file, and
+// the manifest is where its definition lives.
 
 // Ledger is per root, and it is the ONLY state (§33.1).
 type Ledger struct {
-	Version     int             `json:"version"`
-	Resources   []ResourceRec   `json:"resources"`
-	Definitions []DefinitionRec `json:"definitions"`
+	Version   int           `json:"version"`
+	Resources []ResourceRec `json:"resources"`
 }
 
 // LoadLedger reads a root's ledger. An absent one is an EMPTY ledger, not an
@@ -169,15 +157,4 @@ func (l *Ledger) Put(r ResourceRec) {
 		}
 	}
 	l.Resources = append(l.Resources, r)
-}
-
-// PutDefinition is Put for the second arm.
-func (l *Ledger) PutDefinition(d DefinitionRec) {
-	for i, existing := range l.Definitions {
-		if existing.Kind == d.Kind && existing.Name == d.Name {
-			l.Definitions[i] = d
-			return
-		}
-	}
-	l.Definitions = append(l.Definitions, d)
 }
