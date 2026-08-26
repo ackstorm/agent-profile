@@ -2,7 +2,7 @@ package pkg_test
 
 import (
 	"go/build"
-	"os"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,30 +17,43 @@ func TestPkgNeverImportsInternal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, err := filepath.Glob(filepath.Join(root, "pkg", "*"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The glob also matches this file's own siblings (boundary_test.go itself
-	// among them) — only directories are packages.
-	var pkgs []string
-	for _, e := range entries {
-		if fi, err := os.Stat(e); err == nil && fi.IsDir() {
-			pkgs = append(pkgs, e)
+	pkgRoot := filepath.Join(root, "pkg")
+
+	var found int
+	err = filepath.WalkDir(pkgRoot, func(dir string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	if len(pkgs) == 0 {
-		t.Fatal("no packages under pkg/")
-	}
-	for _, dir := range pkgs {
+		if !d.IsDir() {
+			return nil
+		}
 		p, err := build.ImportDir(dir, 0)
 		if err != nil {
-			t.Fatalf("%s: %v", dir, err)
+			// A directory with no .go files (or only files excluded by build
+			// constraints) is not a package — walk past it rather than fail.
+			if _, ok := err.(*build.NoGoError); ok {
+				return nil
+			}
+			return err
 		}
-		for _, imp := range append(p.Imports, p.TestImports...) {
+		found++
+		imports := p.Imports
+		imports = append(imports, p.TestImports...)
+		// XTestImports covers external test files (package foo_test), which
+		// Imports/TestImports do not. A guard that skips it can be defeated by
+		// a single agentreg_test.go importing internal/ — proven by mutation.
+		imports = append(imports, p.XTestImports...)
+		for _, imp := range imports {
 			if strings.Contains(imp, "/internal/") {
 				t.Errorf("%s imports %s; pkg/ must not import internal/", dir, imp)
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == 0 {
+		t.Fatal("no packages under pkg/")
 	}
 }
