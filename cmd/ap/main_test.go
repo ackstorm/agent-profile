@@ -255,25 +255,15 @@ func TestDispatchApplyRejectsBothAPathAndManifestFlag(t *testing.T) {
 	}
 }
 
-func TestDispatchSchemaPrintsJSON(t *testing.T) {
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	err = dispatch([]string{"schema"})
-	_ = w.Close()
-	os.Stdout = old
-	if err != nil {
-		t.Fatalf("schema: %v", err)
-	}
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !json.Valid(out) {
-		t.Errorf("ap schema did not print valid JSON: %s", out)
+// The manifest's shape has exactly one machine-readable description: the
+// decoder in pkg/schema, reachable as `ap manifest render`'s exit status. A
+// JSON Schema document was built and removed — a second, hand-written
+// description of the same contract that nothing forces to agree with the
+// first. This test fails if the command comes back without that decision
+// being revisited.
+func TestDispatchHasNoSchemaCommand(t *testing.T) {
+	if err := dispatch([]string{"schema"}); err == nil {
+		t.Error("`ap schema` dispatches; the JSON Schema emitter is out of v1 (SPEC §38)")
 	}
 }
 

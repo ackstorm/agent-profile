@@ -125,17 +125,3 @@ func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resol
 	_, err := io.WriteString(w, b.String())
 	return err
 }
-
-// cmdSchema prints the manifest's JSON Schema and exits 0. No flags: the
-// schema does not vary by argument.
-func cmdSchema(args []string) error {
-	fs := flagSet("schema")
-	if stop, err := parse(fs, args); stop {
-		return err
-	}
-	if extra := fs.Args(); len(extra) > 0 {
-		return fmt.Errorf("unexpected argument %q\nusage: ap schema", extra[0])
-	}
-	_, err := os.Stdout.Write(schema.JSONSchema())
-	return err
-}

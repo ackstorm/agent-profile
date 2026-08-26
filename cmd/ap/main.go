@@ -43,7 +43,6 @@ Commands:
   render    Print a declarative manifest's effective profile for one runtime
   validate  Check that a declarative manifest composes for every target
   apply     Run the resolution phase; --dry-run to print it and touch nothing
-  schema    Print the declarative manifest's JSON Schema
   delete    Delete a profile and its wrapper, asking first
   unlink    Remove the wrapper, keep the profile
   link      Write the wrapper back
@@ -325,19 +324,6 @@ Examples:
   ach export | ap apply --manifest - --target claude --dry-run
 `,
 
-	"schema": `ap schema - print the declarative manifest's JSON Schema
-
-Usage:
-  ap schema
-
-Prints the manifest's JSON Schema (draft 2020-12) to stdout, so a consumer in
-another language can validate a manifest it authored without reimplementing
-these rules.
-
-Examples:
-  ap schema > manifest.schema.json
-`,
-
 	"env": `ap env - print the environment override, or run a command under it
 
 Usage:
@@ -464,7 +450,6 @@ var commandTable = map[string]func([]string) error{
 	"render":   func(a []string) error { return cmdRenderOrValidate("render", a) },
 	"validate": func(a []string) error { return cmdRenderOrValidate("validate", a) },
 	"apply":    cmdApply,
-	"schema":   cmdSchema,
 	"delete":   cmdDelete, "rm": cmdDelete,
 	"link":    cmdLink,
 	"unlink":  cmdUnlink,
