@@ -440,45 +440,45 @@ func dispatch(args []string) error {
 		fmt.Print(helpFor(args[0]))
 		return nil
 	}
-	switch args[0] {
-	case "list", "ls":
-		return cmdList(args[1:])
-	case "sessions":
-		return cmdSessions(args[1:])
-	case "resume":
-		return cmdResume(args[1:])
-	case "create":
-		return cmdCreate(args[1:])
-	case "sync":
-		return cmdSync(args[1:])
-	case "variant":
-		return cmdVariant(args[1:])
-	case "which":
-		return cmdWhich(args[1:])
-	case "env":
-		return cmdEnv(args[1:])
-	case "run":
-		return cmdRun(args[1:])
-	case "render", "validate":
-		return cmdRenderOrValidate(args[0], args[1:])
-	case "apply":
-		return cmdApply(args[1:])
-	case "schema":
-		return cmdSchema(args[1:])
-	case "delete", "rm":
-		return cmdDelete(args[1:])
-	case "link":
-		return cmdLink(args[1:])
-	case "unlink":
-		return cmdUnlink(args[1:])
-	case "version", "--version", "-v":
-		return cmdVersion(args[1:])
-	case "help", "-h", "--help":
-		fmt.Print(usage)
-		return nil
-	default:
+	fn, ok := commandTable[args[0]]
+	if !ok {
 		return fmt.Errorf("unknown command %q (try `ap help`)", args[0])
 	}
+	return fn(args[1:])
+}
+
+// commandTable is dispatch's {name, fn} table. A switch with this many
+// commands crossed gocyclo's limit on branch count alone, with no branch
+// doing anything a table entry doesn't say more plainly; this replaces it
+// one for one; no command's behavior changes.
+var commandTable = map[string]func([]string) error{
+	"list": cmdList, "ls": cmdList,
+	"sessions": cmdSessions,
+	"resume":   cmdResume,
+	"create":   cmdCreate,
+	"sync":     cmdSync,
+	"variant":  cmdVariant,
+	"which":    cmdWhich,
+	"env":      cmdEnv,
+	"run":      cmdRun,
+	"render":   func(a []string) error { return cmdRenderOrValidate("render", a) },
+	"validate": func(a []string) error { return cmdRenderOrValidate("validate", a) },
+	"apply":    cmdApply,
+	"schema":   cmdSchema,
+	"delete":   cmdDelete, "rm": cmdDelete,
+	"link":    cmdLink,
+	"unlink":  cmdUnlink,
+	"version": cmdVersion, "--version": cmdVersion, "-v": cmdVersion,
+	"help": cmdUsage, "-h": cmdUsage, "--help": cmdUsage,
+}
+
+// cmdUsage is "help"/"-h"/"--help" as a commandTable entry: print the top-level
+// usage and stop, taking no arguments. dispatch already special-cases "-h"/
+// "--help" as the FIRST argument for run/env's passthrough commands above, so
+// this is only ever reached for "ap help" and the bare top-level flags.
+func cmdUsage([]string) error {
+	fmt.Print(usage)
+	return nil
 }
 
 // flagSet builds a FlagSet that stays quiet: ContinueOnError otherwise writes the

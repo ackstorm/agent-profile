@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ackstorm/agent-profile/pkg/schema"
 )
@@ -74,8 +75,7 @@ func cmdApply(args []string) error {
 		return fmt.Errorf("materialization is Phase 4 and does not exist yet; rerun with --dry-run")
 	}
 
-	printResolution(os.Stdout, res, resolved)
-	return nil
+	return printResolution(os.Stdout, res, resolved)
 }
 
 // manifestPath resolves --manifest's value to a real file path. "-" reads
@@ -108,19 +108,22 @@ func manifestPath(v string) (path string, cleanup func(), err error) {
 // String method redacts, so even printing the value itself here could not
 // leak one), and every degradation warning. Nothing below reads a resolved
 // value.
-func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resolved) {
-	fmt.Fprintln(w, "dry run: the resolution phase only — nothing is fetched (source fetching is Phase 3)")
-	fmt.Fprintf(w, "profile %q for %s\n", res.Profile.Name, res.Runtime)
+func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resolved) error {
+	var b strings.Builder
+	fmt.Fprintln(&b, "dry run: the resolution phase only — nothing is fetched (source fetching is Phase 3)")
+	fmt.Fprintf(&b, "profile %q for %s\n", res.Profile.Name, res.Runtime)
 	if len(res.Refs) == 0 {
-		fmt.Fprintln(w, "no inputs required")
+		fmt.Fprintln(&b, "no inputs required")
 	}
 	for _, r := range res.Refs {
-		fmt.Fprintf(w, "  %s references %s %q\n", r.Resource, r.Kind, r.Name)
+		fmt.Fprintf(&b, "  %s references %s %q\n", r.Resource, r.Kind, r.Name)
 	}
 	for _, warn := range res.Warnings {
-		fmt.Fprintln(w, "warning:", warn.Text)
+		fmt.Fprintln(&b, "warning:", warn.Text)
 	}
-	fmt.Fprintln(w, resolved)
+	fmt.Fprintln(&b, resolved)
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // cmdSchema prints the manifest's JSON Schema and exits 0. No flags: the
