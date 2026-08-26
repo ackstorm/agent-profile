@@ -149,3 +149,324 @@ func TestSubpathAndDestinationMayNotEscapeTheirRoot(t *testing.T) {
 		}
 	}
 }
+
+// The six tests below cover validation rules the reviewer found implemented
+// but untested: right today, but nothing shipped would catch a regression.
+// Each case asserts the error names the offending path, not merely that an
+// error occurred.
+
+func TestDecodeEnforcesModelAuthTypeIsBearer(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			"unsupported type refused",
+			"version: \"1\"\nname: x\nmodel:\n  auth:\n    type: basic\n    value_from:\n      variable: TOK\n",
+			"model.auth.type",
+		},
+		{
+			"bearer accepted",
+			"version: \"1\"\nname: x\nmodel:\n  auth:\n    type: bearer\n    value_from:\n      variable: TOK\n",
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, err := ParseYAML([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Decode(n)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v; want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v; want it to name %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestDecodeEnforcesTransportRequiredAndForbiddenFields(t *testing.T) {
+	base := "version: \"1\"\nname: x\nmcps:\n  m:\n    transport:\n"
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			"unknown type refused",
+			base + "      type: websocket\n",
+			"mcps.m.transport.type",
+		},
+		{
+			"http requires url",
+			base + "      type: http\n",
+			"url is required",
+		},
+		{
+			"http forbids command",
+			base + "      type: http\n      url: https://e/mcp\n      command: foo\n",
+			"command/args are not valid",
+		},
+		{
+			"http forbids args",
+			base + "      type: http\n      url: https://e/mcp\n      args:\n        - --flag\n",
+			"command/args are not valid",
+		},
+		{
+			"http accepted with url",
+			base + "      type: http\n      url: https://e/mcp\n",
+			"",
+		},
+		{
+			"stdio requires command",
+			base + "      type: stdio\n",
+			"command is required",
+		},
+		{
+			"stdio forbids url",
+			base + "      type: stdio\n      command: foo\n      url: https://e/mcp\n",
+			"url/headers are not valid",
+		},
+		{
+			"stdio forbids headers",
+			base + "      type: stdio\n      command: foo\n      headers:\n        X:\n          value: v\n",
+			"url/headers are not valid",
+		},
+		{
+			"stdio accepted with command",
+			base + "      type: stdio\n      command: foo\n",
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, err := ParseYAML([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Decode(n)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v; want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v; want it to name %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestDecodeEnforcesMarketplaceTypeAndSource(t *testing.T) {
+	base := "version: \"1\"\nname: x\nmarketplaces:\n  m:\n"
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			"unknown type refused",
+			base + "    type: registries\n    source:\n      local:\n        path: ./p\n",
+			"marketplaces.m.type",
+		},
+		{
+			"missing source refused",
+			base + "    type: plugins\n",
+			"marketplaces.m: source is required",
+		},
+		{
+			"plugins with source accepted",
+			base + "    type: plugins\n    source:\n      local:\n        path: ./p\n",
+			"",
+		},
+		{
+			"skills with source accepted",
+			base + "    type: skills\n    source:\n      local:\n        path: ./p\n",
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, err := ParseYAML([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Decode(n)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v; want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v; want it to name %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestDecodeEnforcesInputsBindingExactlyOneOfEnvFile(t *testing.T) {
+	base := "version: \"1\"\nname: x\ninputs:\n  variables:\n    v:\n"
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			"env accepted",
+			base + "      env: FOO\n",
+			"",
+		},
+		{
+			"file accepted",
+			base + "      file: ./foo\n",
+			"",
+		},
+		{
+			"both refused",
+			base + "      env: FOO\n      file: ./foo\n",
+			"inputs.variables.v: both env and file set",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, err := ParseYAML([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Decode(n)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v; want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v; want it to name %q", err, c.wantErr)
+			}
+		})
+	}
+	// "Neither env nor file" needs a zero-key mapping, which this restricted
+	// YAML has no literal syntax for ({} is a rejected flow mapping) — the
+	// same reason the union-branch tests above go through Merge instead of a
+	// single parsed document.
+	t.Run("neither refused", func(t *testing.T) {
+		b, err := ParseYAML([]byte(base + "      env: FOO\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o, err := ParseYAML([]byte("inputs:\n  variables:\n    v:\n      env: null\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		merged, err := Merge(b, o, V1Schema())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(merged); err == nil || !strings.Contains(err.Error(), "inputs.variables.v: neither env nor file") {
+			t.Errorf("err = %v; want it to name inputs.variables.v and say neither env nor file", err)
+		}
+	})
+}
+
+func TestDecodeEnforcesTargetsNameKnownAgents(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			"unknown agent refused",
+			"version: \"1\"\nname: x\ntargets:\n  - nonesuch\n",
+			"targets: unknown agent \"nonesuch\"",
+		},
+		{
+			"known agent accepted",
+			"version: \"1\"\nname: x\ntargets:\n  - claude\n",
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, err := ParseYAML([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Decode(n)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v; want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v; want it to name %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestDecodeEnforcesVersionAndNameRules(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			"missing version refused",
+			"name: x\n",
+			"version is required",
+		},
+		{
+			"unsupported version refused",
+			"version: \"2\"\nname: x\n",
+			"version 2",
+		},
+		{
+			"missing name refused",
+			"version: \"1\"\n",
+			"name is required",
+		},
+		{
+			"invalid name refused",
+			"version: \"1\"\nname: ../escape\n",
+			"name",
+		},
+		{
+			"the default sentinel bypasses ValidName",
+			"version: \"1\"\nname: default\n",
+			"",
+		},
+		{
+			"an ordinary valid name is accepted",
+			"version: \"1\"\nname: work\n",
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n, err := ParseYAML([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Decode(n)
+			if c.wantErr == "" {
+				if err != nil {
+					t.Errorf("err = %v; want no error", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("err = %v; want it to name %q", err, c.wantErr)
+			}
+		})
+	}
+}
