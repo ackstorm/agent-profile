@@ -46,6 +46,18 @@ func TestDispatchUnknownCommand(t *testing.T) {
 	}
 }
 
+// render has no passthrough, so it uses parseAroundRef — the same reason
+// create does. A missing --target must be an error, never a guess.
+func TestDispatchRenderRequiresATarget(t *testing.T) {
+	err := dispatch([]string{"render", "./p.yaml"})
+	if err == nil {
+		t.Fatal("render without --target succeeded")
+	}
+	if !strings.Contains(err.Error(), "--target") {
+		t.Errorf("error %q does not name --target", err)
+	}
+}
+
 // The listing prints the id, because the id is what `ap resume` takes. A row
 // whose only handle is its position would make `ap resume 2` resolve against a
 // list that no longer exists.

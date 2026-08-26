@@ -40,6 +40,8 @@ Commands:
   which     Print the profile directory
   env       Print the environment override, or run a command under it
   run       Run the agent with that profile
+  render    Print a declarative manifest's effective profile for one runtime
+  validate  Check that a declarative manifest composes for every target
   delete    Delete a profile and its wrapper, asking first
   unlink    Remove the wrapper, keep the profile
   link      Write the wrapper back
@@ -263,6 +265,37 @@ Examples:
   ap run opencode:review --model anthropic/claude-sonnet-4-5
 `,
 
+	"render": `ap render - print a declarative manifest's effective profile for one runtime
+
+Usage:
+  ap render <manifest.yaml> --target <runtime>
+
+Loads the manifest, folds its extends chain, selects the runtime and prints
+the result: two-space indent, collection keys sorted, secrets shown by their
+binding name only — never a resolved value, which this composes without ever
+reading. Nothing is materialized and no root is touched.
+
+Flags:
+  --target   the runtime to compose for (required)
+
+Examples:
+  ap render ./profile.yaml --target claude
+`,
+
+	"validate": `ap validate - check that a declarative manifest composes for every target
+
+Usage:
+  ap validate <manifest.yaml>
+
+Runs the same composition as render, once per target the manifest declares,
+and prints nothing on success. A manifest that composes for one target and not
+another is broken, and this is how a producer hears that in one call. Exit 0
+on success, 1 on the first error; warnings go to stderr.
+
+Examples:
+  ap validate ./profile.yaml
+`,
+
 	"env": `ap env - print the environment override, or run a command under it
 
 Usage:
@@ -384,6 +417,8 @@ func dispatch(args []string) error {
 		return cmdEnv(args[1:])
 	case "run":
 		return cmdRun(args[1:])
+	case "render", "validate":
+		return cmdRenderOrValidate(args[0], args[1:])
 	case "delete", "rm":
 		return cmdDelete(args[1:])
 	case "link":
