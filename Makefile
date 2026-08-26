@@ -59,7 +59,9 @@ AP_IN_DEVTOOLS ?= 0
 # BIN is forwarded for `smoke`, which builds a linux binary into a path of its
 # own rather than clobbering ./ap — on macOS that would leave a ./ap the host
 # cannot execute. Everywhere else it is the default and forwarding it is a no-op.
-FORWARD = VERSION='$(VERSION)' COMMIT='$(COMMIT)' DATE='$(DATE)' GOOS='$(GOOS)' GOARCH='$(GOARCH)' BIN='$(BIN)'
+FUZZTIME ?= 30s
+
+FORWARD = FUZZTIME='$(FUZZTIME)' VERSION='$(VERSION)' COMMIT='$(COMMIT)' DATE='$(DATE)' GOOS='$(GOOS)' GOARCH='$(GOARCH)' BIN='$(BIN)'
 
 define in_container
 	@if [ "$(AP_IN_DEVTOOLS)" = "1" ]; then \
@@ -71,7 +73,7 @@ endef
 
 # The private in-container halves. Declared phony so a stray file named after
 # one of them can never make a gate silently no-op.
-.PHONY: _build _snapshot _test _test-one _test-verbose _cover _fuzz _fmt _fmt-check _vet \
+.PHONY: _build _snapshot _quick _test _test-one _test-verbose _cover _fuzz _fmt _fmt-check _vet \
 	_lint _lint-fix _vulncheck _crossbuild _secrets _shellcheck _release-publish _verify
 
 ##@ General
@@ -209,6 +211,13 @@ test: ## Run all tests with race detection and shuffling.
 _test:
 	go test -race -shuffle=on -count=1 -coverprofile coverage.out ./...
 
+.PHONY: quick
+quick: ## Inner-loop gate: vet + tests, no race, no coverage. Use `verify` before done.
+	$(call in_container,_quick)
+_quick:
+	go vet ./...
+	go test -count=1 $(if $(P),$(P),./...)
+
 .PHONY: test-one
 test-one: ## Run one test or package. make test-one T=TestName P=./internal/foo/
 	$(call in_container,_test-one T='$(T)' P='$(P)')
@@ -231,12 +240,12 @@ _cover: _test
 fuzz: ## Fuzz the path-validation and manifest-parsing surfaces, 30s each (the traversal-bug lesson).
 	$(call in_container,_fuzz)
 _fuzz:
-	go test -run '^$$' -fuzz FuzzValidName -fuzztime 30s ./internal/profile/
-	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime 30s ./internal/profile/
-	go test -run '^$$' -fuzz FuzzParse -fuzztime 30s ./internal/manifest/
-	go test -run '^$$' -fuzz FuzzParseYAML -fuzztime 30s ./pkg/schema/
-	go test -run '^$$' -fuzz FuzzResolveExtends -fuzztime 30s ./pkg/schema/
-	go test -run '^$$' -fuzz FuzzValidRelPath -fuzztime 30s ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzValidName -fuzztime $(FUZZTIME) ./internal/profile/
+	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime $(FUZZTIME) ./internal/profile/
+	go test -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME) ./internal/manifest/
+	go test -run '^$$' -fuzz FuzzParseYAML -fuzztime $(FUZZTIME) ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzResolveExtends -fuzztime $(FUZZTIME) ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzValidRelPath -fuzztime $(FUZZTIME) ./pkg/schema/
 
 # The agents run in their own image, not on your machine. That image is where the
 # four real binaries live, so this target needs none of them installed on the
