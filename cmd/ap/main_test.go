@@ -47,27 +47,96 @@ func TestDispatchUnknownCommand(t *testing.T) {
 	}
 }
 
-// render has no passthrough, so it uses parseAroundRef — the same reason
-// create does. A missing --target must be an error, never a guess.
-func TestDispatchRenderRequiresATarget(t *testing.T) {
-	err := dispatch([]string{"render", "./p.yaml"})
-	if err == nil {
-		t.Fatal("render without --target succeeded")
+// The manifest operations live under one group verb, and the bare verbs are
+// gone. `ap manifest render` is the contract check other repositories call, so
+// its spelling is an interface, not a preference.
+func TestDispatchManifestRendersEveryTargetWithoutOne(t *testing.T) {
+	dir := t.TempDir()
+	ok := filepath.Join(dir, "ok.yaml")
+	if err := os.WriteFile(ok, []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n  - codex\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "--target") {
-		t.Errorf("error %q does not name --target", err)
+
+	// No --target: compose every declared target and print nothing. The exit
+	// status is the whole answer.
+	if err := dispatch([]string{"manifest", "render", ok}); err != nil {
+		t.Errorf("manifest render without --target: %v", err)
+	}
+	if err := dispatch([]string{"manifest", "render", ok, "--target", "claude"}); err != nil {
+		t.Errorf("manifest render --target claude: %v", err)
+	}
+
+	// The bare verbs must not dispatch. `validate` was folded into render's
+	// no-target mode rather than kept as a second name for one pipeline.
+	for _, bare := range []string{"render", "validate", "apply"} {
+		if err := dispatch([]string{bare, ok}); err == nil {
+			t.Errorf("bare `ap %s` still dispatches; it must be under `ap manifest`", bare)
+		}
 	}
 }
 
-// apply has no passthrough either, and no positional-required requirement
-// changes that: a missing --target must still be an error.
-func TestDispatchApplyRequiresATarget(t *testing.T) {
-	err := dispatch([]string{"apply", "./p.yaml", "--dry-run"})
-	if err == nil {
-		t.Fatal("apply without --target succeeded")
+// A manifest that composes for one target and not another is broken, and the
+// no-target mode is what makes a producer hear that in a single call. Without
+// this, the mode could be composing only the first target and nothing would
+// say so.
+//
+// The proof is §7.2's warning, which Effective emits once per composition: a
+// manifest targeting claude and codex while declaring runtimes.opencode must
+// produce that warning twice, tagged with each target. A stronger-looking test
+// built on a validation error would prove less — most validation happens in
+// Decode, which runs before a runtime is chosen, so such a manifest fails for
+// every target including the first and the loop could still be broken.
+func TestDispatchManifestRenderComposesEveryTargetNotJustTheFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	body := "version: \"1\"\nname: p\ntargets:\n  - claude\n  - codex\n" +
+		"runtimes:\n  opencode:\n    environment:\n      X: \"1\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "--target") {
-		t.Errorf("error %q does not name --target", err)
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	dispatchErr := dispatch([]string{"manifest", "render", path})
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	stderr, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatchErr != nil {
+		t.Fatalf("manifest render: %v\nstderr:\n%s", dispatchErr, stderr)
+	}
+	for _, target := range []string{"claude", "codex"} {
+		if !strings.Contains(string(stderr), "warning: "+target+": ") {
+			t.Errorf("target %q was never composed; stderr:\n%s", target, stderr)
+		}
+	}
+}
+
+// apply takes a REFERENCE, not --target: the reference already names the agent
+// and the root. A bare manifest path with no reference is a usage error, never
+// a guess at which agent was meant.
+func TestDispatchManifestApplyRequiresAReference(t *testing.T) {
+	err := dispatch([]string{"manifest", "apply", "--dry-run"})
+	if err == nil {
+		t.Fatal("manifest apply with no reference succeeded")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q is not a usage error", err)
+	}
+	// A variant is a set of launch arguments over a profile, not a root.
+	err = dispatch([]string{"manifest", "apply", "claude:plan:brainstorm", "./p.yaml", "--dry-run"})
+	if err == nil {
+		t.Fatal("manifest apply accepted a variant reference")
+	}
+	if !strings.Contains(err.Error(), "brainstorm") {
+		t.Errorf("error %q does not name the variant it rejected", err)
 	}
 }
 
@@ -107,10 +176,10 @@ func dirSnapshot(t *testing.T, dir string) string {
 	return b.String()
 }
 
-// TestDispatchApplyDryRunWritesNothing is F7: --dry-run runs exactly the
+// TestDispatchManifestApplyDryRunWritesNothing is F7: --dry-run runs exactly the
 // resolution phase and stops. Snapshotting the manifest's directory before
 // and after is the literal proof, not a claim taken on faith.
-func TestDispatchApplyDryRunWritesNothing(t *testing.T) {
+func TestDispatchManifestApplyDryRunWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -120,7 +189,7 @@ func TestDispatchApplyDryRunWritesNothing(t *testing.T) {
 	t.Setenv("PATH", binDir)
 
 	before := dirSnapshot(t, dir)
-	err := dispatch([]string{"apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
+	err := dispatch([]string{"manifest", "apply", "claude:plan", filepath.Join(dir, "p.yaml"), "--dry-run"})
 	if err != nil {
 		t.Fatalf("apply --dry-run: %v", err)
 	}
@@ -131,13 +200,13 @@ func TestDispatchApplyDryRunWritesNothing(t *testing.T) {
 }
 
 // TestDispatchApplyDryRunRedactsSecretValues is the CLI-level guard on top of
-// pkg/schema's: TestDispatchApplyDryRunWritesNothing's manifest declares no
+// pkg/schema's: TestDispatchManifestApplyDryRunWritesNothing's manifest declares no
 // inputs: at all, so printResolution's redaction path never runs and this
 // test path went unexercised. This manifest binds an env secret and
 // references it from an active resource (model.auth), so --dry-run's
 // resolution phase actually resolves it, and asserts the distinctive value
 // never reaches stdout/stderr while the binding NAME does.
-func TestDispatchApplyDryRunRedactsSecretValues(t *testing.T) {
+func TestDispatchManifestApplyDryRunRedactsSecretValues(t *testing.T) {
 	const secretValue = "sk-do-not-print-me-either"
 	t.Setenv("AP_TEST_DRYRUN_SECRET", secretValue)
 
@@ -175,7 +244,7 @@ model:
 	}
 	os.Stdout, os.Stderr = wOut, wErr
 
-	dispatchErr := dispatch([]string{"apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
+	dispatchErr := dispatch([]string{"manifest", "apply", "claude:plan", filepath.Join(dir, "p.yaml"), "--dry-run"})
 
 	_ = wOut.Close()
 	_ = wErr.Close()
@@ -202,7 +271,7 @@ model:
 }
 
 // Without --dry-run, apply must refuse rather than stub a fake success: F6.
-func TestDispatchApplyWithoutDryRunRefuses(t *testing.T) {
+func TestDispatchManifestApplyWithoutDryRunRefuses(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -211,7 +280,7 @@ func TestDispatchApplyWithoutDryRunRefuses(t *testing.T) {
 	stubExecutable(t, binDir)
 	t.Setenv("PATH", binDir)
 
-	err := dispatch([]string{"apply", filepath.Join(dir, "p.yaml"), "--target", "claude"})
+	err := dispatch([]string{"manifest", "apply", "claude:plan", filepath.Join(dir, "p.yaml")})
 	if err == nil {
 		t.Fatal("apply without --dry-run succeeded, want it to refuse")
 	}
@@ -220,10 +289,10 @@ func TestDispatchApplyWithoutDryRunRefuses(t *testing.T) {
 	}
 }
 
-// TestDispatchApplyManifestDashReadsStdin is design point 5: --manifest -
+// TestDispatchManifestApplyDashReadsStdin is design point 5: --manifest -
 // reads the manifest from a temp file this command owns and cleans up, so a
 // caller can pipe a generated manifest with no temp file of its own.
-func TestDispatchApplyManifestDashReadsStdin(t *testing.T) {
+func TestDispatchManifestApplyDashReadsStdin(t *testing.T) {
 	binDir := t.TempDir()
 	stubExecutable(t, binDir)
 	t.Setenv("PATH", binDir)
@@ -240,7 +309,7 @@ func TestDispatchApplyManifestDashReadsStdin(t *testing.T) {
 		_ = w.Close()
 	}()
 
-	err = dispatch([]string{"apply", "--manifest", "-", "--target", "claude", "--dry-run"})
+	err = dispatch([]string{"manifest", "apply", "claude:plan", "--manifest", "-", "--dry-run"})
 	if err != nil {
 		t.Fatalf("apply --manifest -: %v", err)
 	}
@@ -248,8 +317,8 @@ func TestDispatchApplyManifestDashReadsStdin(t *testing.T) {
 
 // A path and --manifest name the same thing twice; that must be rejected
 // rather than silently preferring one.
-func TestDispatchApplyRejectsBothAPathAndManifestFlag(t *testing.T) {
-	err := dispatch([]string{"apply", "./p.yaml", "--manifest", "-", "--target", "claude", "--dry-run"})
+func TestDispatchManifestApplyRejectsBothAPathAndManifestFlag(t *testing.T) {
+	err := dispatch([]string{"manifest", "apply", "claude:plan", "./p.yaml", "--manifest", "-", "--dry-run"})
 	if err == nil {
 		t.Fatal("apply with both a path and --manifest succeeded, want it to refuse")
 	}

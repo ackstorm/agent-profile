@@ -40,9 +40,7 @@ Commands:
   which     Print the profile directory
   env       Print the environment override, or run a command under it
   run       Run the agent with that profile
-  render    Print a declarative manifest's effective profile for one runtime
-  validate  Check that a declarative manifest composes for every target
-  apply     Run the resolution phase; --dry-run to print it and touch nothing
+  manifest  Apply, render or export a whole manifest
   delete    Delete a profile and its wrapper, asking first
   unlink    Remove the wrapper, keep the profile
   link      Write the wrapper back
@@ -266,62 +264,51 @@ Examples:
   ap run opencode:review --model anthropic/claude-sonnet-4-5
 `,
 
-	"render": `ap render - print a declarative manifest's effective profile for one runtime
+	"manifest": `ap manifest - apply, render or export a whole manifest
 
 Usage:
-  ap render <manifest.yaml> --target <runtime>
+  ap manifest render <manifest.yaml> [--target <runtime>] [--quiet]
+  ap manifest apply  <agent>:<profile> <manifest.yaml> [--dry-run] [--strict]
+  ap manifest apply  <agent>:<profile> --manifest - [--dry-run]
+  ap manifest export <agent>:<profile>
 
-Loads the manifest, folds its extends chain, selects the runtime and prints
-the result: two-space indent, collection keys sorted, secrets shown by their
-binding name only — never a resolved value, which this composes without ever
-reading. Nothing is materialized and no root is touched.
+The group for operations whose input is a whole manifest. Installing one loose
+capability is "ap install", and the two are separate because the architecture
+has exactly two inputs to a root.
+
+render answers what a manifest MEANS, before any root is chosen, so it is the
+only one taking a path rather than a reference. With --target it prints the
+effective profile for that runtime: two-space indent, collection keys sorted,
+secrets shown by their binding name only — never a resolved value, which this
+composes without ever reading. WITHOUT --target it composes every target the
+manifest declares, prints nothing, and its exit status is the answer. That is
+the contract check another repository runs against a manifest it generated: a
+manifest that composes for claude and not codex is broken, and one call says
+so.
+
+apply takes a reference, not --target — the reference already names the agent
+and the root. It runs the resolution phase (§37 steps 1-11): composes the
+effective profile, computes which inputs it actually needs, resolves them, and
+runs derived preflight. It fetches nothing; source resolution is Phase 3.
+--dry-run prints the result and exits 0. Without it, apply says materialization
+is Phase 4 and exits 1 — there is no fake apply to stub.
+
+export is Phase 7.
 
 Flags:
-  --target   the runtime to compose for (required)
+  --target      render only: the runtime to compose for; omit to check all
+  --quiet       render only: compose and print nothing
+  --dry-run     apply only: run the resolution phase and print it; write nothing
+  --strict      apply only: promote every degradation warning to an error
+  --manifest -  apply only: read the manifest from stdin instead of a path
+                argument, so a caller can pipe a generated manifest with no temp
+                file of its own; give a path or --manifest, never both
 
 Examples:
-  ap render ./profile.yaml --target claude
-`,
-
-	"validate": `ap validate - check that a declarative manifest composes for every target
-
-Usage:
-  ap validate <manifest.yaml>
-
-Runs the same composition as render, once per target the manifest declares,
-and prints nothing on success. A manifest that composes for one target and not
-another is broken, and this is how a producer hears that in one call. Exit 0
-on success, 1 on the first error; warnings go to stderr.
-
-Examples:
-  ap validate ./profile.yaml
-`,
-
-	"apply": `ap apply - run the resolution phase; --dry-run to print it and touch nothing
-
-Usage:
-  ap apply <manifest.yaml> --target <runtime> [--dry-run] [--strict]
-  ap apply --manifest - --target <runtime> --dry-run
-
-Runs the resolution phase (§37 steps 1-11): composes the effective profile,
-computes which inputs it actually needs, resolves them, and runs derived
-preflight. Fetches nothing — source resolution is Phase 3.
-
---dry-run prints the result, with secrets shown by binding NAME only, never a
-resolved value, and exits 0. Without --dry-run, apply prints that
-materialization is Phase 4 and exits 1 — there is no fake apply to stub.
-
-Flags:
-  --target      the runtime to resolve for (required)
-  --dry-run     run the resolution phase and print it; write nothing
-  --strict      promote every degradation warning to an error
-  --manifest -  read the manifest from stdin instead of a path argument, so a
-                caller can pipe a generated manifest with no temp file of its
-                own; give a path or --manifest, never both
-
-Examples:
-  ap apply ./profile.yaml --target claude --dry-run
-  ach export | ap apply --manifest - --target claude --dry-run
+  ap manifest render ./profile.yaml
+  ap manifest render ./profile.yaml --target claude
+  ap manifest apply claude:plan ./profile.yaml --dry-run
+  ach export | ap manifest apply claude:default --manifest - --dry-run
 `,
 
 	"env": `ap env - print the environment override, or run a command under it
@@ -447,9 +434,7 @@ var commandTable = map[string]func([]string) error{
 	"which":    cmdWhich,
 	"env":      cmdEnv,
 	"run":      cmdRun,
-	"render":   func(a []string) error { return cmdRenderOrValidate("render", a) },
-	"validate": func(a []string) error { return cmdRenderOrValidate("validate", a) },
-	"apply":    cmdApply,
+	"manifest": cmdManifest,
 	"delete":   cmdDelete, "rm": cmdDelete,
 	"link":    cmdLink,
 	"unlink":  cmdUnlink,
