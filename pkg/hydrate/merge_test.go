@@ -178,3 +178,40 @@ func readBack(t *testing.T, path string, isTOML bool) map[string]any {
 	}
 	return doc
 }
+
+// The container may not exist yet, and that is the FIRST apply into a fresh
+// profile — the common case, not an edge one.
+//
+// Writing the container as a unit records the key "mcpServers", and Phase 7
+// would then remove every server in the file, including the user's, when
+// uninstalling one of ours. Found by an apply-level test after the merge test
+// above passed: its seed already had the container, which hid the bug.
+func TestAnAbsentContainerIsCreatedNotWrittenWhole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	keys, err := MergeInto(path, map[string]any{
+		"mcpServers": map[string]any{"memory": map[string]any{"url": "u"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"mcpServers.memory"}; !slices.Equal(keys, want) {
+		t.Errorf("keys = %v, want %v — recording the container would make uninstall remove every server", keys, want)
+	}
+}
+
+// The user may have a non-mapping value where we expect a container. There is
+// nothing to merge into, so it is replaced AND recorded whole — honestly,
+// rather than claiming we own only part of it.
+func TestANonMappingAtAContainerKeyIsReplacedAndRecordedWhole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	writeDoc(t, path, map[string]any{"mcpServers": "not a map"}, false)
+	keys, err := MergeInto(path, map[string]any{
+		"mcpServers": map[string]any{"memory": map[string]any{"url": "u"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"mcpServers"}; !slices.Equal(keys, want) {
+		t.Errorf("keys = %v, want %v", keys, want)
+	}
+}

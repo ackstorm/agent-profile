@@ -75,6 +75,9 @@ func Apply(ctx context.Context, p Plan) (Result, error) {
 	if err := applyArtifacts(ctx, p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
+	if err := applyMCPs(p, ledger, &res, stamp); err != nil {
+		return res, err
+	}
 	recordDefinitions(p, ledger, stamp)
 	warnDisabledButMaterialized(p, ledger, &res)
 
@@ -144,6 +147,93 @@ func applyArtifacts(ctx context.Context, p Plan, l *Ledger, res *Result, stamp s
 		})
 	}
 	return nil
+}
+
+// applyMCPs merges every active MCP server into the runtime's own
+// configuration file and records the dotted keys it contributed.
+//
+// This is where the ledger's Merge and Keys fields stop being decoration.
+// Phase 4 wrote whole files and recorded Merge: ""; a server lives INSIDE a
+// document the user also owns, so uninstall must remove "mcp_servers.memory"
+// and nothing else. Recording it as a replace would make uninstall delete the
+// whole config.toml.
+func applyMCPs(p Plan, l *Ledger, res *Result, stamp string) error {
+	names := sortedKeys(p.Profile.MCPs)
+	active := make([]string, 0, len(names))
+	for _, n := range names {
+		if p.Profile.MCPs[n].Enabled {
+			active = append(active, n)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+
+	rel, key, ok := p.Adapter.MCPTarget()
+	if !ok {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"runtime %q has no MCP configuration inside its configuration directory; skipping %d server(s)",
+			p.Adapter.Name(), len(active)))
+		return nil
+	}
+	bindings := bindingVars(p.Profile)
+	path := filepath.Join(p.Root, rel)
+
+	for _, name := range active {
+		entry, err := MCPEntry(p.Adapter.Name(), name, p.Profile.MCPs[name], bindings)
+		if err != nil {
+			return fmt.Errorf("mcp %q: %w", name, err)
+		}
+		keys, err := MergeInto(path, map[string]any{key: map[string]any{name: entry}})
+		if err != nil {
+			return fmt.Errorf("mcp %q: %w", name, err)
+		}
+		hash, err := hashFile(path)
+		if err != nil {
+			return err
+		}
+		l.Put(ResourceRec{
+			Name: name, Kind: "mcp", InstalledAt: stamp,
+			Files: []FileRec{{RelPath: filepath.ToSlash(rel), Hash: hash, Merge: "deep", Keys: keys}},
+		})
+		res.Changes = append(res.Changes, Change{Path: filepath.Join(rel, key+"."+name), Op: "merge"})
+	}
+	return nil
+}
+
+// bindingVars maps an input NAME to the environment variable a reference
+// should name. An env-sourced secret references the DECLARED variable, with no
+// synthesized name (§34); a file-sourced one references what the launcher
+// exports, because runtimes do not read files.
+func bindingVars(p schema.Profile) map[string]string {
+	out := map[string]string{}
+	for name, b := range p.Inputs.Secrets {
+		if b.Env != "" {
+			out[name] = b.Env
+			continue
+		}
+		if b.File != "" {
+			out[name] = APSecretVar(name)
+		}
+	}
+	for name, b := range p.Inputs.Variables {
+		if b.Env != "" {
+			out[name] = b.Env
+		}
+	}
+	return out
+}
+
+// hashFile hashes a file already on disk. A merged file is written by
+// MergeInto, so unlike copyFile there is no stream to tee — the hash has to
+// come from the result.
+func hashFile(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // recordDefinitions fills the ledger's second arm. A marketplace writes no file

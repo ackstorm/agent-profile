@@ -112,11 +112,30 @@ func mergeMap(doc, contribution map[string]any, prefix string, keys *[]string) {
 			path = prefix + "." + k
 		}
 		sub, isMap := v.(map[string]any)
-		existing, hasExisting := doc[k].(map[string]any)
-		// Descend only while BOTH sides are mappings and we are still above the
-		// entry level: a container the user shares with us (mcpServers) is
-		// descended into; the entry itself is replaced whole.
-		if isMap && hasExisting && prefix == "" {
+		// Descend exactly one level: a container the user shares with us
+		// (mcpServers) is descended into; the entry itself is replaced whole
+		// and recorded whole.
+		//
+		// The container is CREATED when absent rather than written as a unit.
+		// Writing it as a unit records the key "mcpServers", and Phase 7 would
+		// then remove every server in the file — including the user's — when
+		// uninstalling one of ours. That is the whole reason this function
+		// reports keys at all.
+		if isMap && prefix == "" {
+			existing, ok := doc[k].(map[string]any)
+			if !ok {
+				if _, present := doc[k]; present {
+					// The user has a NON-mapping value where we expect a
+					// container. There is nothing to merge into, so it is
+					// replaced and recorded whole — honestly, rather than
+					// pretending we own only part of it.
+					doc[k] = v
+					*keys = append(*keys, path)
+					continue
+				}
+				existing = map[string]any{}
+				doc[k] = existing
+			}
 			mergeMap(existing, sub, path, keys)
 			continue
 		}

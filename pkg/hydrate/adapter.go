@@ -22,6 +22,10 @@ type Adapter interface {
 	SkillDir(name string) (rel string, ok bool)
 	// ArtifactDest resolves a manifest's `destination` under the root.
 	ArtifactDest(destination string) (rel string, err error)
+	// MCPTarget is the configuration file MCP servers merge into and the
+	// top-level key inside it. ok=false means this runtime has no config-dir
+	// MCP surface, which is a §8 degradation, not something to invent.
+	MCPTarget() (rel, key string, ok bool)
 }
 
 // AdapterFor returns the adapter for an agent. Destinations come from
@@ -43,6 +47,13 @@ func (r registryAdapter) SkillDir(name string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(r.agent.Skills, name), true
+}
+
+func (r registryAdapter) MCPTarget() (string, string, bool) {
+	if r.agent.MCPFile == "" || r.agent.MCPKey == "" {
+		return "", "", false
+	}
+	return r.agent.MCPFile, r.agent.MCPKey, true
 }
 
 // ArtifactDest applies §26.1: a destination is relative to the root, must not

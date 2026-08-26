@@ -292,3 +292,150 @@ func TestApplyTwiceIsIdempotentInTheLedger(t *testing.T) {
 		}
 	}
 }
+
+// A server lives INSIDE a document the user also owns, so the ledger must
+// record the dotted key and Merge: "deep". Recorded as a replace, Phase 7's
+// uninstall would delete the user's whole config file.
+func TestAnMCPServerIsRecordedAsADeepMergeWithItsKeys(t *testing.T) {
+	root := t.TempDir()
+	res, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: claudeAdapter(t), Now: fixedNow,
+		Profile: schema.Profile{
+			Inputs: schema.Inputs{Secrets: map[string]schema.Binding{
+				"memory-token": {Env: "MEMORY_TOKEN"},
+			}},
+			MCPs: map[string]schema.MCP{"memory": specMemoryServer()},
+		},
+	})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(res.Changes) != 1 || res.Changes[0].Op != "merge" {
+		t.Errorf("changes = %+v, want one merge", res.Changes)
+	}
+
+	l, err := LoadLedger(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := l.Resource("mcp", "memory")
+	if !ok {
+		t.Fatalf("the server was not recorded: %+v", l)
+	}
+	if len(rec.Files) != 1 {
+		t.Fatalf("files = %+v", rec.Files)
+	}
+	f := rec.Files[0]
+	if f.RelPath != ".claude.json" {
+		t.Errorf("relPath = %q, want claude's user-scope file", f.RelPath)
+	}
+	if f.Merge != "deep" {
+		t.Errorf("merge = %q, want deep — a replace would make uninstall delete the whole file", f.Merge)
+	}
+	if len(f.Keys) != 1 || f.Keys[0] != "mcpServers.memory" {
+		t.Errorf("keys = %v, want [mcpServers.memory]", f.Keys)
+	}
+
+	// The document holds a REFERENCE, never the value.
+	body, err := os.ReadFile(filepath.Join(root, ".claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "${MEMORY_TOKEN}") {
+		t.Errorf("no reference in the materialized config:\n%s", body)
+	}
+	// And the recorded hash matches what is there.
+	if got, _ := hashFile(filepath.Join(root, ".claude.json")); got != f.Hash {
+		t.Errorf("recorded hash %s, on-disk %s", f.Hash, got)
+	}
+}
+
+// A hand-added server in the same file survives, which is the merge's additive
+// property reaching all the way through apply.
+func TestAHandAddedMCPServerSurvivesAnApply(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".claude.json"),
+		[]byte(`{"mcpServers":{"mine":{"command":"my-server"}},"theme":"dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: claudeAdapter(t), Now: fixedNow,
+		Profile: schema.Profile{
+			Inputs: schema.Inputs{Secrets: map[string]schema.Binding{"memory-token": {Env: "MEMORY_TOKEN"}}},
+			MCPs:   map[string]schema.MCP{"memory": specMemoryServer()},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, ".claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"mine"`, `"theme"`, `"memory"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("%s missing after apply:\n%s", want, body)
+		}
+	}
+}
+
+// codex's configuration is TOML, and the merge has to go through the TOML
+// encoder rather than the JSON one. This is the only place the extension-based
+// dispatch is exercised end to end.
+func TestCodexMCPLandsInConfigTOML(t *testing.T) {
+	a, _ := agentreg.Lookup("codex")
+	ad, _ := AdapterFor(a)
+	root := t.TempDir()
+	if _, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: ad, Now: fixedNow,
+		Profile: schema.Profile{
+			Inputs: schema.Inputs{Secrets: map[string]schema.Binding{"memory-token": {Env: "MEMORY_TOKEN"}}},
+			MCPs:   map[string]schema.MCP{"memory": specMemoryServer()},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "config.toml"))
+	if err != nil {
+		t.Fatalf("no config.toml: %v", err)
+	}
+	// The variable NAME, never a placeholder codex cannot expand and never a
+	// value.
+	if !strings.Contains(string(body), `bearer_token_env_var = "MEMORY_TOKEN"`) {
+		t.Errorf("config.toml lacks the bearer key:\n%s", body)
+	}
+	for _, forbidden := range []string{"${", "{env:"} {
+		if strings.Contains(string(body), forbidden) {
+			t.Errorf("config.toml carries a placeholder codex cannot expand:\n%s", body)
+		}
+	}
+	l, _ := LoadLedger(root)
+	rec, _ := l.Resource("mcp", "memory")
+	if len(rec.Files) != 1 || rec.Files[0].Keys[0] != "mcp_servers.memory" {
+		t.Errorf("recorded keys = %+v, want mcp_servers.memory", rec.Files)
+	}
+}
+
+// A file-sourced secret references what the LAUNCHER exports, because runtimes
+// do not read files. The cost — that such a profile requires launching through
+// ap — is stated in APSecretVar's doc rather than discovered.
+func TestAFileSourcedSecretReferencesTheLauncherExportedName(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: claudeAdapter(t), Now: fixedNow,
+		Profile: schema.Profile{
+			Inputs: schema.Inputs{Secrets: map[string]schema.Binding{
+				"memory-token": {File: "/run/secrets/memory-token"},
+			}},
+			MCPs: map[string]schema.MCP{"memory": specMemoryServer()},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(filepath.Join(root, ".claude.json"))
+	if !strings.Contains(string(body), "${AP_SECRET_MEMORY_TOKEN}") {
+		t.Errorf("no launcher-exported reference:\n%s", body)
+	}
+	if strings.Contains(string(body), "/run/secrets") {
+		t.Errorf("the file PATH reached the configuration:\n%s", body)
+	}
+}
