@@ -92,61 +92,110 @@ package:
 
 | Phase | Owns |
 |---|---|
-| 1 | `Node`/parsing (`yaml.go`), `Merge` (`compose.go`), `extends` folding (`extends.go`), `Decode`/`Profile` (`profile.go`), `Effective` (`effective.go`), `Render` (`render.go`), `ap render`/`ap validate` |
-| 2 | Input *resolution* (reading a bound secret/variable's value), `--strict` promoting `Warning` to error, `ap apply --dry-run` |
-| 3 | Source *fetching* (git/local), the lockfile-free reproducibility model (§32) |
-| 4 | `SKILL.md` contract checks (§23) — needs a resolved source |
-| 5 | Materialization, the ledger, apply lifecycle (§33, §37) |
+| 1 | `Node`/parsing (`yaml.go`), `Merge` (`compose.go`), `extends` folding (`extends.go`), `Decode`/`Profile` (`profile.go`), `Effective` (`effective.go`), `Render` (`render.go`), `ap manifest render` |
+| 2 | Input *resolution* (reading a bound secret/variable's value), `--strict` promoting `Warning` to error |
+| 3 | `pkg/source`: the cache, the credential guards, git/archive/local fetching, `Resolve` over an effective profile, `ap manifest apply --dry-run` |
+| 4 | Materialization into a root, the ledger, `SKILL.md` contract checks (§23), apply lifecycle (§33, §37) |
+| 5 | MCP and model materialization, secret references, the TOML dependency (§9, §25, §34) |
 | 6 | Marketplace item resolution (§21–§22), the `ref` grammar, top-level `plugins:` as a common resource type, runtime-native plugin schemas (`Runtime.Plugins` stays an unvalidated `*Node` tree until then, open question §40.1) |
 
 `Effective` (`effective.go`) is Phase 1's single entry point: it is what
-Phase 2 onward composes against, and `ap validate`/`ap render` are the only
-consumers of it that exist yet.
+Phase 2 onward composes against, and `ap manifest render` plus `pkg/source`'s
+`Resolve` are its consumers today.
 
-## `spec-35-execute.yaml` is SPEC §35 with three Phase-1 scope gaps closed, not silently glossed
+## `spec-35-execute.yaml` is SPEC §35, and two of its three old deviations were bugs
 
 `pkg/schema/testdata/spec-35-execute.yaml` is the acceptance fixture for
-`TestTheSpecsFullExampleComposesForBothOfItsTargets` — it has to compose for
-both `claude` and `opencode`, the way the spec's own closing note about
-`company-review` claims. It is **not** a byte-for-byte copy of §35's YAML,
-because three constructs in that example are outside what Phase 1 decodes.
-Each is a deliberate, scoped omission, not a bug found late:
+`TestTheSpecsFullExampleComposesForBothOfItsTargets`. It also feeds
+`pkg/source`'s `TestTheSpecsFullExampleResolvesOffline`, which reads this file
+rather than keeping a second copy — see below for why that matters.
 
-- **No top-level `plugins:` block.** §35 lists a `code-review` plugin
-  resource at the manifest root. `Decode`'s `onlyKeys` call does not admit
-  `plugins` as a top-level key — it becomes a common resource type in Phase 6
-  (`docs/superpowers/plans/2026-08-26-open-decisions.md`, decision S6). The
-  fixture drops the block entirely rather than inventing a decoder for it.
-  The `acme-plugins` **marketplace** entry (`type: plugins`) stays, because
-  `Marketplace.Type` already accepts `"plugins"` — it is the plugin *resource*
-  under `plugins:`, not the marketplace that lists it, that is deferred.
-- **Git-source `auth` is flat, not `{scheme, value_from}`.** §35 writes
-  `auth: {scheme: basic-oauth2, value_from: {secret: gitlab-token}}` under a
-  git source. `GitSource.Auth` is `*ValueFrom`, decoded by `decodeGitSource`
-  straight off the `auth` key with no `scheme` field and no nested
-  `value_from` wrapper — confirmed by reading `decodeGitSource` and
-  `ValueFrom`'s fields (`Secret`, `Variable`, nothing else). The fixture
-  writes `auth: {secret: gitlab-token}`. `auth.scheme` is real spec text
-  (decision 46) but was never wired into `profile.go`; closing that gap is
-  future work, not something this fixture should paper over by inventing a
-  shape the decoder does not accept.
-- **`extends: ./spec-35-coding-base.yaml`, not the bare `extends: coding-base`
-  from the spec text.** `resolveExtends` (`extends.go`) turns a bare name into
-  `<manifest dir>/<name>.yaml`, so the literal spec text would look for
-  `coding-base.yaml`. The fixture's parent is named
-  `spec-35-coding-base.yaml` instead, to keep every fixture for this test
-  prefixed and grouped, so the `extends` value takes the relative-path branch
-  (it contains a `/`) rather than the bare-name branch — both branches are
-  exercised elsewhere by `pkg/schema/extends_test.go`, which this fixture does
-  not need to re-prove.
+This section used to record three deliberate deviations from §35. **Two of them
+were not deviations, they were the fixture agreeing with a bug**, and that is
+the lesson worth keeping:
 
-`variants` entries also use the bare-list shape (`brainstorm: - --effort=xhigh`)
-rather than §35's nested `variants.brainstorm.args: [...]` — `decodeVariants`
-passes a variant's value straight to `decodeStringList`, which requires a
-`Sequence`, not a mapping with an `args` key. This is the same gap Task 11's
-own test fixture hit first; `docs/superpowers/plans/*` §35 text has not been
-reconciled with `decodeVariants`'s real shape, so treat the nested `args:`
-form in the spec as aspirational until that reconciliation happens.
+- **Git-source `auth` was flat.** The fixture wrote `auth: {secret: x}` because
+  `decodeGitSource` read that shape. §17 and §35 both write
+  `auth: {value_from: {secret: x}}`, the same wrapper every other credential
+  reference in the schema uses. The decoder was wrong, and the one fixture whose
+  entire job is to be §35's bytes had been written to match the decoder instead
+  of the document it is named after — so it agreed with the bug and hid it. Both
+  are fixed; `auth.scheme` is now decoded too, and the fixture carries §35's
+  `scheme: basic-oauth2` on the marketplace source.
+- **A fixture named after a document must be diffed against that document**, not
+  against what the parser happens to accept. That is the only reliable defence,
+  because a test written against the same misreading passes.
+
+One real deviation remains, and it is a scope gap rather than a disagreement:
+
+- **No top-level `plugins:` block.** §35 lists a `code-review` plugin resource at
+  the manifest root. `Decode`'s `onlyKeys` does not admit `plugins` as a
+  top-level key — it becomes a common resource type in Phase 6 (open-decisions
+  S6), and `pkg/source`'s locator walk gains one `add()` call at that point. The
+  fixture drops the block rather than inventing a decoder for it. The
+  `acme-plugins` **marketplace** entry (`type: plugins`) stays, because
+  `Marketplace.Type` already accepts `"plugins"`.
+
+Two mechanical differences that are about fixture hygiene, not about the spec:
+`extends: ./spec-35-coding-base.yaml` keeps every fixture for this test prefixed
+and grouped (both `extends` branches are exercised in `extends_test.go`), and
+`variants` use the bare-list shape because `decodeVariants` passes a variant's
+value straight to `decodeStringList`. The nested `variants.<name>.args` form in
+the spec text has not been reconciled with that decoder; treat it as aspirational
+until it is.
+
+## Phase 3: why `pkg/source` is shaped the way it is
+
+Four decisions in that package look like preferences and are not.
+
+**The digest is verified BEFORE extraction, never after (§18).** A git source is
+content-addressed — fetching a SHA is verified by git itself — and an archive is
+not, so the digest is its only integrity claim. Checking it after extraction
+means the extractor already parsed attacker-chosen bytes, and the extractor is
+exactly where traversal, symlink and zip-bomb bugs live.
+
+The test for this was **vacuous when first written, and mutation is what found
+it**. Asserting "nothing staged" and "not published" passes in both orders,
+because `Cache.Publish` removes a failed fill either way. The order is only
+observable through whether the extractor RAN, so the test now serves an archive
+that is hostile AND digest-mismatched: verifying first fails on the digest,
+verifying second fails on the traversal. If you touch that ordering, re-run the
+mutation before believing the test.
+
+**The scheme report exists on SUCCESS, not only on a 401 (§17.1).** Inference
+from the host is admitted at all only because it is a protocol default with a
+declared escape hatch and a mandatory disclosure. An inference invisible when it
+works is undebuggable when it stops working — and a self-hosted GitLab named
+neither `gitlab*` nor `git.*` infers `bearer`, gets 401, and only an explicit
+`scheme` fixes it. A 401 that does not name the scheme tried leaves the user
+unable to tell a wrong scheme from a wrong token.
+
+**`SameEndpoint` compares host AND effective port, and the host match is exact
+(§21.2).** The effective port is the explicit one or the scheme's default, so
+`https://h` and `https://h:443` are one endpoint while a different port on the
+same host may be a different service. The host comparison is exact because a
+subdomain is not the same host: `evil.gl.acme.internal` reads as ours to anyone
+skimming a catalogue, and the manifest author does not write the catalogue. Both
+guards live in `transport.go` together on purpose — they answer one question at
+two moments, and splitting them is how one gets updated and the other does not.
+
+**No test in `pkg/source` touches the network.** Git tests run against real
+repositories created in `t.TempDir()`; archive tests serve bytes from
+`httptest.NewTLSServer`. `docs/references/SMOKE.md` records three checks that
+went red for reasons nobody controlled, and a package whose whole job is
+fetching is the easiest place to repeat that.
+
+Two more things worth knowing before editing it:
+
+- **The cache is deliberately unlocked (§37.3).** `Publish` fills a temp
+  directory and renames it into place, so a reader sees a complete entry or
+  none. Two processes resolving one source waste a fetch and cannot corrupt
+  anything, which is the only failure a cache lock prevents. Do not port `ach`'s
+  workspace lock on top of it.
+- **The resolved SHA is the cache key**, so every resource drawn from one
+  repository at one ref shares a single clone. That is what makes fourteen
+  skills from one repository cost one fetch — the cache delivers it, not a
+  marketplace.
 
 ## `inputs.*.file` is a read-any-path primitive, and it is inherent, not a bug
 

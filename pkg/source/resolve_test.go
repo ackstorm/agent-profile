@@ -245,7 +245,7 @@ skills:
 		if err != nil {
 			t.Fatal(err)
 		}
-		var names []string
+		names := make([]string, 0, len(reports))
 		for _, r := range reports {
 			names = append(names, r.Resource)
 		}

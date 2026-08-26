@@ -206,6 +206,10 @@ func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resol
 	for _, warn := range res.Warnings {
 		fmt.Fprintln(&b, "  ! warning:", warn.Text)
 	}
+	// Printing Resolved itself is deliberate, not decoration: its String
+	// method is the guard that stops a resolved secret reaching a log, and a
+	// guard nothing exercises is a guard nobody notices losing.
+	fmt.Fprintf(&b, "  %-10s %v\n", "resolved", resolved)
 
 	// §37.1 makes this line mandatory. "Dry run" reads as "does nothing", and
 	// this one resolves secrets, authenticates to private sources and fetches

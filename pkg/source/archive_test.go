@@ -40,8 +40,8 @@ func tarGz(t testing.TB, headers []*tar.Header, bodies [][]byte) []byte {
 }
 
 func tarFiles(t testing.TB, files map[string]string) []byte {
-	var hs []*tar.Header
-	var bs [][]byte
+	hs := make([]*tar.Header, 0, len(files))
+	bs := make([][]byte, 0, len(files))
 	for name, body := range files {
 		hs = append(hs, &tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg})
 		bs = append(bs, []byte(body))

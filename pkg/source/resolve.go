@@ -189,4 +189,3 @@ func credential(auth *schema.GitAuth, o Opts) (token, scheme string, err error) 
 	}
 	return v, auth.Scheme, nil
 }
-

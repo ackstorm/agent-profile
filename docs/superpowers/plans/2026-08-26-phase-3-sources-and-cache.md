@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: `superpowers:subagent-driven-development`
 > (recommended) or `superpowers:executing-plans` to implement this plan
-> task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Turn every locator in an effective profile into verified bytes in a
 content-addressed cache — git, archive and local — with no lockfile, no
@@ -15,6 +15,12 @@ before extracting; and a resolver that walks an effective profile and returns
 one resolved tree per active locator. `pkg/schema` is consumed, never modified.
 
 **Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.2.md`
+
+**Status: COMPLETE.** All nine tasks landed. Gates: `verify`, `crossbuild`,
+`secrets`, `fuzz` (with the new `FuzzExtractTar`), `sandbox` — all green;
+`sandbox` unchanged, as required, because Phase 3 materializes nothing.
+Fourteen mutation tests recorded across the phase. What the plan did not
+predict is written up at the end of this file.
 
 **Tech Stack:** Go 1.25, standard library only. `pkg/source` carries **no build
 tag** and must compile for windows.
@@ -81,7 +87,7 @@ moments, and splitting them is how one gets updated and the other does not.
   `(*Cache).Publish(key string, fill func(dir string) error) (string, error)`.
   Every later task consumes `Publish`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package source
@@ -131,10 +137,10 @@ func TestPublishIsAtomicAndReusesAnExistingEntry(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, verify it fails**
+- [x] **Step 2: Run it, verify it fails**
   `make test-one T=TestPublishIsAtomic P=./pkg/source/` — Expected: FAIL, package does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Port the shape of `ach/internal/cachefs` (`bootstrap.go`, `stage.go`, `sweep.go`),
 which is dependency-free.
@@ -177,8 +183,8 @@ func (c *Cache) Publish(key string, fill func(dir string) error) (string, error)
 `NewCache` creates `<root>/objects` and `<root>/tmp` at `0o700` and sweeps any
 `stage-*` left by a killed process.
 
-- [ ] **Step 4: Run it, verify it passes.** `make test-one T=TestPublishIsAtomic P=./pkg/source/`
-- [ ] **Step 5: Commit**
+- [x] **Step 4: Run it, verify it passes.** `make test-one T=TestPublishIsAtomic P=./pkg/source/`
+- [x] **Step 5: Commit**
 
 ```bash
 git add pkg/source/doc.go pkg/source/cache.go pkg/source/cache_test.go
@@ -198,7 +204,7 @@ mutation-tested; §21.2 is the specification's one mandatory security guard.
 - Produces: `CheckCredentialTransport(rawURL string) error`,
   `SameEndpoint(a, b string) (bool, error)`. Tasks 4, 5 and Phase 6 consume both.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestACredentialMayNotTravelOverNonTLS(t *testing.T) {
@@ -247,10 +253,10 @@ func TestSameEndpointComparesHostAndEffectivePort(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run them, verify they fail**
+- [x] **Step 2: Run them, verify they fail**
   `make test-one T='TestACredential|TestSameEndpoint' P=./pkg/source/` — Expected: FAIL, undefined.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```go
 // CheckCredentialTransport refuses to let a credential cross plaintext (§17.2).
@@ -306,8 +312,8 @@ func effectivePort(u *url.URL) string {
 }
 ```
 
-- [ ] **Step 4: Run them, verify they pass.**
-- [ ] **Step 5: Mutation-test both guards**
+- [x] **Step 4: Run them, verify they pass.**
+- [x] **Step 5: Mutation-test both guards**
   - Make `CheckCredentialTransport` return `nil` unconditionally. Run
     `make test-one T=TestACredentialMayNotTravelOverNonTLS P=./pkg/source/`.
     Expected: FAIL. Restore.
@@ -319,7 +325,7 @@ func effectivePort(u *url.URL) string {
 
   If any of the three still passes, the test is wrong — fix the test first.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add pkg/source/transport.go pkg/source/transport_test.go
@@ -341,7 +347,7 @@ so the report is not a nicety, it is the condition.
   `ResolveScheme(declared, host string) (Scheme, bool)` — the bool is
   `inferred`. `AuthHeader(s Scheme, token string) string`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestSchemeIsInferredFromHostAndAlwaysReported(t *testing.T) {
@@ -382,8 +388,8 @@ func TestAuthHeaderMatchesEachProvidersMeasuredForm(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, verify it fails.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Run it, verify it fails.**
+- [x] **Step 3: Implement**
 
 ```go
 // ResolveScheme returns the scheme to use and whether it was inferred.
@@ -406,8 +412,8 @@ func ResolveScheme(declared, host string) (Scheme, bool) {
 }
 ```
 
-- [ ] **Step 4: Run it, verify it passes.**
-- [ ] **Step 5: Commit**
+- [x] **Step 4: Run it, verify it passes.**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pkg/source/scheme.go pkg/source/scheme_test.go
@@ -428,7 +434,7 @@ git commit -m "feat(source): infer the auth scheme from host, and report it"
   `type Resolved struct{ Dir, ResolvedRef string; SchemeUsed Scheme; SchemeInferred bool; Anonymous bool }`.
   Tasks 7, 8 and Phase 4 consume `Resolved`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Tests run against a local bare repository created with `git init --bare` in a
 `t.TempDir()`. **No network, ever** — a test that needs one is a test that goes
@@ -494,8 +500,8 @@ func TestFetchGitRefusesToSendACredentialOverPlaintext(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run them, verify they fail.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Run them, verify they fail.**
+- [x] **Step 3: Implement**
 
 Port the shape of `ach/internal/gitfetch`. It shells out to `git` — no
 dependency — and its argv is the security boundary:
@@ -526,11 +532,11 @@ stub echoed: a check written against joined output cannot tell one argument from
 two, which is the property under test. That mistake is recorded in
 `CLAUDE.md` for the sandbox's `arg:[…]` versus `argv:` check.
 
-- [ ] **Step 4: Run them, verify they pass.**
-- [ ] **Step 5: Mutation-test the URL guard.** Change `gitArgs` to embed the
+- [x] **Step 4: Run them, verify they pass.**
+- [x] **Step 5: Mutation-test the URL guard.** Change `gitArgs` to embed the
   token in the URL. Run `make test-one T=TestFetchGitNeverPutsTheCredentialInTheURL P=./pkg/source/`.
   Expected: FAIL. Restore.
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add pkg/source/git.go pkg/source/git_test.go
@@ -551,7 +557,7 @@ extracted bytes has already run the extractor over untrusted input.
 - Produces: `type ArchiveSpec struct{ URL, Digest, Subpath, Token, DeclaredScheme string }`,
   `FetchArchive(ctx, c *Cache, s ArchiveSpec) (Resolved, error)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestFetchArchiveVerifiesTheDigestBeforeExtracting(t *testing.T) {
@@ -612,8 +618,8 @@ func TestArchiveExtractionRefusesEscapes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run them, verify they fail.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Run them, verify they fail.**
+- [x] **Step 3: Implement**
 
 Port the tar-safety rules from `ach/internal/contentkit/tar_safety.go`.
 
@@ -634,11 +640,11 @@ Port the tar-safety rules from `ach/internal/contentkit/tar_safety.go`.
 Download to memory bounded by a cap, hash, compare in constant time, and only
 then extract inside `Publish`'s temporary directory.
 
-- [ ] **Step 4: Run them, verify they pass.**
-- [ ] **Step 5: Mutation-test the ordering.** Move the digest comparison to
+- [x] **Step 4: Run them, verify they pass.**
+- [x] **Step 5: Mutation-test the ordering.** Move the digest comparison to
   after extraction. Run `make test-one T=TestFetchArchiveVerifiesTheDigestBeforeExtracting P=./pkg/source/`.
   Expected: FAIL on the "left staged bytes behind" assertion. Restore.
-- [ ] **Step 6: Add a fuzz target**
+- [x] **Step 6: Add a fuzz target**
 
 ```go
 func FuzzExtractTar(f *testing.F) {
@@ -654,7 +660,7 @@ func FuzzExtractTar(f *testing.F) {
 
 Add it to the `_fuzz` target.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add pkg/source/archive.go pkg/source/archive_test.go pkg/source/fuzz_test.go Makefile
@@ -670,7 +676,7 @@ git commit -m "feat(source): archive fetch, digest verified before extraction"
 **Interfaces:**
 - Produces: `ResolveLocal(base string, s schema.LocalSource) (Resolved, error)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestLocalResolvesRelativeToTheManifestAndRefusesEscapes(t *testing.T) {
@@ -696,13 +702,13 @@ func TestLocalResolvesRelativeToTheManifestAndRefusesEscapes(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, verify it fails.**
-- [ ] **Step 3: Implement.** Join against the manifest directory, clean, refuse
+- [x] **Step 2: Run it, verify it fails.**
+- [x] **Step 3: Implement.** Join against the manifest directory, clean, refuse
   an escape with `schema.ValidRelPath`'s rule, and stat the result.
-- [ ] **Step 4: Run it, verify it passes.**
-- [ ] **Step 5: Mutation-test the escape guard.** Remove the containment check,
+- [x] **Step 4: Run it, verify it passes.**
+- [x] **Step 5: Mutation-test the escape guard.** Remove the containment check,
   confirm the test fails, restore.
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add pkg/source/local.go pkg/source/resolve_test.go
@@ -721,7 +727,7 @@ git commit -m "feat(source): local sources, contained to the manifest directory"
   `Resolve(ctx, p schema.Profile, o Opts) (map[string]Resolved, []Report, error)`,
   `type Report struct{ Resource, Text string }`. Phase 4 consumes both.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```go
 func TestResolveSkipsDisabledResourcesAndTheirSecrets(t *testing.T) {
@@ -798,15 +804,15 @@ skills:
 }
 ```
 
-- [ ] **Step 2: Run them, verify they fail.**
-- [ ] **Step 3: Implement.** Walk `Skills`, `Artifacts`, `Marketplaces` and
+- [x] **Step 2: Run them, verify they fail.**
+- [x] **Step 3: Implement.** Walk `Skills`, `Artifacts`, `Marketplaces` and
   `Prompt` in sorted key order — determinism is what makes a report diffable —
   skipping `Enabled == false`. Read a secret only when an active resource's
   locator references it, wrapping any failure with the resource name. Dispatch
   on the source branch. Collect a `Report` per resolved locator carrying the
   scheme and whether it was inferred.
-- [ ] **Step 4: Run them, verify they pass.**
-- [ ] **Step 5: Commit**
+- [x] **Step 4: Run them, verify they pass.**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pkg/source/resolve.go pkg/source/resolve_test.go
@@ -827,7 +833,7 @@ Phase 3 shippable on its own.
 - Produces: the `apply` subcommand, `--dry-run` only. `--yes` and `--manifest -`
   are Phases 4 and 7. `--prune` is **deferred past v1** — do not add the flag.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestManifestApplyDryRunResolvesAndWritesNothing(t *testing.T) {
@@ -868,8 +874,8 @@ func TestManifestApplyDryRunSaysItAuthenticated(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run them, verify they fail.**
-- [ ] **Step 3: Implement**
+- [x] **Step 2: Run them, verify they fail.**
+- [x] **Step 3: Implement**
 
 `manifestApply` parses with `parseAroundRef` (no passthrough, like `create`),
 resolves the reference to a root **without creating it**, runs `schema.Effective`
@@ -884,8 +890,8 @@ is mandatory and states both facts:
 Without `--dry-run`, exit 2 with "materialization is Phase 4". A stub that
 silently does nothing is worse than an unimplemented command.
 
-- [ ] **Step 4: Run them, verify they pass.**
-- [ ] **Step 5: Commit**
+- [x] **Step 4: Run them, verify they pass.**
+- [x] **Step 5: Commit**
 
 ```bash
 git add cmd/ap/manifest.go cmd/ap/main.go cmd/ap/main_test.go
@@ -899,7 +905,7 @@ git commit -m "feat(ap): ap manifest apply --dry-run runs the resolution phase"
 **Files:** Create `pkg/source/testdata/`; modify `docs/references/DECLARATIVE.md`,
 `CLAUDE.md`, `Makefile`
 
-- [ ] **Step 1: Write the end-to-end fixture test**
+- [x] **Step 1: Write the end-to-end fixture test**
 
 ```go
 func TestTheSpecsFullExampleResolvesOffline(t *testing.T) {
@@ -922,8 +928,8 @@ func TestTheSpecsFullExampleResolvesOffline(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run it, verify it fails**, then add the fixture and pass.
-- [ ] **Step 3: Run every gate**
+- [x] **Step 2: Run it, verify it fails**, then add the fixture and pass.
+- [x] **Step 3: Run every gate**
   - `make verify` — fmt-check, shellcheck, vet, lint, test (race + shuffle), vulncheck
   - `make crossbuild` — `pkg/` must build for windows and darwin
   - `make secrets` — gitleaks over full history
@@ -933,7 +939,7 @@ func TestTheSpecsFullExampleResolvesOffline(t *testing.T) {
 
   A red gate is reported with its output, not worked around.
 
-- [ ] **Step 4: Document what was learned, not what was built**
+- [x] **Step 4: Document what was learned, not what was built**
 
 Add to `docs/references/DECLARATIVE.md`: why the digest is verified before
 extraction and not after; why the scheme report exists on success and not only
@@ -943,7 +949,7 @@ and why no test in this package touches the network.
 Add to `CLAUDE.md`'s MANDATORY reading table:
 `pkg/source/transport.go`, credential guards → `docs/references/DECLARATIVE.md`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add pkg/source/testdata docs/references/DECLARATIVE.md CLAUDE.md
@@ -992,3 +998,81 @@ Task 3 and Task 5 consume them.
 
 **1. Subagent-Driven (recommended)** — a fresh subagent per task, review between.
 **2. Inline Execution** — batched with checkpoints.
+
+---
+
+## What Phase 3 turned up that the plan did not predict
+
+Written down because the plan was wrong about three of these, and re-deriving
+them costs the same mistakes twice.
+
+### The plan's own digest-ordering test was vacuous
+
+Task 5 specified asserting that a digest mismatch leaves no staged bytes and
+publishes nothing. Both hold **in either order**, because `Cache.Publish`
+removes a failed fill whether the failure came from the digest check or from
+the extractor. Moving `verifyDigest` after `extractTar` left the test green.
+
+The order is only observable through whether the extractor RAN. The test now
+serves an archive that is hostile AND digest-mismatched: verify-first fails on
+the digest, verify-second fails on the traversal — proving the extractor parsed
+unverified bytes. It carries a second fetch with a correct digest so it cannot
+pass for a `FetchArchive` that never extracts at all.
+
+**Two of the fourteen mutations initially failed to COMPILE rather than failing
+a test.** An invalid mutation proves nothing: `if false ||` left a variable
+unused, and Go refused the build, which greps as neither pass nor fail. Both
+were rewritten to keep the variable live. When a mutation produces no test
+output at all, that is the signal — not a passing guard.
+
+### Asserting on joined argv would have hidden the credential-in-URL bug
+
+The plan's own example test joined git's arguments with a space before
+searching for the token. That check passes with the token spliced into the URL,
+because the `http.extraHeader` argument legitimately contains the token. The
+test asserts on the argv **slice**, skipping the header argument and requiring
+every other argument to be token-free. `CLAUDE.md` already records this exact
+vacuity for the sandbox's `arg:[…]` versus `argv:` check; it recurred here.
+
+### Adding a source family is not local to the decoder
+
+Phase 1 Task 15 added `archive` to the union. `Required` and `Render` both
+switched on `Git`/`Local` by name, so an archive contributed no required input
+(§12 — Phase 3 would have fetched a private archive with no credential and
+reported a 401 naming nothing) and rendered as a resource with `source:` and
+nothing under it (§8's silent drop). Neither was in the task's steps. Every
+exhaustive switch over a union is part of adding a branch to it.
+
+### `--target` was the wrong shape for apply, and it took the surface to see it
+
+`ap apply --target claude <path>` shipped in Phase 2. The reference form
+(`ap manifest apply claude:plan <path>`) names the agent and the root in one
+token, which is why use case 1 notes that ap needs no flag `ach-cli` needs.
+`render` keeps `--target` because a file has no root to read one from — that
+asymmetry is the design, not an inconsistency to tidy away.
+
+### The cache belongs under XDG_CACHE_HOME, and beside the profiles
+
+Not inside one. A source fetched for `claude:plan` is the same bytes when
+`codex:review` asks for it, and content addressed by SHA or digest cannot
+collide between them. `XDG_CACHE_HOME` rather than `XDG_DATA_HOME` because a
+cache is reconstructible by definition — deleting it costs a re-fetch — which
+keeps it out of whatever the user backs up.
+
+### A `ref` is reported, not skipped
+
+Marketplace item resolution is Phase 6, so `Resolve` cannot turn
+`pdf@anthropic-skills` into bytes. Producing nothing for it silently would be
+§8's silent drop in the one output that tells a user what apply is about to do,
+so it comes back as a `Report` marked `–`. The marketplace's own catalogue IS
+fetched here: it is an ordinary locator, and only the item lookup inside it is
+deferred.
+
+### The §35 fixture is read, never copied
+
+`pkg/source`'s end-to-end test reads `pkg/schema/testdata/spec-35-execute.yaml`
+and rewrites its remote URLs to local repositories at test time. A second copy
+is exactly how the `auth` block drifted the first time. The rewrite strips the
+auth blocks — a credential may not cross a non-TLS transport and a local path is
+not https — and a sibling test keeps them intact to assert that the guard fires
+end to end through a real profile, not only through a hand-built `GitSpec`.
