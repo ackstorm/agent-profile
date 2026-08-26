@@ -6,14 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
-// ValidName is the whole boundary between user input and a path under Root. A
+// agentreg.ValidName is the whole boundary between user input and a path under Root. A
 // traversal got through code review here once — `ap create --from ../../../.claude`
 // escaped the profile root and copied the real home — so assert the property
 // itself rather than trusting an enumerated list of bad inputs.
 //
-// The property: if ValidName accepts a string, joining it under a root must stay
+// The property: if agentreg.ValidName accepts a string, joining it under a root must stay
 // under that root, and must be exactly one level deep.
 func FuzzValidName(f *testing.F) {
 	for _, seed := range []string{
@@ -28,37 +30,37 @@ func FuzzValidName(f *testing.F) {
 	const root = "/profiles/claude"
 
 	f.Fuzz(func(t *testing.T, name string) {
-		if err := ValidName(name); err != nil {
+		if err := agentreg.ValidName(name); err != nil {
 			return // rejected: nothing to prove
 		}
 
 		joined := filepath.Join(root, name)
 
 		if joined != filepath.Clean(joined) {
-			t.Fatalf("ValidName(%q) accepted, but the joined path is not clean: %q", name, joined)
+			t.Fatalf("agentreg.ValidName(%q) accepted, but the joined path is not clean: %q", name, joined)
 		}
 		rel, err := filepath.Rel(root, joined)
 		if err != nil {
-			t.Fatalf("ValidName(%q) accepted, but Rel failed: %v", name, err)
+			t.Fatalf("agentreg.ValidName(%q) accepted, but Rel failed: %v", name, err)
 		}
 		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			t.Fatalf("ESCAPE: ValidName(%q) accepted, but it resolves outside the root (rel %q)", name, rel)
+			t.Fatalf("ESCAPE: agentreg.ValidName(%q) accepted, but it resolves outside the root (rel %q)", name, rel)
 		}
 		if rel != name {
-			t.Fatalf("ValidName(%q) accepted, but it does not round-trip: rel is %q", name, rel)
+			t.Fatalf("agentreg.ValidName(%q) accepted, but it does not round-trip: rel is %q", name, rel)
 		}
 		if strings.ContainsRune(rel, filepath.Separator) {
-			t.Fatalf("ValidName(%q) accepted a nested path: %q", name, rel)
+			t.Fatalf("agentreg.ValidName(%q) accepted a nested path: %q", name, rel)
 		}
 		// A leading dot would collide with the dotfiles Link and List rely on.
 		if strings.HasPrefix(name, ".") {
-			t.Fatalf("ValidName(%q) accepted a dotfile name", name)
+			t.Fatalf("agentreg.ValidName(%q) accepted a dotfile name", name)
 		}
 	})
 }
 
 // The reference splitter is the second place user input becomes a path, and it
-// has one job: never hand back a segment ValidName would have rejected.
+// has one job: never hand back a segment agentreg.ValidName would have rejected.
 // FuzzValidName owns the "accepted name stays one level under the root"
 // property, so this one only has to prove nothing routes around it.
 func FuzzParseVariantRef(f *testing.F) {
@@ -76,12 +78,12 @@ func FuzzParseVariantRef(f *testing.F) {
 		if err != nil {
 			return // rejected: nothing to prove
 		}
-		if err := ValidName(name); err != nil {
-			t.Fatalf("ParseVariantRef(%q) accepted profile %q that ValidName rejects: %v", ref, name, err)
+		if err := agentreg.ValidName(name); err != nil {
+			t.Fatalf("ParseVariantRef(%q) accepted profile %q that agentreg.ValidName rejects: %v", ref, name, err)
 		}
 		if v != "" {
-			if err := ValidName(v); err != nil {
-				t.Fatalf("ParseVariantRef(%q) accepted variant %q that ValidName rejects: %v", ref, v, err)
+			if err := agentreg.ValidName(v); err != nil {
+				t.Fatalf("ParseVariantRef(%q) accepted variant %q that agentreg.ValidName rejects: %v", ref, v, err)
 			}
 		}
 		if n := strings.Count(ref, ":"); n > 2 {

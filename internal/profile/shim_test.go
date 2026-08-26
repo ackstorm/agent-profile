@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // fakeConfigBase points ConfigBase at a temporary directory containing the given
@@ -345,7 +345,7 @@ func TestShimBuildsOneDirectoryPerSpec(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a := agent.Agent{Name: "x", Shims: []agent.Shim{
+	a := agentreg.Agent{Name: "x", Shims: []agentreg.Shim{
 		{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"},
 		{Env: "XDG_DATA_HOME", Rel: "xdg-data", Entry: "opencode", Fallback: ".local/share"},
 	}}

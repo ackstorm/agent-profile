@@ -8,23 +8,23 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
-// ValidName is the only thing standing between user input and a path under Root.
+// agentreg.ValidName is the only thing standing between user input and a path under Root.
 // Every caller that builds a path from user input must run it — `ap create
 // --from` skipped it once and became a traversal out of the profile root.
 func TestValidNameRejectsTraversal(t *testing.T) {
 	for _, bad := range []string{
 		"..", ".", "../x", "../../../.claude", "a/b", `a\b`, ".hidden", "", "has space", "x..y/z",
 	} {
-		if err := ValidName(bad); err == nil {
-			t.Errorf("ValidName(%q) = nil, want error", bad)
+		if err := agentreg.ValidName(bad); err == nil {
+			t.Errorf("agentreg.ValidName(%q) = nil, want error", bad)
 		}
 	}
 	for _, good := range []string{"plan", "review", "my_profile-2", "a"} {
-		if err := ValidName(good); err != nil {
-			t.Errorf("ValidName(%q) = %v, want nil", good, err)
+		if err := agentreg.ValidName(good); err != nil {
+			t.Errorf("agentreg.ValidName(%q) = %v, want nil", good, err)
 		}
 	}
 }
@@ -42,7 +42,7 @@ func TestCloneRefusesDestinationInsideSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := Clone(agent.Agent{Name: "fake"}, src, dst)
+	err := Clone(agentreg.Agent{Name: "fake"}, src, dst)
 	if err == nil {
 		t.Fatal("Clone into a subdirectory of the source = nil error, want refusal")
 	}
@@ -57,7 +57,7 @@ func TestCloneRefusesDestinationInsideSource(t *testing.T) {
 
 func TestCloneRefusesIdenticalSourceAndDestination(t *testing.T) {
 	d := t.TempDir()
-	err := Clone(agent.Agent{Name: "fake"}, d, d)
+	err := Clone(agentreg.Agent{Name: "fake"}, d, d)
 	if err == nil {
 		t.Fatal("Clone(src, src) = nil error, want refusal")
 	}
@@ -82,7 +82,7 @@ func TestCloneRefusesSymlinkedDestinationResolvingIntoSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := Clone(agent.Agent{Name: "fake"}, real, link)
+	err := Clone(agentreg.Agent{Name: "fake"}, real, link)
 	if err == nil {
 		t.Fatal("Clone into a symlink resolving to the source = nil error, want refusal")
 	}
@@ -103,7 +103,7 @@ func TestCloneResolvesSymlinkedSource(t *testing.T) {
 	}
 
 	dst := t.TempDir()
-	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json"}}
+	a := agentreg.Agent{Name: "fake", CloneAllow: []string{"settings.json"}}
 	if err := Clone(a, link, dst); err != nil {
 		t.Fatalf("Clone from a symlinked source: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestLinkRefusesToReachThroughSymlinkedAncestor(t *testing.T) {
 	if err := os.Mkdir(apThinks, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "plugins/cache", From: apThinks},
 	}}
 
@@ -177,7 +177,7 @@ func TestLinkIsIdempotentAndKeepsTheTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "sessions", From: sessions},
 	}}
 	for i := range 3 {
@@ -209,7 +209,7 @@ func TestDeleteDoesNotFollowNestedSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "claude", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "claude", Shared: []agentreg.Share{
 		{Rel: "plugins/cache", From: realCache},
 	}}
 	dir, err := Create(a, "nested")
@@ -262,8 +262,8 @@ func TestListIncludesSymlinkedProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 || got[0] != Default || got[1] != "golden" || got[2] != "real" {
-		t.Errorf("List = %v, want [%s golden real]", got, Default)
+	if len(got) != 3 || got[0] != agentreg.Default || got[1] != "golden" || got[2] != "real" {
+		t.Errorf("List = %v, want [%s golden real]", got, agentreg.Default)
 	}
 }
 
@@ -279,7 +279,7 @@ func TestLinkReportsSkippedFileShares(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "CLAUDE.md", From: present},
 		{Rel: "auth.json", From: filepath.Join(realHome, "auth.json")},
 	}}
@@ -308,7 +308,7 @@ func TestLinkNeverInventsAMissingTarget(t *testing.T) {
 	missing := filepath.Join(realHome, "auth.json")
 
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "auth.json", From: missing},
 	}}
 
@@ -328,8 +328,8 @@ func TestLinkNeverInventsAMissingTarget(t *testing.T) {
 }
 
 // Discard removes a half-created profile, and the name it is given came from the
-// command line. ValidName is what normally makes that safe, but Discard does not
-// depend on ValidName having been called: it removes through an os.Root confined
+// command line. agentreg.ValidName is what normally makes that safe, but Discard does not
+// depend on agentreg.ValidName having been called: it removes through an os.Root confined
 // to the agent directory, so confinement is enforced by the runtime.
 //
 // Reverting Discard to os.RemoveAll(Dir(a, name)) makes this test fail.

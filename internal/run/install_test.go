@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 func has(env []string, kv string) bool {
@@ -71,7 +71,7 @@ func TestStripProfilePathsRemovesTheRootItselfAndAnythingUnderIt(t *testing.T) {
 // A claude install must not be redirected by an inherited CODEX_HOME, and must
 // still see its own variable pointed at the profile.
 func TestInstallEnvSetsOnlyItsOwnAgentVariable(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	root := "/data/profiles"
 	dir := filepath.Join(root, "claude", "execute")
 	got := InstallEnv(a, dir, root, []string{
@@ -90,7 +90,7 @@ func TestInstallEnvSetsOnlyItsOwnAgentVariable(t *testing.T) {
 // claude:default` does — the environment the agent sees when ap is not
 // involved, which is the entire point of naming it.
 func TestInstallEnvForDefaultSetsNoOverride(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got := InstallEnv(a, "", "/data/profiles", []string{
 		"CLAUDE_CONFIG_DIR=/data/profiles/claude/other",
 		"PATH=/usr/bin",
@@ -103,7 +103,7 @@ func TestInstallEnvForDefaultSetsNoOverride(t *testing.T) {
 // opencode's install has to see the shim, or a tool that populates the profile
 // writes where the agent never reads.
 func TestInstallEnvGivesOpencodeItsShims(t *testing.T) {
-	a, _ := agent.Lookup("opencode")
+	a, _ := agentreg.Lookup("opencode")
 	root := "/data/profiles"
 	dir := filepath.Join(root, "opencode", "execute")
 	got := InstallEnv(a, dir, root, []string{"PATH=/usr/bin"})

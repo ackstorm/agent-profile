@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/session"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // dispatch is where user input becomes a filesystem path, and it had no tests at
@@ -91,7 +91,7 @@ func TestResumeArgvPutsTheIDAtThePlaceholder(t *testing.T) {
 		{"pi", "abc", []string{"--session", "abc"}},
 		{"opencode", "abc", []string{"-s", "abc"}},
 	} {
-		a, _ := agent.Lookup(tc.agent)
+		a, _ := agentreg.Lookup(tc.agent)
 		got := resumeArgs(a, tc.id, nil)
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.agent, got, tc.want)
@@ -102,7 +102,7 @@ func TestResumeArgvPutsTheIDAtThePlaceholder(t *testing.T) {
 // Extra arguments follow the resume flag, so `ap resume <id> --model opus`
 // reaches the agent. Same passthrough rule as `ap run`.
 func TestResumePassesExtraArgsThrough(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got := resumeArgs(a, "abc", []string{"--model", "opus"})
 	want := []string{"--resume", "abc", "--model", "opus"}
 	if !slices.Equal(got, want) {
@@ -358,14 +358,14 @@ func TestDispatchRunOnMissingDefaultNamesTheRealPathNotACreateCommand(t *testing
 // catches the regression that testing the pipe would.
 func TestSetupHintComesFromTheAgent(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "opencode", "pi"} {
-		a, _ := agent.Lookup(name)
+		a, _ := agentreg.Lookup(name)
 		got := setupHint(a, "x")
 		if !strings.Contains(got, name+":x") {
 			t.Errorf("%s: hint %q does not name the profile", name, got)
 		}
 	}
-	claude, _ := agent.Lookup("claude")
-	opencode, _ := agent.Lookup("opencode")
+	claude, _ := agentreg.Lookup("claude")
+	opencode, _ := agentreg.Lookup("opencode")
 	if setupHint(claude, "x") == setupHint(opencode, "x") {
 		t.Error("claude and opencode print the same hint: it is hardcoded again")
 	}
@@ -379,7 +379,7 @@ func TestCopyInstructionsFailsBeforeCreatingAnythingWhenUnknown(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "codex") {
 		t.Fatalf("want an error naming the agent, got %v", err)
 	}
-	a, _ := agent.Lookup("codex")
+	a, _ := agentreg.Lookup("codex")
 	if profile.Exists(a, "nomd") {
 		t.Error("a profile was created despite the flag being unusable")
 	}
@@ -401,7 +401,7 @@ func TestDefaultIsRejectedByEverythingThatWrites(t *testing.T) {
 }
 
 func TestDeleteDefaultLeavesTheRealConfigAlone(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	before, err := os.Stat(a.Config)
 	if err != nil {
 		t.Skip("no real claude config on this machine")
@@ -441,7 +441,7 @@ func TestDispatchCreateFromDefaultIsNeverRejectedAsInvalid(t *testing.T) {
 	if err := dispatch([]string{"create", "claude:fromdefault", "--from", "default"}); err != nil {
 		t.Fatalf("--from default = %v, want nil", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got, err := os.ReadFile(filepath.Join(profile.Dir(a, "fromdefault"), "settings.json"))
 	if err != nil {
 		t.Fatalf("settings.json was not cloned: %v", err)
@@ -466,7 +466,7 @@ func TestCreateSeedsTheFirstRunFlags(t *testing.T) {
 	if err := dispatch([]string{"create", "claude:seeded"}); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	b, err := os.ReadFile(filepath.Join(profile.Dir(a, "seeded"), ".claude.json"))
 	if err != nil {
 		t.Fatalf("create seeded nothing: %v", err)
@@ -500,7 +500,7 @@ func TestSeedFirstRunNeverRewritesAnExistingFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".claude.json"), mine, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	keys, err := seedFirstRun(a, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -675,7 +675,7 @@ func TestUnlinkToleratesAMissingLinkDir(t *testing.T) {
 func TestDeleteToleratesAMissingLinkDir(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", filepath.Join(t.TempDir(), "does-not-exist"))
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:nolinkdir"}); err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +704,7 @@ func TestDeleteRemovesTheWrapper(t *testing.T) {
 
 func TestCopyInstructionsWritesARealFileNotALink(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := os.Stat(a.Instructions.Source); err != nil {
 		// Not a pass: this asserts nothing about --copy-instructions when it skips.
 		// It only runs on a machine (or container) that has ~/.claude/CLAUDE.md;
@@ -771,7 +771,7 @@ func TestDeleteWithoutYesAndWithNoAnswerKeepsTheProfile(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	noStdin(t)
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:keepme"}); err != nil {
 		t.Fatal(err)
 	}
@@ -807,7 +807,7 @@ func firstVariant(t *testing.T, args ...string) {
 func TestVariantOverwriteWithNoAnswerKeepsTheOldArguments(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -829,7 +829,7 @@ func TestVariantOverwriteWithNoAnswerKeepsTheOldArguments(t *testing.T) {
 func TestVariantAnsweringNoLeavesTheArgumentsAlone(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +881,7 @@ func TestVariantOverwritePromptShowsBothArgumentLists(t *testing.T) {
 func TestVariantYesOverwritesFromEitherSideOfTheReference(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -931,7 +931,7 @@ func TestVariantYesOnANewVariantJustCreatesIt(t *testing.T) {
 func TestVariantDoesNotParseFlagsAfterTheSeparator(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1016,7 +1016,7 @@ func stderrOf(t *testing.T, f func() error) (string, error) {
 func TestWhichAndEnvPrintOneBareConsumableLine(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:bare"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1065,7 +1065,7 @@ func TestVariantWritesTheStoreAndTheWrapper(t *testing.T) {
 	if err := dispatch(append([]string{"variant", "claude:review:opus", "--"}, args...)); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got, err := profile.VariantArgs(a, "review", "opus")
 	if err != nil {
 		t.Fatalf("the store has no entry: %v", err)
@@ -1100,7 +1100,7 @@ func TestVariantRefusesAMissingParent(t *testing.T) {
 	if !strings.Contains(err.Error(), "claude:nope") {
 		t.Errorf("error %q does not name the missing parent", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if profile.Exists(a, "nope") {
 		t.Error("the parent profile was created implicitly")
 	}
@@ -1142,7 +1142,7 @@ func TestVariantStoresFlagsApItselfOwns(t *testing.T) {
 	if err := dispatch(append([]string{"variant", "claude:review:literal", "--"}, payload...)); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got, err := profile.VariantArgs(a, "review", "literal")
 	if err != nil {
 		t.Fatal(err)
@@ -1268,7 +1268,7 @@ func TestLinkRendersTheSameWrapperBytesAsBefore(t *testing.T) {
 // testing the function catches the regression that testing the exec would.
 func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "review"); err != nil {
 		t.Fatal(err)
 	}
@@ -1304,7 +1304,7 @@ func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
 // to make one element out of two.
 func TestRunArgsFillsThePlaceholderInsteadOfAppending(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "execute"); err != nil {
 		t.Fatal(err)
 	}
@@ -1335,7 +1335,7 @@ func TestRunArgsFillsThePlaceholderInsteadOfAppending(t *testing.T) {
 // with no argument, so the agent asks, is a legitimate use of the same name.
 func TestRunArgsFillsEveryPlaceholderAndJoinsTheCaller(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "execute"); err != nil {
 		t.Fatal(err)
 	}
@@ -1376,7 +1376,7 @@ func TestRunArgsFillsEveryPlaceholderAndJoinsTheCaller(t *testing.T) {
 // mentions it is not a variant with an empty placeholder.
 func TestRunArgsWithoutAPlaceholderStillAppends(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "review"); err != nil {
 		t.Fatal(err)
 	}
@@ -1501,7 +1501,7 @@ func TestWhichAndEnvOnAVariantAnswerForTheParent(t *testing.T) {
 	if err := dispatch([]string{"variant", "claude:review:opus", "--", "-p"}); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	dir := profile.Dir(a, "review")
 
 	if got := stdoutOf(t, func() error { return dispatch([]string{"which", "claude:review:opus"}) }); got != dir+"\n" {
@@ -1533,7 +1533,7 @@ func TestDeleteAVariantAsksNothingAndLeavesTheProfile(t *testing.T) {
 			t.Fatalf("ap %v: %v", args, err)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if !profile.Exists(a, "review") {
 		t.Fatal("deleting a variant removed the profile")
 	}
@@ -1565,7 +1565,7 @@ func TestDeleteAProfileRemovesItsVariantsAndTheirWrappers(t *testing.T) {
 			t.Fatalf("ap %v: %v", args, err)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
 		t.Errorf("the variants outlived their profile: %v", got)
 	}
@@ -1600,7 +1600,7 @@ func TestDeleteAProfileNamesItsVariantsInTheConfirmation(t *testing.T) {
 			t.Errorf("the prompt %q does not mention %q", out, want)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if !profile.Exists(a, "review") {
 		t.Error("delete removed the profile without an answer")
 	}
@@ -1716,7 +1716,7 @@ func TestListNestsEachVariantUnderItsProfile(t *testing.T) {
 // Default is the one row ap did not create and cannot remove: profile.Dir
 // resolves it to the agent's real config directory, so `ap delete
 // claude:default` would erase the configuration of the agent itself, and
-// profile.ValidName refuses it. Printing it like any other profile is what
+// agentreg.ValidName refuses it. Printing it like any other profile is what
 // invites that command in the first place.
 //
 // The marking is on Default's own line, and this reads that line rather than the
@@ -1731,9 +1731,9 @@ func TestListMarksDefaultAsNotAProfile(t *testing.T) {
 	}
 	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
 
-	line := listLineFor(t, out, "claude:"+profile.Default)
+	line := listLineFor(t, out, "claude:"+agentreg.Default)
 	if !strings.Contains(line, "read-only") {
-		t.Errorf("%q is printed like any other profile: %q", profile.Default, line)
+		t.Errorf("%q is printed like any other profile: %q", agentreg.Default, line)
 	}
 	// And no ordinary profile carries it, which is what makes it a marking rather
 	// than a banner every row repeats.
@@ -1776,8 +1776,8 @@ func TestListRawIsWhatScriptsSmokeParses(t *testing.T) {
 		got = append(got, name)
 	}
 	sort.Strings(got)
-	if strings.Join(got, " ") != strings.Join(agent.Names(), " ") {
-		t.Errorf("smoke.sh's filter over `ap list --raw` yields %v, want exactly the agents %v", got, agent.Names())
+	if strings.Join(got, " ") != strings.Join(agentreg.Names(), " ") {
+		t.Errorf("smoke.sh's filter over `ap list --raw` yields %v, want exactly the agents %v", got, agentreg.Names())
 	}
 }
 
@@ -1931,7 +1931,7 @@ func TestDeleteReportsTheProfileEvenWhenAWrapperIsRefused(t *testing.T) {
 	if _, err := os.Stat(foreign); err != nil {
 		t.Errorf("ap removed a file it did not write: %v", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
 		t.Errorf("the store outlived the profile: %v", got)
 	}
@@ -1954,7 +1954,7 @@ func TestListReportsAnUnreadableVariantWithoutAbandoningTheRest(t *testing.T) {
 			t.Fatalf("ap %v: %v", args, err)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	// A zero-byte entry: what an interrupted write used to be able to leave.
 	empty := filepath.Join(profile.VariantsRoot(), a.Name, "review", "broken")
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
@@ -1969,7 +1969,7 @@ func TestListReportsAnUnreadableVariantWithoutAbandoningTheRest(t *testing.T) {
 		t.Errorf("a readable variant was lost:\n%s", out)
 	}
 	// Every agent still gets its line, which is what smoke.sh's agents() reads.
-	for _, name := range agent.Names() {
+	for _, name := range agentreg.Names() {
 		if !strings.Contains(out, name+":") {
 			t.Errorf("agent %q vanished from the listing:\n%s", name, out)
 		}
@@ -1988,7 +1988,7 @@ func TestCreateOnlySettingsRequiresFrom(t *testing.T) {
 	if !strings.Contains(err.Error(), "--from") {
 		t.Errorf("error = %v, want it to name --from", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if profile.Exists(a, "nofrom") {
 		t.Error("the profile was created before the flags were validated")
 	}
@@ -2019,7 +2019,7 @@ func TestCreateOnlySettingsSkipsEveryOtherCloneAllowEntry(t *testing.T) {
 		"--only-settings", "statusLine", "--only-settings", "theme"}); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	dir := profile.Dir(a, "slim")
 	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
 	if err != nil {
@@ -2064,7 +2064,7 @@ func TestCreateOnlySettingsWarnsAboutAMissingKeyAndStillCreates(t *testing.T) {
 	if !strings.Contains(stderr, "statuLine") || !strings.Contains(stderr, "settings.json") {
 		t.Errorf("stderr = %q, want it to name the missing key and the file it was looked for in", stderr)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if !profile.Exists(a, "typo") {
 		t.Error("the profile was not created")
 	}
@@ -2134,7 +2134,7 @@ func TestShimWarningNamesTheMatchingBase(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "dat"))
 
-	a, _ := agent.Lookup("opencode")
+	a, _ := agentreg.Lookup("opencode")
 	for _, tc := range []struct{ found, wantBase string }{
 		{filepath.Join("xdg", "git"), filepath.Join(home, "cfg")},
 		{filepath.Join("xdg-data", "fonts"), filepath.Join(home, "dat")},

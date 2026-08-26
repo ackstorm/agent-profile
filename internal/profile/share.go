@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // orphanSuffix names what a share used to be before an agent overwrote the link
@@ -110,7 +110,7 @@ type Conflict struct {
 // Link also removes any symlink sitting at a path the registry lists in Unshared —
 // state that used to be common and no longer is. That makes a change to the registry
 // take effect in profiles created before it, instead of only in new ones.
-func Link(a agent.Agent, dir string, resolve func(Conflict) Resolution) (linked, skipped, unshared, orphaned []string, err error) {
+func Link(a agentreg.Agent, dir string, resolve func(Conflict) Resolution) (linked, skipped, unshared, orphaned []string, err error) {
 	// Inspect and remove through an os.Root confined to the profile directory.
 	// os.Lstat only refuses to follow the FINAL path component: every ancestor is
 	// resolved by the kernel, so with a nested Rel such as "plugins/cache" a
@@ -205,7 +205,7 @@ func Link(a agent.Agent, dir string, resolve func(Conflict) Resolution) (linked,
 // rewrites its credential on refresh whether or not the tokens changed, and a
 // prompt whose two answers produce the same file is noise that teaches people to
 // dismiss the prompt that matters.
-func offerPromotion(root *os.Root, dir string, s agent.Share, fi, sfi fs.FileInfo, resolve func(Conflict) Resolution) error {
+func offerPromotion(root *os.Root, dir string, s agentreg.Share, fi, sfi fs.FileInfo, resolve func(Conflict) Resolution) error {
 	if resolve == nil {
 		return nil
 	}
@@ -328,15 +328,15 @@ func writeIn(root *os.Root, rel string, data []byte) error {
 // home are untouched. TestDeleteDoesNotFollowSymlinks is what keeps that true —
 // it is the one bug in this program that would be irreversible.
 //
-// Default is refused here directly, not only via ParseRef upstream: Dir(a,
-// Default) is the agent's real config directory, and this is the one call in
+// agentreg.Default is refused here directly, not only via ParseRef upstream: Dir(a,
+// agentreg.Default) is the agent's real config directory, and this is the one call in
 // the whole program that would remove it outright. The guard must not depend
 // on a validator having been called correctly somewhere else, the same reason
 // Link and Discard go through an os.Root instead of trusting their caller.
-func Delete(a agent.Agent, name string) error {
-	if name == Default {
+func Delete(a agentreg.Agent, name string) error {
+	if name == agentreg.Default {
 		return fmt.Errorf("refusing to delete %s:%s: it is your real config, not a profile ap made",
-			a.Name, Default)
+			a.Name, agentreg.Default)
 	}
 	dir := Dir(a, name)
 	// Lstat, not Stat: a dangling symlink would otherwise report "does not exist"
@@ -352,9 +352,9 @@ func Delete(a agent.Agent, name string) error {
 //
 // The removal goes through an os.Root confined to the agent's directory, so the
 // only thing it can delete is one entry directly inside it. That confinement is
-// enforced by the runtime rather than by ValidName having been called correctly
+// enforced by the runtime rather than by agentreg.ValidName having been called correctly
 // somewhere upstream — the same reason Link uses a Root.
-func Discard(a agent.Agent, name string) {
+func Discard(a agentreg.Agent, name string) {
 	root, err := os.OpenRoot(filepath.Join(Root(), a.Name))
 	if err != nil {
 		return

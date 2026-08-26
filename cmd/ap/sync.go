@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/manifest"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // installTimeout bounds every bootstrap and install command.
@@ -96,8 +96,8 @@ type filePlan struct {
 
 // targetPlan is one <platform>:<name> identity.
 type targetPlan struct {
-	a    agent.Agent
-	name string // the profile name, or profile.Default
+	a    agentreg.Agent
+	name string // the profile name, or agentreg.Default
 	ref  string // "<agent>:<name>", as the report and every error name it
 	// path is the directory install writes into: the profile, or — for a
 	// default target — the agent's real config directory. Printed by

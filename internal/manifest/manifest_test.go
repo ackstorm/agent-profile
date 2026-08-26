@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 const goodManifest = `version: 1
@@ -102,10 +102,10 @@ func TestNameDefaultIsTheSentinelAndValidNameStillRejectsIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if m.Name != profile.Default || !m.IsDefault() {
+	if m.Name != agentreg.Default || !m.IsDefault() {
 		t.Fatalf("Name = %q, IsDefault = %v", m.Name, m.IsDefault())
 	}
-	if profile.ValidName(profile.Default) == nil {
+	if agentreg.ValidName(agentreg.Default) == nil {
 		t.Fatal("ValidName now ACCEPTS \"default\"; the sentinel must be handled above it, never by loosening it")
 	}
 }

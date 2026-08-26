@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // sliceSettings builds a new settings file out of the named keys of an existing
@@ -20,8 +20,8 @@ import (
 // about the rest. Finding nothing returns a nil slice rather than an empty file:
 // an empty settings file reads as "deliberately blank", which is not what a
 // mistyped key means.
-func sliceSettings(f agent.Format, b []byte, keys []string) (out []byte, found []string, err error) {
-	if f == agent.TOML {
+func sliceSettings(f agentreg.Format, b []byte, keys []string) (out []byte, found []string, err error) {
+	if f == agentreg.TOML {
 		return sliceTOML(b, keys)
 	}
 	return sliceJSON(b, keys)

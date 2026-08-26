@@ -6,12 +6,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // ConfigDir is the value a.ConfigEnv is set to: the profile itself, or the
 // matching shim directory inside it for an agent that needs one.
-func ConfigDir(a agent.Agent, dir string) string {
+func ConfigDir(a agentreg.Agent, dir string) string {
 	for _, s := range a.Shims {
 		if s.Env == a.ConfigEnv {
 			return filepath.Join(dir, s.Rel)
@@ -22,7 +22,7 @@ func ConfigDir(a agent.Agent, dir string) string {
 
 // shimEnv is every variable a's shims claim, mapped to its directory inside the
 // profile. Empty for an agent with a private config variable.
-func shimEnv(a agent.Agent, dir string) map[string]string {
+func shimEnv(a agentreg.Agent, dir string) map[string]string {
 	out := make(map[string]string, len(a.Shims))
 	for _, s := range a.Shims {
 		out[s.Env] = filepath.Join(dir, s.Rel)
@@ -42,7 +42,7 @@ func shimEnv(a agent.Agent, dir string) map[string]string {
 //
 // dir == "" sets no override at all: the shape `ap run <agent>:default` needs,
 // since the agent's real config directory is wherever it already looks with no
-// variable set. The caller passes that fact in explicitly — profile.Default
+// variable set. The caller passes that fact in explicitly — agentreg.Default
 // resolves to the real config directory for every other purpose, so inferring
 // "no override" from dir equaling it here would be one string comparison away
 // from silently breaking the day that directory moves.
@@ -50,8 +50,8 @@ func shimEnv(a agent.Agent, dir string) map[string]string {
 // XDG_STATE_HOME and XDG_CACHE_HOME are never redirected, and neither is HOME.
 // XDG_DATA_HOME is, for opencode only and only through a shim, because that is
 // where its sessions live and it has no private variable for them. See
-// agent.Shim.
-func Env(a agent.Agent, dir string, base []string) []string {
+// agentreg.Shim.
+func Env(a agentreg.Agent, dir string, base []string) []string {
 	overrides := map[string]string{}
 	if dir != "" {
 		overrides[a.ConfigEnv] = ConfigDir(a, dir)

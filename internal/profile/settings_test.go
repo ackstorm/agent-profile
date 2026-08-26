@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // Naming a key takes its value whole, with its nesting, and takes nothing else.
@@ -21,7 +21,7 @@ func TestSliceJSONTakesTheNamedKeysAndNothingElse(t *testing.T) {
 	  "mcpServers": {"linear": {"url": "https://l"}, "other": {"url": "https://o"}}
 	}`)
 
-	out, found, err := sliceSettings(agent.JSON, src, []string{"statusLine", "theme"})
+	out, found, err := sliceSettings(agentreg.JSON, src, []string{"statusLine", "theme"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestSliceJSONTakesTheNamedKeysAndNothingElse(t *testing.T) {
 func TestSliceJSONMergesTwoPathsSharingAParent(t *testing.T) {
 	src := []byte(`{"mcpServers": {"linear": {"url": "l"}, "gh": {"url": "g"}, "no": {"url": "n"}}}`)
 
-	out, found, err := sliceSettings(agent.JSON, src, []string{"mcpServers.linear", "mcpServers.gh"})
+	out, found, err := sliceSettings(agentreg.JSON, src, []string{"mcpServers.linear", "mcpServers.gh"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestSliceJSONParentDominatesRegardlessOfOrder(t *testing.T) {
 		{"mcpServers", "mcpServers.linear"},
 		{"mcpServers.linear", "mcpServers"},
 	} {
-		out, found, err := sliceSettings(agent.JSON, src, keys)
+		out, found, err := sliceSettings(agentreg.JSON, src, keys)
 		if err != nil {
 			t.Fatalf("keys=%v: %v", keys, err)
 		}
@@ -105,7 +105,7 @@ func TestSliceJSONParentDominatesRegardlessOfOrder(t *testing.T) {
 func TestSliceJSONReportsWhatItCouldNotFind(t *testing.T) {
 	src := []byte(`{"theme": "dark", "a.b": 1, "a": {"c": 2}}`)
 
-	out, found, err := sliceSettings(agent.JSON, src, []string{"themey", "a.b", "a.c"})
+	out, found, err := sliceSettings(agentreg.JSON, src, []string{"themey", "a.b", "a.c"})
 	if err != nil {
 		t.Fatalf("a missing key must not be an error: %v", err)
 	}
@@ -122,14 +122,14 @@ func TestSliceJSONReportsWhatItCouldNotFind(t *testing.T) {
 // Nothing found means no file at all, rather than an empty object the agent
 // would then read as "these settings are deliberately blank".
 func TestSliceJSONFindingNothingProducesNoFile(t *testing.T) {
-	out, found, err := sliceSettings(agent.JSON, []byte(`{"theme":"dark"}`), []string{"nope"})
+	out, found, err := sliceSettings(agentreg.JSON, []byte(`{"theme":"dark"}`), []string{"nope"})
 	if err != nil || out != nil || found != nil {
 		t.Errorf("sliceSettings = (%s, %q, %v), want (nil, nil, nil)", out, found, err)
 	}
 }
 
 func TestSliceJSONRejectsAnUnreadableFile(t *testing.T) {
-	if _, _, err := sliceSettings(agent.JSON, []byte("not json"), []string{"theme"}); err == nil {
+	if _, _, err := sliceSettings(agentreg.JSON, []byte("not json"), []string{"theme"}); err == nil {
 		t.Error("sliceSettings accepted a file that is not JSON")
 	}
 }
@@ -140,7 +140,7 @@ func TestSliceJSONRejectsAnUnreadableFile(t *testing.T) {
 // above) is still an error; this is specifically the "nothing here" case.
 func TestSliceJSONTakesAnEmptyOrWhitespaceFileAsNothingFound(t *testing.T) {
 	for _, src := range [][]byte{{}, []byte("   \n")} {
-		out, found, err := sliceSettings(agent.JSON, src, []string{"theme"})
+		out, found, err := sliceSettings(agentreg.JSON, src, []string{"theme"})
 		if err != nil || out != nil || found != nil {
 			t.Errorf("sliceSettings(%q) = (%s, %q, %v), want (nil, nil, nil)", src, out, found, err)
 		}
@@ -179,7 +179,7 @@ trusted = true
 // before it — a block starts at its header, and attaching leading comments to
 // the following section would be a guess about intent.
 func TestSliceTOMLTakesATableAndItsChildren(t *testing.T) {
-	out, found, err := sliceSettings(agent.TOML, []byte(tomlFixture), []string{"tui"})
+	out, found, err := sliceSettings(agentreg.TOML, []byte(tomlFixture), []string{"tui"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestSliceTOMLTakesATableAndItsChildren(t *testing.T) {
 // A sub-table is nameable on its own, and naming one does not bring its
 // siblings: mcp_servers.codemem is one server, not every server.
 func TestSliceTOMLLeavesSiblingTables(t *testing.T) {
-	out, _, err := sliceSettings(agent.TOML, []byte(tomlFixture), []string{"mcp_servers.codemem"})
+	out, _, err := sliceSettings(agentreg.TOML, []byte(tomlFixture), []string{"mcp_servers.codemem"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestSliceTOMLParentDominatesRegardlessOfOrder(t *testing.T) {
 		{"tui", "tui.model_availability_nux"},
 		{"tui.model_availability_nux", "tui"},
 	} {
-		out, found, err := sliceSettings(agent.TOML, []byte(tomlFixture), keys)
+		out, found, err := sliceSettings(agentreg.TOML, []byte(tomlFixture), keys)
 		if err != nil {
 			t.Fatalf("keys=%v: %v", keys, err)
 		}
@@ -237,7 +237,7 @@ func TestSliceTOMLParentDominatesRegardlessOfOrder(t *testing.T) {
 // A top-level scalar lives before the first header and is matched on the key
 // part of its line.
 func TestSliceTOMLMatchesATopLevelScalar(t *testing.T) {
-	out, found, err := sliceSettings(agent.TOML, []byte(tomlFixture), []string{"model"})
+	out, found, err := sliceSettings(agentreg.TOML, []byte(tomlFixture), []string{"model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestSliceTOMLMatchesATopLevelScalar(t *testing.T) {
 // [[x]] is a header of x, so every block of an array of tables is emitted, in
 // source order. Free, because the blocks are verbatim.
 func TestSliceTOMLEmitsEveryArrayOfTablesBlock(t *testing.T) {
-	out, _, err := sliceSettings(agent.TOML, []byte(tomlFixture), []string{"hooks.state"})
+	out, _, err := sliceSettings(agentreg.TOML, []byte(tomlFixture), []string{"hooks.state"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestSliceTOMLEmitsOnlySourceLines(t *testing.T) {
 	for _, ln := range strings.Split(tomlFixture, "\n") {
 		src[ln] = true
 	}
-	out, _, err := sliceSettings(agent.TOML, []byte(tomlFixture),
+	out, _, err := sliceSettings(agentreg.TOML, []byte(tomlFixture),
 		[]string{"model", "tui", "mcp_servers.codemem", "hooks.state", `projects."/tmp/a]b"`})
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +293,7 @@ func TestSliceTOMLEmitsOnlySourceLines(t *testing.T) {
 func TestSliceTOMLRefusesAMultilineString(t *testing.T) {
 	for _, q := range []string{`"""`, "'''"} {
 		src := "[tui]\nbanner = " + q + "\n[not a header]\n" + q + "\n"
-		_, _, err := sliceSettings(agent.TOML, []byte(src), []string{"tui"})
+		_, _, err := sliceSettings(agentreg.TOML, []byte(src), []string{"tui"})
 		if err == nil {
 			t.Fatalf("%s was accepted; a header inside it cannot be told from a real one", q)
 		}
@@ -314,7 +314,7 @@ func TestSliceTOMLRefusesAMultilineArray(t *testing.T) {
 		"matrix = [\n" +
 		"  [1, 2],\n" +
 		"]\n"
-	_, _, err := sliceSettings(agent.TOML, []byte(src), []string{"tui"})
+	_, _, err := sliceSettings(agentreg.TOML, []byte(src), []string{"tui"})
 	if err == nil {
 		t.Fatal("a multi-line array was accepted; a \"[\" inside it cannot be told from a header")
 	}

@@ -21,15 +21,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // Session is one resumable conversation, in the only terms every agent shares.
 type Session struct {
 	// Agent and Profile say where it was found: "claude" and "execute", or
-	// profile.Default for the bare agent outside any profile.
+	// agentreg.Default for the bare agent outside any profile.
 	Agent   string
 	Profile string
 	// ID is the agent's own identifier, passed back to it verbatim to resume.
@@ -102,14 +102,14 @@ func (f Filter) matches(s Session) bool {
 
 // envDir is the directory run.Env should be given for a profile.
 //
-// Empty for profile.Default, which is not a profile at all but the agent's own
+// Empty for agentreg.Default, which is not a profile at all but the agent's own
 // machine-wide configuration: reaching it means inheriting the environment
 // untouched. Passing profile.Dir's answer instead builds a real override at
 // <real config>/xdg-data, a directory that does not exist — measured, opencode
 // then listed nothing for :default and would have written state into the user's
 // own config directory.
-func envDir(a agent.Agent, profileName string) string {
-	if profileName == profile.Default {
+func envDir(a agentreg.Agent, profileName string) string {
+	if profileName == agentreg.Default {
 		return ""
 	}
 	return profile.Dir(a, profileName)
@@ -397,8 +397,8 @@ type Result struct {
 // that aborts because one directory is odd is a listing nobody trusts.
 func Scan(max int, f Filter, warn func(error)) Result {
 	var res Result
-	for _, name := range agent.Names() {
-		a, ok := agent.Lookup(name)
+	for _, name := range agentreg.Names() {
+		a, ok := agentreg.Lookup(name)
 		if !ok || a.Sessions == nil {
 			continue
 		}
@@ -414,7 +414,7 @@ func Scan(max int, f Filter, warn func(error)) Result {
 				continue
 			}
 			pDir := profile.Dir(a, p)
-			if a.Sessions.Layout == agent.LayoutExec {
+			if a.Sessions.Layout == agentreg.LayoutExec {
 				bin, err := exec.LookPath(a.Bin)
 				if err != nil {
 					continue
@@ -442,11 +442,11 @@ func Scan(max int, f Filter, warn func(error)) Result {
 				storeDir := filepath.Join(pDir, a.Sessions.Rel)
 				var reader readerFunc
 				switch a.Sessions.Layout {
-				case agent.LayoutClaudeProjects:
+				case agentreg.LayoutClaudeProjects:
 					reader = readClaude
-				case agent.LayoutCodexRollouts:
+				case agentreg.LayoutCodexRollouts:
 					reader = readCodex
-				case agent.LayoutPiSessions:
+				case agentreg.LayoutPiSessions:
 					reader = readPi
 				default:
 					continue

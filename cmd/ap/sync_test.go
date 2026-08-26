@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/manifest"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // The command runs somewhere disposable, not where ap was invoked and not where
@@ -431,9 +431,9 @@ func TestSyncVariantArgsTokenizeBeforeSubstituting(t *testing.T) {
 	}
 }
 
-func mustAgent(t *testing.T, name string) agent.Agent {
+func mustAgent(t *testing.T, name string) agentreg.Agent {
 	t.Helper()
-	a, ok := agent.Lookup(name)
+	a, ok := agentreg.Lookup(name)
 	if !ok {
 		t.Fatalf("no agent %q", name)
 	}

@@ -15,10 +15,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
 	"github.com/ackstorm/agent-profile/internal/session"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 const usage = `ap - per-agent profile launcher
@@ -469,7 +469,7 @@ func (r *repeatedFlag) Set(v string) error {
 
 // checkOnlySettings validates --only-settings before anything is created — the
 // same "fail before the profile exists" rule as --from and --copy-instructions.
-func checkOnlySettings(a agent.Agent, keys []string, from string) error {
+func checkOnlySettings(a agentreg.Agent, keys []string, from string) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -552,7 +552,7 @@ func onPath(dir string) bool {
 
 // notThere is the error for a reference that names no profile. Listing what the
 // agent does have turns a typo into a one-line fix instead of a second command.
-func notThere(a agent.Agent, name string) error {
+func notThere(a agentreg.Agent, name string) error {
 	have, err := profile.List(a)
 	if err != nil || len(have) == 0 {
 		return fmt.Errorf("no profile %s:%s", a.Name, name)
@@ -677,7 +677,7 @@ func renderSessions(sessions []session.Session, hasOpencode bool) string {
 // resumeArgs substitutes the session id into the agent's stated resume argv, then
 // appends whatever the caller passed. The placeholder is "{}", exactly as in a
 // variant: the registry states where the id goes, ap never infers it.
-func resumeArgs(a agent.Agent, id string, extra []string) []string {
+func resumeArgs(a agentreg.Agent, id string, extra []string) []string {
 	out := make([]string, 0, len(a.Sessions.ResumeArgs)+len(extra))
 	for _, arg := range a.Sessions.ResumeArgs {
 		if arg == "{}" {
@@ -824,7 +824,7 @@ func cmdResume(args []string) error {
 		}
 	}
 
-	a, ok := agent.Lookup(s.Agent)
+	a, ok := agentreg.Lookup(s.Agent)
 	if !ok {
 		return fmt.Errorf("unknown agent %q for session %s", s.Agent, s.ID)
 	}
@@ -912,14 +912,14 @@ func cmdList(args []string) error {
 	if stop {
 		return err
 	}
-	names := agent.Names()
+	names := agentreg.Names()
 	// The agent is optional, so this cannot use parseAroundRef, which requires
 	// one. The second parse is that helper's trick all the same: it is what lets
 	// `ap list claude --raw` work as well as `ap list --raw claude`. list has no
 	// passthrough, so there is nothing for either order to be ambiguous about.
 	if rest := fs.Args(); len(rest) > 0 {
-		if _, ok := agent.Lookup(rest[0]); !ok {
-			return fmt.Errorf("unknown agent %q: supported are %s", rest[0], strings.Join(agent.Names(), ", "))
+		if _, ok := agentreg.Lookup(rest[0]); !ok {
+			return fmt.Errorf("unknown agent %q: supported are %s", rest[0], strings.Join(agentreg.Names(), ", "))
 		}
 		names = []string{rest[0]}
 		if stop, err := parse(fs, rest[1:]); stop {
@@ -946,7 +946,7 @@ func cmdList(args []string) error {
 // Default is the one row in the listing ap did not create and cannot remove —
 // Dir resolves it to the agent's real config directory — so printing it exactly
 // like a profile invites `ap delete claude:default`, which is the command
-// profile.ValidName exists to refuse. It replaced a bracketed name plus a
+// agentreg.ValidName exists to refuse. It replaced a bracketed name plus a
 // footnote explaining the brackets: the note says the same thing in the place
 // you are already looking, and a reference nothing decorates stays pasteable.
 const defaultNote = "(the agent's own config: read-only)"
@@ -972,7 +972,7 @@ type listRow struct {
 func listRows(names []string) ([]listRow, error) {
 	var rows []listRow
 	for _, name := range names {
-		a, _ := agent.Lookup(name)
+		a, _ := agentreg.Lookup(name)
 		// List always includes Default, so there is no "no profiles yet" case to
 		// report: every agent has at least its real config to show.
 		profiles, err := profile.List(a)
@@ -983,7 +983,7 @@ func listRows(names []string) ([]listRow, error) {
 		for i, p := range profiles {
 			lastProfile := i == len(profiles)-1
 			row := listRow{tree: branch(lastProfile), ref: a.Name + ":" + p}
-			if p == profile.Default {
+			if p == agentreg.Default {
 				row.note = defaultNote
 			}
 			rows = append(rows, row)
@@ -1123,9 +1123,9 @@ func printRaw(rows []listRow) {
 //
 // Not delete: that one takes a flag as well, so it parses with parseAroundRef
 // and calls ParseVariantRef itself.
-func vref(args []string, cmd string) (agent.Agent, string, string, error) {
+func vref(args []string, cmd string) (agentreg.Agent, string, string, error) {
 	if len(args) != 1 {
-		return agent.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
+		return agentreg.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
 	}
 	a, name, v, err := profile.ParseVariantRef(args[0])
 	return a, name, v, err
@@ -1139,9 +1139,9 @@ func vref(args []string, cmd string) (agent.Agent, string, string, error) {
 // The variant is parsed and then ignored, on purpose: a variant has no
 // configuration of its own, and answering with anything but the parent's
 // directory would invent a second one that nothing writes to.
-func vrefAllowDefault(args []string, cmd string) (agent.Agent, string, string, error) {
+func vrefAllowDefault(args []string, cmd string) (agentreg.Agent, string, string, error) {
 	if len(args) != 1 {
-		return agent.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
+		return agentreg.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
 	}
 	a, name, v, err := profile.ParseVariantRefAllowDefault(args[0])
 	return a, name, v, err
@@ -1251,7 +1251,7 @@ func cmdCreate(args []string) error {
 // does on a reused one: Link re-asserts, Shim re-asserts, seedFirstRun opens
 // with O_EXCL and so can never rewrite a file the profile already has, and the
 // wrapper is rewritten to the same bytes.
-func finishCreate(a agent.Agent, name, dir string, rc *receipt) error {
+func finishCreate(a agentreg.Agent, name, dir string, rc *receipt) error {
 	if err := linkAndReport(a, dir, rc); err != nil {
 		return err
 	}
@@ -1269,7 +1269,7 @@ func finishCreate(a agent.Agent, name, dir string, rc *receipt) error {
 // `ap run` by this point, so a failure here is worth saying out loud and worth
 // nothing more — an unusable wrapper name or a first-run file that could not be
 // read must not turn a created profile into a failed command.
-func seedAndLink(a agent.Agent, name, dir string, rc *receipt) {
+func seedAndLink(a agentreg.Agent, name, dir string, rc *receipt) {
 	if keys, err := seedFirstRun(a, dir); err != nil {
 		rc.warn("first-run flags not seeded: %v", err)
 	} else if len(keys) > 0 {
@@ -1422,7 +1422,7 @@ func cmdVariant(args []string) error {
 // A failed clone removes the half-populated directory so `ap create` can be
 // retried. Safe here specifically because Link has not run yet, so the directory
 // provably contains no symlinks.
-func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir string, rc *receipt) error {
+func cloneAndReport(a agentreg.Agent, srcDir, from string, only []string, name, dir string, rc *receipt) error {
 	if srcDir == "" {
 		return nil
 	}
@@ -1464,7 +1464,7 @@ func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir
 
 // linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
 // purely to keep cmdCreate under the project's cyclomatic-complexity gate.
-func linkAndReport(a agent.Agent, dir string, rc *receipt) error {
+func linkAndReport(a agentreg.Agent, dir string, rc *receipt) error {
 	linked, skipped, unshared, orphaned, err := profile.Link(a, dir, nil)
 	if err != nil {
 		return err
@@ -1507,7 +1507,7 @@ func orphanWarning(orphaned []string) string {
 // one may hold the only token that still works, and only the person at the
 // terminal can say whether it should become the machine-wide login — see
 // profile.Promote for why nothing can decide that on its own.
-func linkForRun(a agent.Agent, name, dir string) error {
+func linkForRun(a agentreg.Agent, name, dir string) error {
 	var promoted []string
 	_, _, _, orphaned, err := profile.Link(a, dir, func(c profile.Conflict) profile.Resolution {
 		if askToPromote(a, name, c) != profile.Promote {
@@ -1541,7 +1541,7 @@ func linkForRun(a agent.Agent, name, dir string) error {
 // Non-interactive runs are not prompted at all: `ap run` in a script or a CI job
 // has nobody to ask, and guessing "promote" there would write into the user's real
 // config directory unattended.
-func askToPromote(a agent.Agent, name string, c profile.Conflict) profile.Resolution {
+func askToPromote(a agentreg.Agent, name string, c profile.Conflict) profile.Resolution {
 	if !stdinIsTerminal() {
 		return profile.Orphan
 	}
@@ -1602,7 +1602,7 @@ func readLine(r io.Reader) string {
 
 // checkCopyInstructions validates that --copy-instructions is usable for a,
 // without copying anything yet — the same "fail before creating" rule as --from.
-func checkCopyInstructions(a agent.Agent) error {
+func checkCopyInstructions(a agentreg.Agent) error {
 	if a.Instructions == nil {
 		return fmt.Errorf("--copy-instructions: no global instructions file is known for %s "+
 			"(only claude is verified; see internal/agent)", a.Name)
@@ -1618,7 +1618,7 @@ func checkCopyInstructions(a agent.Agent) error {
 // A copy, not a link: the profile owns it, and the reason to want it in a profile at
 // all is usually to then change it there. Through an os.Root confined to the profile,
 // same as everything else that writes into one.
-func copyInstructions(a agent.Agent, dir string) error {
+func copyInstructions(a agentreg.Agent, dir string) error {
 	b, err := os.ReadFile(a.Instructions.Source)
 	if err != nil {
 		return fmt.Errorf("--copy-instructions: %w", err)
@@ -1650,7 +1650,7 @@ func copyInstructions(a agent.Agent, dir string) error {
 // Nothing here is an error the caller should stop on — see the call site. A
 // missing source file is the ordinary case on a machine where the agent has
 // never run outside a profile, and there the wizard is the correct behaviour.
-func seedFirstRun(a agent.Agent, dir string) ([]string, error) {
+func seedFirstRun(a agentreg.Agent, dir string) ([]string, error) {
 	if a.FirstRun == nil {
 		return nil, nil
 	}
@@ -1705,7 +1705,7 @@ func seedFirstRun(a agent.Agent, dir string) ([]string, error) {
 // profile inherits nothing but the credential, so the next step is real work and
 // it is different for each agent — the text lives in the registry, beside the agent
 // it describes.
-func setupHint(a agent.Agent, name string) string {
+func setupHint(a agentreg.Agent, name string) string {
 	if a.Setup == "" {
 		return ""
 	}
@@ -1761,7 +1761,7 @@ func cmdEnv(args []string) error {
 	// what makes `ap env <agent>:default` print nothing rather than the real
 	// config directory it would otherwise be pointless to assign to itself.
 	dir := profile.Dir(a, name)
-	if name == profile.Default {
+	if name == agentreg.Default {
 		dir = ""
 	}
 	for _, e := range run.Env(a, dir, nil) {
@@ -1829,7 +1829,7 @@ const placeholder = "{}"
 // a bare word — which is a guess about four external CLIs, re-verified every
 // release. A placeholder guesses nothing: the author states the position, and
 // ap substitutes text. Every variant without one behaves exactly as before.
-func runArgs(a agent.Agent, name, v string, caller []string) ([]string, error) {
+func runArgs(a agentreg.Agent, name, v string, caller []string) ([]string, error) {
 	if v == "" {
 		return caller, nil
 	}
@@ -1867,9 +1867,9 @@ func fill(args []string, with string) ([]string, bool) {
 // it, shared by `ap run` and by `ap env <ref> <command>`. It returns the
 // directory the config variable should point at — empty for Default, which sets
 // no override at all.
-func prepare(a agent.Agent, name string) (string, error) {
+func prepare(a agentreg.Agent, name string) (string, error) {
 	if !profile.Exists(a, name) {
-		if name == profile.Default {
+		if name == agentreg.Default {
 			// "ap create claude:default" is unconditionally refused - that advice
 			// would be a dead end. Name the actual path instead: on this machine
 			// the agent has never been run outside ap, or its config lives
@@ -1883,7 +1883,7 @@ func prepare(a agent.Agent, name string) (string, error) {
 	// Default is the agent's real config, reached exactly as it already is:
 	// nothing is created, nothing is linked, no shim is built, and Exec gets no
 	// override at all (an empty dir), not even one that happens to equal it.
-	if name == profile.Default {
+	if name == agentreg.Default {
 		return "", nil
 	}
 
@@ -1903,7 +1903,7 @@ func prepare(a agent.Agent, name string) (string, error) {
 // shimWarning reports entries a program wrote into a shim for real, each pointed
 // at the base directory it should be moved to. The base differs per shim, so the
 // entries are grouped by the Rel they came back under.
-func shimWarning(a agent.Agent, foundReal []string) string {
+func shimWarning(a agentreg.Agent, foundReal []string) string {
 	byRel := map[string][]string{}
 	for _, p := range foundReal {
 		rel, name, ok := strings.Cut(p, string(filepath.Separator))
@@ -1929,7 +1929,7 @@ func shimWarning(a agent.Agent, foundReal []string) string {
 
 // shim builds or refreshes the config shim and reports anything a program wrote
 // into it for real, which would otherwise be invisible from outside the profile.
-func shim(a agent.Agent, dir string) error {
+func shim(a agentreg.Agent, dir string) error {
 	foundReal, err := profile.Shim(a, dir)
 	if err != nil {
 		return err
@@ -2005,7 +2005,7 @@ func cmdDelete(args []string) error {
 // sitting at one variant's wrapper path — which abandoned every later variant
 // AND swallowed the receipt, so `ap delete` reported a refusal and never
 // mentioned the profile it had just erased.
-func deleteTheVariantsToo(a agent.Agent, name string, variants []string, rc *receipt) {
+func deleteTheVariantsToo(a agentreg.Agent, name string, variants []string, rc *receipt) {
 	if err := profile.DeleteVariants(a, name); err != nil {
 		rc.warn("variant arguments not removed: %v", err)
 	}
@@ -2025,7 +2025,7 @@ func deleteTheVariantsToo(a agent.Agent, name string, variants []string, rc *rec
 // profile because a profile holds its own session transcripts, and a variant
 // holds two lines of text. Asking about both equally is how a prompt stops
 // being read.
-func deleteVariant(a agent.Agent, name, v string) error {
+func deleteVariant(a agentreg.Agent, name, v string) error {
 	ref := a.Name + ":" + name + ":" + v
 	if err := profile.DeleteVariant(a, name, v); err != nil {
 		return err
@@ -2091,8 +2091,8 @@ func cmdLink(args []string) error {
 	// what actually fires. Kept anyway, so a future change to vref or to link's
 	// own routing does not silently start writing a wrapper for "nothing" (ap
 	// run codex:default is already the real config).
-	if name == profile.Default {
-		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, profile.Default)
+	if name == agentreg.Default {
+		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, agentreg.Default)
 	}
 	if !profile.Exists(a, name) {
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",

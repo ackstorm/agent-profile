@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // Clone copies an agent's declared configuration from one config directory into
@@ -31,7 +31,7 @@ import (
 //
 // dst must be an existing empty directory that is not inside src. Clone does not
 // create it; the caller does.
-func Clone(a agent.Agent, src, dst string) error {
+func Clone(a agentreg.Agent, src, dst string) error {
 	// Resolve src before anything else. Lstat below would otherwise inspect the
 	// symlink rather than the directory it points to.
 	src, err := filepath.EvalSymlinks(src)
@@ -70,11 +70,11 @@ func Clone(a agent.Agent, src, dst string) error {
 // exploitable by the current registry — TestCloneAllowNeverNamesASharedPath
 // already keeps a Shared path itself out of CloneAllow — but this backstop does
 // not depend on that discipline holding for every future edit, the same reason
-// Delete re-checks Default independently of ParseRef.
+// Delete re-checks agentreg.Default independently of ParseRef.
 //
 // A function rather than eight lines inside Clone because CloneSettings applies
 // the same backstop, and two copies of this would eventually disagree.
-func skipPaths(a agent.Agent) []string {
+func skipPaths(a agentreg.Agent) []string {
 	skip := make([]string, 0, len(a.Shared)+len(a.State)+1)
 	for _, s := range a.Shared {
 		skip = append(skip, filepath.Clean(s.Rel))

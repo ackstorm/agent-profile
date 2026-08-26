@@ -6,12 +6,12 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
-func agentOrFail(t *testing.T, name string) agent.Agent {
+func agentOrFail(t *testing.T, name string) agentreg.Agent {
 	t.Helper()
-	a, ok := agent.Lookup(name)
+	a, ok := agentreg.Lookup(name)
 	if !ok {
 		t.Fatalf("agent %q not in registry", name)
 	}
@@ -77,14 +77,14 @@ func TestCreateAndList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Default is always prepended, ahead of created profiles.
-	if len(got) != 2 || got[0] != Default || got[1] != "plan" {
-		t.Errorf("List = %v, want [%s plan]", got, Default)
+	// agentreg.Default is always prepended, ahead of created profiles.
+	if len(got) != 2 || got[0] != agentreg.Default || got[1] != "plan" {
+		t.Errorf("List = %v, want [%s plan]", got, agentreg.Default)
 	}
 }
 
 // Profiles of one agent must not show up under another. codex has no created
-// profiles at all, so its List holds nothing but the always-present Default.
+// profiles at all, so its List holds nothing but the always-present agentreg.Default.
 func TestListIsPerAgent(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	if _, err := Create(agentOrFail(t, "claude"), "plan"); err != nil {
@@ -94,8 +94,8 @@ func TestListIsPerAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != Default {
-		t.Errorf("codex List = %v, want [%s]", got, Default)
+	if len(got) != 1 || got[0] != agentreg.Default {
+		t.Errorf("codex List = %v, want [%s]", got, agentreg.Default)
 	}
 }
 
@@ -110,15 +110,15 @@ func TestCreateRejectsExisting(t *testing.T) {
 	}
 }
 
-// A missing profile directory is not an error; List reports only Default.
+// A missing profile directory is not an error; List reports only agentreg.Default.
 func TestListEmptyIsNotAnError(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	got, err := List(agentOrFail(t, "codex"))
 	if err != nil {
 		t.Fatalf("List on missing dir: %v", err)
 	}
-	if len(got) != 1 || got[0] != Default {
-		t.Errorf("List = %v, want [%s]", got, Default)
+	if len(got) != 1 || got[0] != agentreg.Default {
+		t.Errorf("List = %v, want [%s]", got, agentreg.Default)
 	}
 }
 
@@ -136,30 +136,30 @@ func TestExists(t *testing.T) {
 	}
 }
 
-// Default names the agent's real config directory, never a directory ap
+// agentreg.Default names the agent's real config directory, never a directory ap
 // creates. Dir must resolve it that way for `ap which <agent>:default` and for
 // --from default to find something to clone.
 func TestWhichDefaultPrintsTheRealConfigDir(t *testing.T) {
 	a := agentOrFail(t, "claude")
-	if got := Dir(a, Default); got != a.Config {
+	if got := Dir(a, agentreg.Default); got != a.Config {
 		t.Errorf("Dir(default) = %q, want %q", got, a.Config)
 	}
 }
 
 // Exists must track whether the real config directory happens to exist on this
-// machine, the same as Dir(a, Default) resolving to a.Config would imply — not
+// machine, the same as Dir(a, agentreg.Default) resolving to a.Config would imply — not
 // hardcode true, which would make `ap which claude:default` look usable on a
 // machine where claude was never even installed.
 func TestExistsForDefaultTracksTheRealConfigDir(t *testing.T) {
 	a := agentOrFail(t, "claude")
 	_, statErr := os.Stat(a.Config)
 	want := statErr == nil
-	if got := Exists(a, Default); got != want {
+	if got := Exists(a, agentreg.Default); got != want {
 		t.Errorf("Exists(default) = %v, want %v (whether %s exists)", got, want, a.Config)
 	}
 }
 
-// With no profiles created at all, Default is still there: it names the real
+// With no profiles created at all, agentreg.Default is still there: it names the real
 // config, not something `ap create` produced.
 func TestListAlwaysIncludesDefault(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -167,21 +167,21 @@ func TestListAlwaysIncludesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(out, Default) {
-		t.Errorf("List = %v, want it to include %q", out, Default)
+	if !slices.Contains(out, agentreg.Default) {
+		t.Errorf("List = %v, want it to include %q", out, agentreg.Default)
 	}
 }
 
-// Default is reserved: Dir(a, "default") is the user's real config directory,
-// and every writing path routes through ValidName, so this is what makes
+// agentreg.Default is reserved: Dir(a, "default") is the user's real config directory,
+// and every writing path routes through agentreg.ValidName, so this is what makes
 // `ap create claude:default` and `ap delete claude:default` refuse.
 func TestValidNameRejectsDefault(t *testing.T) {
-	if err := ValidName(Default); err == nil {
-		t.Error("ValidName(Default) = nil error, want a reservation error")
+	if err := agentreg.ValidName(agentreg.Default); err == nil {
+		t.Error("agentreg.ValidName(agentreg.Default) = nil error, want a reservation error")
 	}
 }
 
-// ParseRef is the writing path and must keep rejecting Default. ParseRefAllowDefault
+// ParseRef is the writing path and must keep rejecting agentreg.Default. ParseRefAllowDefault
 // is the escape hatch for the four read-only paths (run, which, env, --from) that may
 // resolve to the real config directory.
 func TestParseRefRejectsDefaultButParseRefAllowDefaultAccepts(t *testing.T) {
@@ -192,12 +192,12 @@ func TestParseRefRejectsDefaultButParseRefAllowDefaultAccepts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRefAllowDefault(claude:default): %v", err)
 	}
-	if name != Default || a.Name != "claude" {
-		t.Errorf("ParseRefAllowDefault(claude:default) = (%q,%q), want (claude,%q)", a.Name, name, Default)
+	if name != agentreg.Default || a.Name != "claude" {
+		t.Errorf("ParseRefAllowDefault(claude:default) = (%q,%q), want (claude,%q)", a.Name, name, agentreg.Default)
 	}
 }
 
-// ParseRefAllowDefault must still apply every other ValidName rule; the
+// ParseRefAllowDefault must still apply every other agentreg.ValidName rule; the
 // allowance is for the literal sentinel, not a bypass of validation.
 func TestParseRefAllowDefaultStillRejectsTraversal(t *testing.T) {
 	if _, _, err := ParseRefAllowDefault("claude:../escape"); err == nil {
@@ -206,7 +206,7 @@ func TestParseRefAllowDefaultStillRejectsTraversal(t *testing.T) {
 }
 
 // Depth is exactly three, and the third segment is validated by the same
-// ValidName as the second — so `default` is refused as a variant name for the
+// agentreg.ValidName as the second — so `default` is refused as a variant name for the
 // same reason it is refused as a profile name. A variant over `default` is
 // refused whichever parser is used: it names the agent's real config, and
 // nothing is ever created for it.
@@ -252,7 +252,7 @@ func TestParseVariantRef(t *testing.T) {
 // The read-only parser relaxes exactly one thing: `default` as a two-segment
 // profile. It must not relax the variant case with it.
 func TestParseVariantRefAllowDefault(t *testing.T) {
-	if _, p, v, err := ParseVariantRefAllowDefault("claude:default"); err != nil || p != Default || v != "" {
+	if _, p, v, err := ParseVariantRefAllowDefault("claude:default"); err != nil || p != agentreg.Default || v != "" {
 		t.Errorf(`ParseVariantRefAllowDefault("claude:default") = (%q,%q,%v), want ("default","",nil)`, p, v, err)
 	}
 	if _, _, _, err := ParseVariantRefAllowDefault("claude:default:opus"); err == nil {

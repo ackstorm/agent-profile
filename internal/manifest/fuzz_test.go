@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // The traversal bug in this repository got through code review once, in
@@ -45,7 +45,7 @@ func FuzzParse(f *testing.F) {
 			}
 		}
 		for _, name := range names {
-			if name == profile.Default {
+			if name == agentreg.Default {
 				// The sentinel is not a path component. It is only legal as
 				// the manifest's name, never as a variant's — which the
 				// schema enforces by calling ValidName on variants, and

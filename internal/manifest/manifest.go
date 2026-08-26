@@ -7,8 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
-	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // Manifest is one file: a logical profile name, the machine-level commands that
@@ -16,7 +15,7 @@ import (
 type Manifest struct {
 	// Path is the file it was read from, named in every error and in the report.
 	Path string
-	// Name is the logical profile name, or profile.Default for `name: default`.
+	// Name is the logical profile name, or agentreg.Default for `name: default`.
 	Name string
 	// Bootstrap runs once, before any profile exists, with no agent variable
 	// set. See §8.2: that is what stops a manifest expressing "install this
@@ -28,7 +27,7 @@ type Manifest struct {
 
 // Platform is one agent's half of a manifest.
 type Platform struct {
-	Agent agent.Agent
+	Agent agentreg.Agent
 	// Install runs once for this platform, in that platform's environment.
 	Install []string
 	// Variants is sorted by name.
@@ -45,8 +44,8 @@ type Variant struct {
 
 // IsDefault reports whether this manifest names the agent's real, machine-wide
 // configuration rather than a profile. Nothing is ever created for it — see §6.1
-// and profile.Default.
-func (m Manifest) IsDefault() bool { return m.Name == profile.Default }
+// and agentreg.Default.
+func (m Manifest) IsDefault() bool { return m.Name == agentreg.Default }
 
 // Parse decodes one manifest file. path is only used for messages; nothing is
 // read from disk here.
@@ -92,8 +91,8 @@ func decode(root *node) (Manifest, error) {
 	// Same shape as profile.ParseRefAllowDefault, same reason: "is this a safe
 	// path component" and "is this the sentinel" are different questions, and
 	// merging them is how --from became a path traversal.
-	if m.Name != profile.Default {
-		if err := profile.ValidName(m.Name); err != nil {
+	if m.Name != agentreg.Default {
+		if err := agentreg.ValidName(m.Name); err != nil {
 			return m, fmt.Errorf("line %d: name: %w", root.keyLine["name"], err)
 		}
 	}
@@ -106,16 +105,16 @@ func decode(root *node) (Manifest, error) {
 
 	pn, ok := root.m["platforms"]
 	if !ok {
-		return m, fmt.Errorf("platforms: required, and needs at least one of %s", strings.Join(agent.Names(), ", "))
+		return m, fmt.Errorf("platforms: required, and needs at least one of %s", strings.Join(agentreg.Names(), ", "))
 	}
 	if pn.kind != mapNode || len(pn.keys) == 0 {
-		return m, fmt.Errorf("line %d: platforms: needs at least one of %s", pn.line, strings.Join(agent.Names(), ", "))
+		return m, fmt.Errorf("line %d: platforms: needs at least one of %s", pn.line, strings.Join(agentreg.Names(), ", "))
 	}
 	for _, name := range slices.Sorted(slices.Values(pn.keys)) {
-		a, ok := agent.Lookup(name)
+		a, ok := agentreg.Lookup(name)
 		if !ok {
 			return m, fmt.Errorf("line %d: unknown platform %q: supported are %s",
-				pn.keyLine[name], name, strings.Join(agent.Names(), ", "))
+				pn.keyLine[name], name, strings.Join(agentreg.Names(), ", "))
 		}
 		p, err := decodePlatform(a, pn.m[name], m.IsDefault())
 		if err != nil {
@@ -126,7 +125,7 @@ func decode(root *node) (Manifest, error) {
 	return m, nil
 }
 
-func decodePlatform(a agent.Agent, n *node, isDefault bool) (Platform, error) {
+func decodePlatform(a agentreg.Agent, n *node, isDefault bool) (Platform, error) {
 	p := Platform{Agent: a}
 	if n.kind == emptyNode {
 		return p, nil // "this platform, no configuration"
@@ -163,7 +162,7 @@ func decodePlatform(a agent.Agent, n *node, isDefault bool) (Platform, error) {
 		// Every name that becomes a path goes through ValidName. A manifest
 		// comes from a repository somebody else wrote, so `../../../.ssh` here
 		// is the --from traversal with an attacker on the other end.
-		if err := profile.ValidName(name); err != nil {
+		if err := agentreg.ValidName(name); err != nil {
 			return p, fmt.Errorf("line %d: variant: %w", vn.keyLine[name], err)
 		}
 		args, err := variantArgs(vn.m[name])

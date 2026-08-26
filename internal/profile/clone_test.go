@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // State is a real directory inside the profile, never named in CloneAllow — the
@@ -23,7 +23,7 @@ func TestCloneSkipsState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "test", CloneAllow: []string{"settings.json"}}
+	a := agentreg.Agent{Name: "test", CloneAllow: []string{"settings.json"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestCloneCopiesFilesAndNestedDirs(t *testing.T) {
 		"empty":                          "",
 	})
 
-	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json", "plugins", "skills", "empty"}}
+	a := agentreg.Agent{Name: "fake", CloneAllow: []string{"settings.json", "plugins", "skills", "empty"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestCloneSkipsASymlinkedAllowlistEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json", "projects"}}
+	a := agentreg.Agent{Name: "fake", CloneAllow: []string{"settings.json", "projects"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestCloneSkipsASymlinkNestedInAnAllowedDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "fake", CloneAllow: []string{"skills"}}
+	a := agentreg.Agent{Name: "fake", CloneAllow: []string{"skills"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestCloneNeverCopiesAPathOutsideCloneAllow(t *testing.T) {
 		"plugins/config.json":  `{"keep":true}`,
 	})
 
-	a := agent.Agent{Name: "fake", CloneAllow: []string{"settings.json", "plugins/config.json"}}
+	a := agentreg.Agent{Name: "fake", CloneAllow: []string{"settings.json", "plugins/config.json"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestClonePreservesFileMode(t *testing.T) {
 	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Clone(agent.Agent{Name: "fake", CloneAllow: []string{"private.json"}}, src, dst); err != nil {
+	if err := Clone(agentreg.Agent{Name: "fake", CloneAllow: []string{"private.json"}}, src, dst); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(filepath.Join(dst, "private.json"))
@@ -201,7 +201,7 @@ func TestClonePreservesFileMode(t *testing.T) {
 }
 
 func TestCloneMissingSourceErrors(t *testing.T) {
-	if err := Clone(agent.Agent{Name: "fake"}, filepath.Join(t.TempDir(), "nope"), t.TempDir()); err == nil {
+	if err := Clone(agentreg.Agent{Name: "fake"}, filepath.Join(t.TempDir(), "nope"), t.TempDir()); err == nil {
 		t.Error("Clone from missing source = nil error, want error")
 	}
 }
@@ -223,7 +223,7 @@ func TestCloneCopiesOnlyTheAllowlist(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a := agent.Agent{Name: "test", CloneAllow: []string{"settings.json", "skills"}}
+	a := agentreg.Agent{Name: "test", CloneAllow: []string{"settings.json", "skills"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestCloneToleratesAMissingAllowlistEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "settings.json"), []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := agent.Agent{Name: "test", CloneAllow: []string{"settings.json", "nope", "also/nope"}}
+	a := agentreg.Agent{Name: "test", CloneAllow: []string{"settings.json", "nope", "also/nope"}}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("a missing entry must not fail the clone: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestCloneToleratesAMissingAllowlistEntry(t *testing.T) {
 // The allowlist is a list of names, not patterns: an entry must never escape dst.
 func TestCloneAllowCannotEscape(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
-	a := agent.Agent{Name: "test", CloneAllow: []string{"../../etc/passwd"}}
+	a := agentreg.Agent{Name: "test", CloneAllow: []string{"../../etc/passwd"}}
 	if err := Clone(a, src, dst); err == nil {
 		t.Error("want an error for an allowlist entry containing ..")
 	}
@@ -270,7 +270,7 @@ func TestCloneAllowRejectsDotEntry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "everything.bin"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := agent.Agent{Name: "test", CloneAllow: []string{"."}}
+	a := agentreg.Agent{Name: "test", CloneAllow: []string{"."}}
 	if err := Clone(a, src, dst); err == nil {
 		t.Error("want an error for a \".\" allowlist entry")
 	}
@@ -285,7 +285,7 @@ func TestCloneAllowRejectsDotEntry(t *testing.T) {
 // never escape.
 func TestCloneAllowRejectsAbsoluteEntry(t *testing.T) {
 	src, dst := t.TempDir(), t.TempDir()
-	a := agent.Agent{Name: "test", CloneAllow: []string{"/etc/passwd"}}
+	a := agentreg.Agent{Name: "test", CloneAllow: []string{"/etc/passwd"}}
 	if err := Clone(a, src, dst); err == nil {
 		t.Error("want an error for an absolute allowlist entry")
 	}
@@ -302,10 +302,10 @@ func TestCloneNeverCopiesASharedPathEvenIfAllowlisted(t *testing.T) {
 		"settings.json": "{}",
 		"auth.json":     `{"token":"secret"}`,
 	})
-	a := agent.Agent{
+	a := agentreg.Agent{
 		Name:       "fake",
 		CloneAllow: []string{"settings.json", "auth.json"},
-		Shared:     []agent.Share{{Rel: "auth.json", From: "/nonexistent/auth.json"}},
+		Shared:     []agentreg.Share{{Rel: "auth.json", From: "/nonexistent/auth.json"}},
 	}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
@@ -327,7 +327,7 @@ func TestCloneNeverCopiesAStatePathEvenIfAllowlisted(t *testing.T) {
 		"projects/deep/a.jsonl":    "history",
 		"projects/sibling/ok.json": "history too",
 	})
-	a := agent.Agent{
+	a := agentreg.Agent{
 		Name:       "fake",
 		CloneAllow: []string{"settings.json", "projects"},
 		State:      []string{"projects"},
@@ -350,10 +350,10 @@ func TestCloneNeverCopiesTheShimEvenIfAllowlisted(t *testing.T) {
 		"opencode.json": "{}",
 		"xdg/opencode":  "shim entry",
 	})
-	a := agent.Agent{
+	a := agentreg.Agent{
 		Name:       "fake",
 		CloneAllow: []string{"opencode.json", "xdg"},
-		Shims:      []agent.Shim{{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"}},
+		Shims:      []agentreg.Shim{{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "opencode", Fallback: ".config"}},
 	}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)
@@ -376,10 +376,10 @@ func TestCloneSkipsASharedPathNestedUnderAnAllowedParent(t *testing.T) {
 		"plugins/cache/x/file": "cached credential-adjacent data",
 		"plugins/config.json":  `{"keep":true}`,
 	})
-	a := agent.Agent{
+	a := agentreg.Agent{
 		Name:       "fake",
 		CloneAllow: []string{"plugins"},
-		Shared:     []agent.Share{{Rel: "plugins/cache", From: "/nonexistent/cache"}},
+		Shared:     []agentreg.Share{{Rel: "plugins/cache", From: "/nonexistent/cache"}},
 	}
 	if err := Clone(a, src, dst); err != nil {
 		t.Fatalf("Clone: %v", err)

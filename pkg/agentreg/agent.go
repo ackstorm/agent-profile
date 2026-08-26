@@ -1,10 +1,10 @@
-// Package agent holds the table of supported coding agents and how each one
+// Package agentreg holds the table of supported coding agents and how each one
 // can be pointed at an alternate config directory.
 //
 // Every field here was verified by running the real binary, not read from
 // documentation. scripts/smoke.sh re-checks each claim; when it fails, fix the
 // row here rather than the check.
-package agent
+package agentreg
 
 import (
 	"os"

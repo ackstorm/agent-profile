@@ -72,7 +72,7 @@ endef
 # The private in-container halves. Declared phony so a stray file named after
 # one of them can never make a gate silently no-op.
 .PHONY: _build _snapshot _test _test-one _test-verbose _cover _fuzz _fmt _fmt-check _vet \
-	_lint _lint-fix _vulncheck _secrets _shellcheck _release-publish _verify
+	_lint _lint-fix _vulncheck _crossbuild _secrets _shellcheck _release-publish _verify
 
 ##@ General
 
@@ -272,13 +272,13 @@ sandbox: ## Run the home-safety checks against a throwaway home in the container
 fmt: ## Format the code.
 	$(call in_container,_fmt)
 _fmt:
-	gofmt -w ./cmd ./internal
+	gofmt -w ./cmd ./internal ./pkg
 
 .PHONY: fmt-check
 fmt-check: ## Fail if any Go file is not gofmt-clean. Does not mutate.
 	$(call in_container,_fmt-check)
 _fmt-check:
-	@out=$$(gofmt -l ./cmd ./internal); \
+	@out=$$(gofmt -l ./cmd ./internal ./pkg); \
 	if [ -n "$$out" ]; then echo "Not gofmt-clean:"; echo "$$out"; exit 1; fi; \
 	echo "OK gofmt-clean"
 
@@ -312,6 +312,13 @@ vulncheck: ## Check dependencies and stdlib for known vulnerabilities.
 _vulncheck:
 	govulncheck ./...
 
+.PHONY: crossbuild
+crossbuild: ## Build the exported library for windows — ach imports it and ships there.
+	$(call in_container,_crossbuild)
+_crossbuild:
+	GOOS=windows GOARCH=amd64 go build ./pkg/...
+	GOOS=darwin  GOARCH=arm64 go build ./pkg/...
+
 .PHONY: secrets
 secrets: ## Scan the full git history for secrets.
 	$(call in_container,_secrets)
@@ -321,7 +328,7 @@ _secrets:
 .PHONY: verify
 verify: ## Everything CI runs, in one container hop.
 	$(call in_container,_verify)
-_verify: _fmt-check _shellcheck _vet _lint _test _vulncheck
+_verify: _fmt-check _shellcheck _vet _lint _test _vulncheck _crossbuild
 	@echo
 	@echo "verify OK — and before pushing a public change, also: make secrets smoke"
 
