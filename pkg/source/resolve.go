@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/ackstorm/agent-profile/pkg/schema"
 )
@@ -14,10 +15,6 @@ import (
 // referrer is what turns a ten-minute hunt into a two-minute fix — and §12's
 // own worked example omits it.
 var ErrSecretUnset = errors.New("secret is not set")
-
-// errRefDeferred marks a ref-backed resource. It is not a failure: Phase 6
-// resolves it against a marketplace catalogue declared in the SAME manifest.
-var errRefDeferred = errors.New("marketplace ref")
 
 // ErrForeignEntry is a marketplace entry naming a source outside the
 // marketplace's own repository.
@@ -69,14 +66,7 @@ func Resolve(ctx context.Context, p schema.Profile, o Opts) (map[string]Resolved
 	var reports []Report
 
 	for _, it := range locators(p) {
-		res, err := resolveOne(ctx, it, o)
-		if errors.Is(err, errRefDeferred) {
-			reports = append(reports, Report{
-				Resource: it.name,
-				Text:     it.ref + " — marketplace item resolution is Phase 6; not resolved here",
-			})
-			continue
-		}
+		res, err := resolveOne(ctx, it, o, p, out)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", it.name, err)
 		}
@@ -157,12 +147,10 @@ func keysOf[V any](m map[string]V) []string {
 	return out
 }
 
-func resolveOne(ctx context.Context, it item, o Opts) (Resolved, error) {
+func resolveOne(ctx context.Context, it item, o Opts, p schema.Profile, done map[string]Resolved) (Resolved, error) {
 	switch {
 	case it.source == nil:
-		// A ref names a marketplace item. Resolving one is Phase 6 (§21.1),
-		// and saying so is what keeps this from being a silent drop.
-		return Resolved{}, errRefDeferred
+		return resolveRef(it, p, done)
 	case it.source.Local != nil:
 		return ResolveLocal(o.ManifestDir, *it.source.Local)
 	case it.source.Git != nil:
@@ -187,6 +175,61 @@ func resolveOne(ctx context.Context, it item, o Opts) (Resolved, error) {
 		})
 	}
 	return Resolved{}, errors.New("no source branch selected")
+}
+
+// resolveRef turns `<item>@<marketplace>` into a directory inside the
+// marketplace's already-fetched tree.
+//
+// Marketplaces are walked FIRST (see locators), so the catalogue is in `done`
+// by the time any resource referencing it is reached. That ordering is not a
+// convenience: a catalogue that cannot be fetched should fail before the
+// resources naming it do, or the user reads three errors about missing items
+// when the real answer is one unreachable repository.
+//
+// Nothing is fetched here. A catalogue's entries live in the catalogue's own
+// repository (§21.1), so resolving one is a path join — which is exactly why
+// there is no second hop and §21.2 could be removed rather than satisfied.
+func resolveRef(it item, p schema.Profile, done map[string]Resolved) (Resolved, error) {
+	itemName, marketplace, err := ParseRef(it.ref)
+	if err != nil {
+		return Resolved{}, err
+	}
+	m, ok := p.Marketplaces[marketplace]
+	if !ok {
+		return Resolved{}, fmt.Errorf("references marketplace %q, which this manifest does not declare", marketplace)
+	}
+	if !m.Enabled {
+		return Resolved{}, fmt.Errorf("references marketplace %q, which is disabled", marketplace)
+	}
+	// §22: a ref must target a catalogue whose type matches the referencing
+	// family. Without this a skill could be drawn from a plugin catalogue and
+	// fail its SKILL.md contract with an error naming the wrong thing.
+	if want := familyType(it.name); want != "" && m.Type != want {
+		return Resolved{}, fmt.Errorf("references marketplace %q, whose type is %q, not %q",
+			marketplace, m.Type, want)
+	}
+	fetched, ok := done["marketplace "+marketplace]
+	if !ok {
+		return Resolved{}, fmt.Errorf("marketplace %q was not resolved", marketplace)
+	}
+	dir, err := ResolveItem(marketplace, m.Type, fetched.Dir, itemName)
+	if err != nil {
+		return Resolved{}, err
+	}
+	// The receipt is the CATALOGUE's resolved ref: the item is a slice of that
+	// tree, so that SHA is what a later drift report has to compare.
+	return Resolved{Dir: dir, ResolvedRef: fetched.ResolvedRef, Anonymous: fetched.Anonymous}, nil
+}
+
+// familyType maps a resource family to the catalogue type it may reference.
+func familyType(name string) string {
+	switch {
+	case strings.HasPrefix(name, "skill "):
+		return "skills"
+	case strings.HasPrefix(name, "plugin "):
+		return "plugins"
+	}
+	return ""
 }
 
 // credential reads a locator's secret, transiently. It is called only for an
