@@ -39,7 +39,10 @@ func offlineFixture(t *testing.T, stripAuth bool) (path string, dir string) {
 		"skills/pdf/SKILL.md":             "# pdf",
 		"skills/executing-plans/SKILL.md": "# executing-plans",
 		"review/SKILL.md":                 "# company-review",
-		".claude-plugin/marketplace.json": `{"plugins":[]}`,
+		// §35's catalogue, with a same-repo entry: a bare relative string,
+		// which is how the real ones are built — one clone, N plugins.
+		".claude-plugin/marketplace.json":                `{"plugins":[{"name":"code-review","source":"./plugins/code-review"}]}`,
+		"plugins/code-review/.claude-plugin/plugin.json": `{"name":"code-review"}`,
 	})
 	body = remoteGitURL.ReplaceAllString(body, repo)
 
@@ -101,20 +104,11 @@ func TestTheSpecsFullExampleResolvesOffline(t *testing.T) {
 			t.Errorf("%s did not resolve; got %v", want, keysOf(got))
 		}
 	}
-	// §35 declares a plugin too, and it is a ref like pdf. Both are reported
-	// as deferred to marketplace item resolution, never silently dropped.
+	// §35's two refs resolve against the catalogues the same manifest
+	// declares — a path join inside a tree already fetched, no second hop.
 	for _, ref := range []string{"skill pdf", "plugin code-review"} {
-		if _, ok := got[ref]; ok {
-			t.Errorf("%s resolved; marketplace item resolution is Phase 6", ref)
-		}
-		var sawDeferral bool
-		for _, r := range reports {
-			if r.Resource == ref && strings.Contains(r.Text, "Phase 6") {
-				sawDeferral = true
-			}
-		}
-		if !sawDeferral {
-			t.Errorf("%s was not reported as deferred: %+v", ref, reports)
+		if _, ok := got[ref]; !ok {
+			t.Errorf("%s did not resolve; got %v", ref, keysOf(got))
 		}
 	}
 	for _, r := range reports {

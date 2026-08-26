@@ -175,11 +175,11 @@ skills:
 	}
 }
 
-// A ref-backed resource is REPORTED as deferred, not skipped. Producing
-// nothing for it silently would be §8's silent drop in the one output that
-// tells a user what apply is about to do.
-func TestResolveReportsARefAsDeferredRatherThanDroppingIt(t *testing.T) {
-	repo := newBareRepo(t, map[string]string{"skills/pdf/SKILL.md": "#"})
+// §22: a ref resolves against a catalogue declared in the SAME manifest, by a
+// path join inside the tree that catalogue already fetched. No second hop
+// exists, which is why §21.2 was removed rather than satisfied.
+func TestARefResolvesAgainstItsCatalogue(t *testing.T) {
+	repo := newBareRepo(t, map[string]string{"skills/pdf/SKILL.md": "# pdf"})
 	p, dir := profileFrom(t, `version: "1"
 name: p
 targets:
@@ -195,22 +195,67 @@ skills:
   pdf:
     ref: pdf@anthropic-skills
 `)
-	got, reports, err := Resolve(t.Context(), p, Opts{Cache: mustCache(t), ManifestDir: dir})
+	got, _, err := Resolve(t.Context(), p, Opts{Cache: mustCache(t), ManifestDir: dir})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	// The marketplace's own catalogue IS fetched here — it is an ordinary
-	// locator. Only the item lookup inside it is Phase 6.
-	if _, ok := got["marketplace anthropic-skills"]; !ok {
-		t.Errorf("the marketplace catalogue was not fetched: %v", got)
+	pdf, ok := got["skill pdf"]
+	if !ok {
+		t.Fatalf("the ref did not resolve: %v", keysOf(got))
 	}
-	if _, ok := got["skill pdf"]; ok {
-		t.Error("a ref-backed skill was resolved; item resolution is Phase 6")
+	if b, err := os.ReadFile(filepath.Join(pdf.Dir, "SKILL.md")); err != nil || string(b) != "# pdf" {
+		t.Errorf("item content = %q %v", b, err)
 	}
-	if !slices.ContainsFunc(reports, func(r Report) bool {
-		return r.Resource == "skill pdf" && strings.Contains(r.Text, "Phase 6")
-	}) {
-		t.Errorf("no deferral report for skill pdf: %+v", reports)
+	// One clone serves the catalogue and every item in it.
+	if pdf.ResolvedRef != got["marketplace anthropic-skills"].ResolvedRef {
+		t.Errorf("the item carries a different receipt from its catalogue")
+	}
+}
+
+// §22's type matching. Without it a skill drawn from a plugin catalogue fails
+// its SKILL.md contract with an error naming the wrong thing.
+func TestARefMustMatchItsCatalogueType(t *testing.T) {
+	repo := newBareRepo(t, map[string]string{"skills/pdf/SKILL.md": "#"})
+	p, dir := profileFrom(t, `version: "1"
+name: p
+targets:
+  - claude
+marketplaces:
+  acme:
+    type: plugins
+    source:
+      git:
+        url: `+repo+`
+skills:
+  pdf:
+    ref: pdf@acme
+`)
+	_, _, err := Resolve(t.Context(), p, Opts{Cache: mustCache(t), ManifestDir: dir})
+	if err == nil {
+		t.Fatal("a skill resolved from a plugins catalogue")
+	}
+	for _, want := range []string{"acme", "plugins", "skills"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
+// A ref naming a catalogue the manifest does not declare has to say so. v1
+// keeps no marketplace definition in the ledger, so there is nowhere else it
+// could have come from (§35.1).
+func TestARefToAnUndeclaredCatalogueIsRefused(t *testing.T) {
+	p, dir := profileFrom(t, `version: "1"
+name: p
+targets:
+  - claude
+skills:
+  pdf:
+    ref: pdf@nowhere
+`)
+	_, _, err := Resolve(t.Context(), p, Opts{Cache: mustCache(t), ManifestDir: dir})
+	if err == nil || !strings.Contains(err.Error(), "nowhere") {
+		t.Errorf("err = %v; it must name the missing catalogue", err)
 	}
 }
 
