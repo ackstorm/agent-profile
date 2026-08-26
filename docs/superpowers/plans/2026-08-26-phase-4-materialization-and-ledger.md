@@ -11,7 +11,7 @@ the map `pkg/source.Resolve` returned, and a **root** — always a parameter —
 writes. An `Adapter` per runtime owns where each kind of thing lands; the ledger
 records what landed. `pkg/schema` and `pkg/source` are consumed, never modified.
 
-**Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.2.md`
+**Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.3.md`
 
 **Status: COMPLETE.** Seven tasks landed. Gates: `verify`, `crossbuild`,
 `secrets`, `sandbox` (unchanged), `smoke` — all green. Thirteen mutation tests

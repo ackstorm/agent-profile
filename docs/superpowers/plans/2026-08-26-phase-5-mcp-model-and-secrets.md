@@ -14,7 +14,7 @@ v1 gets.
 
 **Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.2.md`
 
-**Status: Tasks 1-4 COMPLETE. Task 5 (prompt) DEFERRED — see below.** Gates
+**Status: Tasks 1-4 COMPLETE. Task 5 (prompt) is OUT OF V1 (spec v0.6.3 §10, §38).** Gates
 green. Eleven mutation tests. One real bug found by a test rather than by
 reading: an absent MCP container was written whole and recorded as
 `mcpServers`, which would have made Phase 7's uninstall delete every server in
@@ -282,19 +282,26 @@ only after the merge-level test was green. The lesson is not "write more tests":
 it is that a fixture which pre-creates the structure under test hides the
 creation path, and the creation path is the one every new user takes.
 
-### `model` needed a mechanism the spec does not name
+### `model` needed a mechanism — and the first one I picked was wrong
 
-§9 and §15.1 describe variables; §34's table describes expansion inside
-materialized configuration. Neither says where a derived `ANTHROPIC_BASE_URL`
-lives between `apply` and `run`, which are separate invocations — and a manifest
-is an input that may be gone by then.
+§9 and §15.1 describe variables; §34 describes expansion inside materialized
+configuration. Neither says where a derived `ANTHROPIC_BASE_URL` lives between
+`apply` and `run`, which are separate invocations.
 
-`<root>/.ap-env` is the answer, read by `internal/run`. It is not a shell script
-and is never sourced, so an awkward value needs no escaping and cannot smuggle
-in a command. The consequence — a profile with a `model` block requires
-launching through ap — is the same class §34 already states for file-sourced
-secrets, and is written into the constant's doc comment rather than left to be
-discovered.
+I concluded there was no configuration key to merge into and wrote
+`<root>/.ap-env`, exported by `internal/run`. Architecture measured the real
+binaries and every runtime has one: claude's `settings.json` `env` map, codex's
+`model_providers.<id>.env_key`, opencode's `provider.<id>.apiKey` with `{env:}`.
+
+The failure mode of the version I shipped is the part worth remembering. An
+environment only the launcher exports is unread wherever the launcher is not in
+the path — an init container hydrating for a main container that execs the
+runtime directly loses the entire model block, silently. I flagged that exact
+topology as an open question in the hand-off note **while shipping the design
+that breaks in it**. Naming a risk is not the same as letting it change the
+design.
+
+Corrected in v0.6.3; `.ap-env` deleted.
 
 ### codex having no generic secret syntax is a design constraint, not a quirk
 

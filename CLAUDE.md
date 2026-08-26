@@ -50,6 +50,7 @@ Read the file before touching the code. Not suggestions.
 | `pkg/schema/*`, composition, the YAML subset                    | `docs/references/DECLARATIVE.md` |
 | `pkg/source/*`, the credential guards, the cache, fetching       | `docs/references/DECLARATIVE.md` |
 | `pkg/hydrate/*`, the ledger, the root lock, materialization      | `docs/references/DECLARATIVE.md` |
+| `internal/run/handoff_*.go`, anything Windows                    | `docs/references/WINDOWS.md`     |
 
 Everything else in this file is a standing rule: it applies before you know
 which file you are about to touch.
@@ -370,8 +371,18 @@ is not that and must not grow into it.
   default` (the `default` sentinel — see `profile.Default`) reaches the real
   config through the existing `--from` flag. A second flag would be
   redundant, not missing.
-- **Windows.** It would need a second execution model and a second sharing
-  mechanism. The build tags say so.
+- **Windows for the LAUNCHER, for now.** No longer a non-goal: `run` on Windows
+  is **spawn semantics** — start the child, proxy its exit code — because
+  Windows has no exec replacement (`syscall.Exec` exists there as a stub that
+  always returns `EWINDOWS`, which is why the unix code compiles for Windows and
+  fails at the one moment that matters). `internal/run/handoff_windows.go` is
+  that path, and `make crossbuild` vets it so it cannot rot while unshipped.
+
+  Binaries are **not** published yet, and the four blockers are specific rather
+  than a general reluctance — see `docs/references/WINDOWS.md`. The first is
+  silent: a wrapper named `claude:plan` on NTFS creates an alternate data stream
+  on a file called `claude` and reports success. Full command surface or
+  nothing; a hydration-only Windows binary is explicitly not the answer.
 - **`--pure`.** It set `OPENCODE_PURE` (identical to opencode's own `--pure`),
   `OPENCODE_DISABLE_PROJECT_CONFIG` and `OPENCODE_DISABLE_DEFAULT_PLUGINS`. It did
   not isolate anything — the global config still loaded — and the project-config

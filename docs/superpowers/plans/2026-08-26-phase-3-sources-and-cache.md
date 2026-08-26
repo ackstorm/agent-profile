@@ -14,7 +14,7 @@ never puts a credential in a URL; an archive fetcher that verifies a digest
 before extracting; and a resolver that walks an effective profile and returns
 one resolved tree per active locator. `pkg/schema` is consumed, never modified.
 
-**Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.2.md`
+**Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.3.md`
 
 **Status: COMPLETE.** All nine tasks landed. Gates: `verify`, `crossbuild`,
 `secrets`, `fuzz` (with the new `FuzzExtractTar`), `sandbox` — all green;

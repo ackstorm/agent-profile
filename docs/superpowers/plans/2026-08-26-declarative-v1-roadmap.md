@@ -1,6 +1,6 @@
 # Declarative Agent Profiles — Phased Roadmap
 
-**Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.2.md`. Section
+**Spec of record:** `docs/specs/agent-profile-declarative-spec-v0.6.3.md`. Section
 numbers below are that document's.
 
 > **For agentic workers:** this is a ROADMAP, not an executable plan. Each phase

@@ -170,14 +170,23 @@ neither `gitlab*` nor `git.*` infers `bearer`, gets 401, and only an explicit
 `scheme` fixes it. A 401 that does not name the scheme tried leaves the user
 unable to tell a wrong scheme from a wrong token.
 
-**`SameEndpoint` compares host AND effective port, and the host match is exact
-(§21.2).** The effective port is the explicit one or the scheme's default, so
-`https://h` and `https://h:443` are one endpoint while a different port on the
-same host may be a different service. The host comparison is exact because a
-subdomain is not the same host: `evil.gl.acme.internal` reads as ours to anyone
-skimming a catalogue, and the manifest author does not write the catalogue. Both
-guards live in `transport.go` together on purpose — they answer one question at
-two moments, and splitting them is how one gets updated and the other does not.
+**§21.2 is removed, and `SameEndpoint` is deliberately still here, tested and
+unused.** v0.6.3 scoped a marketplace catalogue to its own repository: an entry
+naming another repo is a resolution error, so there is no cross-host second hop
+for a credential to reach and nothing left to guard.
+
+The function stays because the guard is day-one machinery for the moment the
+cross-repo trigger fires, and because a guard rebuilt from memory under time
+pressure is how the subdomain case gets missed the second time. What it encodes:
+the effective port is the explicit one or the scheme's default, so `https://h`
+and `https://h:443` are one endpoint while a different port on the same host may
+be a different service; and the host match is EXACT, because
+`evil.gl.acme.internal` reads as ours to anyone skimming a catalogue and the
+manifest author does not write the catalogue.
+
+`TestSameEndpointIsKeptForTheCrossRepoTrigger` exists so the package does not
+look like it has dead weight nobody thought about. §17.2 — never over non-TLS —
+is unaffected: it is general, not a property of the hop.
 
 **No test in `pkg/source` touches the network.** Git tests run against real
 repositories created in `t.TempDir()`; archive tests serve bytes from
@@ -354,15 +363,33 @@ merge-level test was green. The lesson is not "write more tests": a fixture that
 pre-creates the structure under test hides the creation path, and the creation
 path is the one every new user takes.
 
-**`model` needed a mechanism the spec does not name.** §9 and §15.1 describe
-variables; §34 describes expansion inside materialized configuration. Neither
-says where a derived `ANTHROPIC_BASE_URL` lives between `apply` and `run`, which
-are separate invocations — and a manifest is an input that may be gone by then.
-`<root>/.ap-env` is the answer, written by apply and read by `internal/run`. It
-is **not** a shell script and is never sourced, so a value holding a space, a
-quote or `$(rm -rf /)` needs no escaping and cannot smuggle in a command. The
-consequence — a profile with a `model` block requires launching through ap — is
-the same class §34 already states for file-sourced secrets.
+**`model` materializes into FILES, and the draft that did not was wrong in a
+specific way.** An earlier version derived `ANTHROPIC_BASE_URL` and friends into
+a profile-local `.ap-env` that only `ap run` exported, on the reasoning that §9
+describes variables and there is no configuration key to merge them into. Every
+runtime has one:
+
+| Runtime | Destination |
+|---|---|
+| claude | `settings.json`, the `env` map — literals, non-secret |
+| codex | `config.toml`, `model_providers.<id>.{base_url, env_key}` |
+| opencode | `opencode.json`, `provider.<id>.{baseURL, apiKey: "{env:VAR}"}` |
+| pi | none measured — §8 warns |
+
+The cost of getting it wrong was not aesthetic. An environment only the launcher
+exports is unread wherever the launcher is not in the path, which is precisely
+the deployment that needs it most: an init container hydrates, the main
+container executes the runtime directly, and the whole model block vanishes with
+nothing reporting it.
+
+§15.1 improved on the way through. claude's runtime environment shares the same
+`settings.json` `env` block, so "adapter first, user last, user wins" is now a
+property of **one merge** rather than of two mechanisms that could disagree
+about which ran last.
+
+claude's row is the one NOT smoke-verified — carried from binary inspection, and
+its doc comment says so. The registry rule is that a row is proven by running
+the binary and watching it read the file.
 
 **`prompt` is deliberately not built.** There is no measurement of any runtime's
 prompt mechanism, and `CLAUDE.md`'s rule is explicit: a guessed path is worse
