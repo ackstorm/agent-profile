@@ -430,8 +430,14 @@ resolves.
 foreign host is fetched with no `Authorization` header, and reverting that check
 turns its test red.
 
-### Phase 7 — The state surface: ledger verbs, imperative install, and `ap sync` dies
+### Phase 7 — The state surface: ledger verbs, imperative install, and `ap sync` dies — **COMPLETE (2026-08-26)**
 `[§6 §33-amended §38]`
+
+Write-up: `2026-08-26-phase-7-ledger-verbs-and-retiring-sync.md`. Two defects
+found that predate this phase: `schema.Render` emitted a git `auth` block its
+own parser rejects, and right-trimmed a `prefix: "Bearer "` into `"Bearer"`.
+Both had been shipping since Phase 1, because render's tests compared text to
+text and nothing ever fed one to the other.
 
 The ledger's payoff, and the phase that makes the manifest optional.
 

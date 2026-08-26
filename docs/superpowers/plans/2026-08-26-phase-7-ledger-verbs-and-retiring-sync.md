@@ -175,3 +175,77 @@ Rewrite CLAUDE.md's `ap sync` section.
 Each is reverted, confirmed RED, restored **from the scratch copy** — never with
 `git checkout`, which restores from HEAD and silently reverts the feature too
 (the defect that shipped `dac0f77` in Phase 6).
+
+---
+
+# Phase 7 — COMPLETE (2026-08-26)
+
+Six gates green: `verify`, `secrets`, `sandbox`, `smoke` (four real agents),
+`fuzz` (7 targets), `crossbuild` (inside verify). Four mutation tests recorded,
+each reverted, confirmed RED, and restored from its scratch copy.
+
+## What the plan did not predict
+
+### `Render` did not round-trip, and two bugs were hiding in the gap
+
+The plan treated export as "walk the ledger, emit a Profile". The first time
+`schema.Render`'s output was fed to `schema.Effective` — which had never
+happened, because render's tests compare emitted text to expected text — it did
+not parse. Two defects, one of them silent:
+
+- a git or archive `auth` block emitted `secret:` where `decodeGitAuth` requires
+  a nested `value_from:`;
+- `quoteIfNeeded` emitted `prefix: Bearer ` bare, and `scalarNode` right-trims a
+  bare scalar, so `"Bearer "` came back `"Bearer"` and materialized
+  `Bearer${TOKEN}` with no separator.
+
+The second one is the more instructive: it affects `ap manifest render` on any
+manifest with a header prefix, which is the ordinary case, and it had been
+shipping since Phase 1. A renderer and a parser that disagree about a grammar
+both stay green forever unless something feeds one to the other.
+`quoteIfNeeded`'s must-quote list is now read off `scalarNode` rather than
+guessed at, and `TestRenderRoundTripsThroughTheParser` asserts a fixed point.
+
+### §16's containment rule is written for manifests, and install has none
+
+`ap install claude:plan skill pdf --local /abs/path` was refused: a local
+source's path must stay inside the manifest's directory, and an install has no
+manifest. Waiving the rule for the imperative path would have waived it in the
+shared validator, which is the rule that stops a manifest from a repository
+reading `~/.ssh`.
+
+The fix keeps the rule and changes what it is measured against: the path's own
+PARENT becomes the manifest directory and the path becomes its base name.
+Satisfied by construction, nothing relaxed. Found by `make sandbox`, not by the
+unit tests, because the unit tests fetch through a git URL.
+
+### The help-coverage test could not fail
+
+`TestEachCommandHasItsOwnHelp` iterated a hand-written list of eleven command
+names. Adding `install` and `uninstall` to `commandTable` did not add them to
+that list, so the test stayed green over two commands with no help at all — and
+it had already been green over `manifest` and `sync` for the same reason. It now
+derives its names from `commandTable` minus an explicit skip set, and caught
+both immediately.
+
+### The sandbox's replacement gate was vacuous as first written
+
+"A pipe is not consent" was written as "the command fails". It would have stayed
+green if the manifest had simply stopped parsing. It now asserts the refusal is
+the gate's, by matching its text, and that the message names the resolved
+absolute path — which is the only thing distinguishing the two blast radii on
+one screen.
+
+## Scope stated, not silently dropped
+
+- **`--manifest <path>` to select one resource out of a manifest** — not built.
+  `ap manifest apply` applies a manifest and apply is additive, so this is a
+  filter over an operation that exists. Trigger: someone wanting a subset of a
+  manifest they cannot edit.
+- **`ap install <ref> mcp|model <name>`** — refused by name. They have no
+  locator; installing one imperatively means spelling a whole transport in
+  flags, which is the manifest with worse syntax.
+- **`ap outdated`** — deferred with its trigger in the command-surface document,
+  and the ledger already records the `resolvedRef` it would need.
+- **Three plugin format conversions** (Phase 6's) are still outstanding and
+  still warn by name. Phase 7 did not touch them.
