@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -55,6 +56,151 @@ func TestDispatchRenderRequiresATarget(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--target") {
 		t.Errorf("error %q does not name --target", err)
+	}
+}
+
+// apply has no passthrough either, and no positional-required requirement
+// changes that: a missing --target must still be an error.
+func TestDispatchApplyRequiresATarget(t *testing.T) {
+	err := dispatch([]string{"apply", "./p.yaml", "--dry-run"})
+	if err == nil {
+		t.Fatal("apply without --target succeeded")
+	}
+	if !strings.Contains(err.Error(), "--target") {
+		t.Errorf("error %q does not name --target", err)
+	}
+}
+
+// stubExecutable drops an executable file named name into dir, so a PATH
+// pointed at dir resolves it via exec.LookPath — the same technique
+// pkg/schema/preflight_test.go uses, reimplemented here because cmd/ap is a
+// different package.
+func stubExecutable(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dirSnapshot hashes a directory's file list — name, size and mode, not
+// content — so a test can prove a call touched nothing by comparing a
+// snapshot taken before against one taken after.
+func dirSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s %d %s\n", rel, info.Size(), info.Mode())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+// TestDispatchApplyDryRunWritesNothing is F7: --dry-run runs exactly the
+// resolution phase and stops. Snapshotting the manifest's directory before
+// and after is the literal proof, not a claim taken on faith.
+func TestDispatchApplyDryRunWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	stubExecutable(t, binDir, "claude")
+	t.Setenv("PATH", binDir)
+
+	before := dirSnapshot(t, dir)
+	err := dispatch([]string{"apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
+	if err != nil {
+		t.Fatalf("apply --dry-run: %v", err)
+	}
+	after := dirSnapshot(t, dir)
+	if before != after {
+		t.Errorf("--dry-run changed the manifest directory:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// Without --dry-run, apply must refuse rather than stub a fake success: F6.
+func TestDispatchApplyWithoutDryRunRefuses(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	stubExecutable(t, binDir, "claude")
+	t.Setenv("PATH", binDir)
+
+	err := dispatch([]string{"apply", filepath.Join(dir, "p.yaml"), "--target", "claude"})
+	if err == nil {
+		t.Fatal("apply without --dry-run succeeded, want it to refuse")
+	}
+	if !strings.Contains(err.Error(), "Phase 4") {
+		t.Errorf("error %q does not say materialization is Phase 4", err)
+	}
+}
+
+// TestDispatchApplyManifestDashReadsStdin is design point 5: --manifest -
+// reads the manifest from a temp file this command owns and cleans up, so a
+// caller can pipe a generated manifest with no temp file of its own.
+func TestDispatchApplyManifestDashReadsStdin(t *testing.T) {
+	binDir := t.TempDir()
+	stubExecutable(t, binDir, "claude")
+	t.Setenv("PATH", binDir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	go func() {
+		_, _ = w.Write([]byte("version: \"1\"\nname: piped\ntargets:\n  - claude\n"))
+		_ = w.Close()
+	}()
+
+	err = dispatch([]string{"apply", "--manifest", "-", "--target", "claude", "--dry-run"})
+	if err != nil {
+		t.Fatalf("apply --manifest -: %v", err)
+	}
+}
+
+// A path and --manifest name the same thing twice; that must be rejected
+// rather than silently preferring one.
+func TestDispatchApplyRejectsBothAPathAndManifestFlag(t *testing.T) {
+	err := dispatch([]string{"apply", "./p.yaml", "--manifest", "-", "--target", "claude", "--dry-run"})
+	if err == nil {
+		t.Fatal("apply with both a path and --manifest succeeded, want it to refuse")
+	}
+}
+
+func TestDispatchSchemaPrintsJSON(t *testing.T) {
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	err = dispatch([]string{"schema"})
+	_ = w.Close()
+	os.Stdout = old
+	if err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(out) {
+		t.Errorf("ap schema did not print valid JSON: %s", out)
 	}
 }
 

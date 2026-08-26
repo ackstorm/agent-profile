@@ -42,6 +42,8 @@ Commands:
   run       Run the agent with that profile
   render    Print a declarative manifest's effective profile for one runtime
   validate  Check that a declarative manifest composes for every target
+  apply     Run the resolution phase; --dry-run to print it and touch nothing
+  schema    Print the declarative manifest's JSON Schema
   delete    Delete a profile and its wrapper, asking first
   unlink    Remove the wrapper, keep the profile
   link      Write the wrapper back
@@ -296,6 +298,46 @@ Examples:
   ap validate ./profile.yaml
 `,
 
+	"apply": `ap apply - run the resolution phase; --dry-run to print it and touch nothing
+
+Usage:
+  ap apply <manifest.yaml> --target <runtime> [--dry-run] [--strict]
+  ap apply --manifest - --target <runtime> --dry-run
+
+Runs the resolution phase (§37 steps 1-11): composes the effective profile,
+computes which inputs it actually needs, resolves them, and runs derived
+preflight. Fetches nothing — source resolution is Phase 3.
+
+--dry-run prints the result, with secrets shown by binding NAME only, never a
+resolved value, and exits 0. Without --dry-run, apply prints that
+materialization is Phase 4 and exits 1 — there is no fake apply to stub.
+
+Flags:
+  --target      the runtime to resolve for (required)
+  --dry-run     run the resolution phase and print it; write nothing
+  --strict      promote every degradation warning to an error
+  --manifest -  read the manifest from stdin instead of a path argument, so a
+                caller can pipe a generated manifest with no temp file of its
+                own; give a path or --manifest, never both
+
+Examples:
+  ap apply ./profile.yaml --target claude --dry-run
+  ach export | ap apply --manifest - --target claude --dry-run
+`,
+
+	"schema": `ap schema - print the declarative manifest's JSON Schema
+
+Usage:
+  ap schema
+
+Prints the manifest's JSON Schema (draft 2020-12) to stdout, so a consumer in
+another language can validate a manifest it authored without reimplementing
+these rules.
+
+Examples:
+  ap schema > manifest.schema.json
+`,
+
 	"env": `ap env - print the environment override, or run a command under it
 
 Usage:
@@ -419,6 +461,10 @@ func dispatch(args []string) error {
 		return cmdRun(args[1:])
 	case "render", "validate":
 		return cmdRenderOrValidate(args[0], args[1:])
+	case "apply":
+		return cmdApply(args[1:])
+	case "schema":
+		return cmdSchema(args[1:])
 	case "delete", "rm":
 		return cmdDelete(args[1:])
 	case "link":
