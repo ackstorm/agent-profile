@@ -228,12 +228,13 @@ _cover: _test
 	go tool cover -func coverage.out | tail -20
 
 .PHONY: fuzz
-fuzz: ## Fuzz the path-validation surfaces, 30s each (the traversal-bug lesson).
+fuzz: ## Fuzz the path-validation and manifest-parsing surfaces, 30s each (the traversal-bug lesson).
 	$(call in_container,_fuzz)
 _fuzz:
 	go test -run '^$$' -fuzz FuzzValidName -fuzztime 30s ./internal/profile/
 	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime 30s ./internal/profile/
 	go test -run '^$$' -fuzz FuzzParse -fuzztime 30s ./internal/manifest/
+	go test -run '^$$' -fuzz FuzzParseYAML -fuzztime 30s ./pkg/schema/
 
 # The agents run in their own image, not on your machine. That image is where the
 # four real binaries live, so this target needs none of them installed on the

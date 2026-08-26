@@ -1,6 +1,9 @@
 package schema
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseDistinguishesNullBoolAndNumberFromString(t *testing.T) {
 	root, err := ParseYAML([]byte("a: null\nb: false\nc: 0.2\nd: \"false\"\ne: plain\n"))
@@ -102,5 +105,29 @@ func TestParseReadsLiteralBlockScalarsAndRejectsFoldedOnes(t *testing.T) {
 	// to refuse.
 	if _, err := ParseYAML([]byte("a: >\n  one\n  two\n")); err == nil {
 		t.Error("folded block scalar (>) accepted; the subset must name and refuse it")
+	}
+}
+
+func TestParseNamesEveryConstructItRefuses(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"flow sequence", "a: [x, y]\n", "flow sequence"},
+		{"flow mapping", "a: {x: y}\n", "flow mapping"},
+		{"folded block", "a: >\n  x\n", "block scalar (>)"},
+		{"anchor", "a: &x y\n", "anchors"},
+		{"alias", "a: *x\n", "anchors"},
+		{"tag", "a: !!str y\n", "tags"},
+		{"merge key", "<<: *x\n", `merge key "<<"`},
+		{"tab indent", "a:\n\tb: c\n", "tab"},
+		{"second document", "a: b\n---\nc: d\n", "document"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseYAML([]byte(tc.in))
+			if err == nil {
+				t.Fatalf("%q was accepted; the subset must refuse it", tc.in)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
+			}
+		})
 	}
 }
