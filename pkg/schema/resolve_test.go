@@ -131,6 +131,38 @@ runtimes:
 	}
 }
 
+// TestResolveStrictJoinsEveryWarningNotJustTheFirst is the regression for a
+// `for` loop that returned on iteration one: ach runs --strict as a contract
+// check against a manifest it generated, and N warnings have to arrive in one
+// call for it to fix them all at once rather than one run per warning.
+func TestResolveStrictJoinsEveryWarningNotJustTheFirst(t *testing.T) {
+	dir := t.TempDir()
+	binDir := t.TempDir()
+	stubBin(t, binDir, "claude")
+	t.Setenv("PATH", binDir)
+	write(t, dir, "p.yaml", `version: "1"
+name: p
+targets:
+  - claude
+runtimes:
+  opencode:
+    environment:
+      A: b
+  codex:
+    environment:
+      A: b
+`)
+	_, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", true)
+	if err == nil {
+		t.Fatal("resolve with strict on a profile with two warnings = nil error, want error")
+	}
+	for _, want := range []string{"opencode", "codex"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("strict error %q is missing the %s warning; --strict must report every warning, not just the first", err, want)
+		}
+	}
+}
+
 func TestResolveDoesNotMutateAnything(t *testing.T) {
 	dir := t.TempDir()
 	binDir := t.TempDir()

@@ -39,6 +39,27 @@ model:
 	}
 }
 
+// TestRenderOmitsRuntimesForAManifestThatDeclaredNone is the regression for
+// Effective unconditionally setting p.Runtimes = map[string]Runtime{runtime:
+// p.Runtimes[runtime]}: a manifest with no runtimes: block at all got one
+// invented — an empty `runtimes:\n  claude:` — because a zero-value Runtime
+// is still a map entry.
+func TestRenderOmitsRuntimesForAManifestThatDeclaredNone(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "p.yaml", "version: \"1\"\nname: p\ntargets:\n  - claude\n")
+	p, _, err := Effective(filepath.Join(dir, "p.yaml"), "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Runtimes != nil {
+		t.Errorf("Effective invented a runtimes block: %#v", p.Runtimes)
+	}
+	out := string(Render(p))
+	if strings.Contains(out, "runtimes:") {
+		t.Errorf("render emitted a runtimes: key for a manifest that declared none:\n%s", out)
+	}
+}
+
 func TestRenderIsDeterministic(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "p.yaml", "version: \"1\"\nname: p\ntargets:\n  - claude\nskills:\n  b:\n    ref: b@m\n  a:\n    ref: a@m\n")

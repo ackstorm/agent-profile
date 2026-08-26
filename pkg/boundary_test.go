@@ -44,7 +44,7 @@ func TestPkgNeverImportsInternal(t *testing.T) {
 		// a single agentreg_test.go importing internal/ — proven by mutation.
 		imports = append(imports, p.XTestImports...)
 		for _, imp := range imports {
-			if strings.Contains(imp, "/internal/") {
+			if strings.Contains(imp, "/internal/") || strings.HasSuffix(imp, "/internal") {
 				t.Errorf("%s imports %s; pkg/ must not import internal/", dir, imp)
 			}
 		}

@@ -6,10 +6,11 @@ import (
 	"strings"
 )
 
-// Resolved holds resolved input values. It has no exported field and no
-// String method: a secret must not be printable by accident. Callers that
-// need a value ask for it explicitly with Value; anything that formats or
-// logs a Resolved gets the type name and nothing else.
+// Resolved holds resolved input values. It has no exported field, and its
+// String/GoString methods redact rather than expose it: a secret must not be
+// printable by accident. Callers that need a value ask for it explicitly with
+// Value; anything that formats or logs a Resolved gets the type name and
+// nothing else.
 type Resolved struct {
 	values map[string]string // "<kind>:<name>" -> value
 }
@@ -23,11 +24,20 @@ func (r *Resolved) Value(kind, name string) (string, bool) {
 
 // String redacts. An unexported field alone does not hide it: Go's fmt
 // reaches into unexported struct fields by reflection with no Stringer in
-// the way, so %v and %+v on a bare *Resolved print every value in the
-// values map. This method exists only to take that path away.
-func (r *Resolved) String() string {
+// the way, so %v and %+v on a bare Resolved print every value in the values
+// map. This method exists only to take that path away.
+//
+// The receiver is a VALUE, not a pointer: a pointer receiver is not in the
+// value type's method set, so fmt silently falls back to reflection for a
+// plain Resolved (as opposed to a *Resolved) — the exact case a value copy
+// held by a cross-module caller produces. GoString covers %#v, which fmt
+// never routes through Stringer at all.
+func (r Resolved) String() string {
 	return fmt.Sprintf("schema.Resolved{%d input(s), redacted}", len(r.values))
 }
+
+// GoString redacts %#v the same way String redacts %v/%+v/%s.
+func (r Resolved) GoString() string { return r.String() }
 
 // ResolveInputs binds every Ref against the profile's declared inputs. A
 // referenced input with no declared binding is an error naming the
@@ -68,13 +78,29 @@ func resolveBinding(b Binding, ref Ref) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("%s %q: environment variable %s is not set", ref.Kind, ref.Name, b.Env)
 		}
-		return v, nil
+		return v, rejectCRLF(v, ref)
 	}
 	data, err := os.ReadFile(b.File)
 	if err != nil {
 		return "", fmt.Errorf("%s %q: reading %s: %w", ref.Kind, ref.Name, b.File, err)
 	}
-	return string(data), nil
+	// A token file made with `echo T > f` ends in a newline that is not part
+	// of the value — left in, it lands in a materialized header as
+	// "Bearer T\n". Only the trailing run is trimmed; an embedded CR/LF is
+	// caught below instead of silently stripped.
+	v := strings.TrimRight(string(data), "\r\n")
+	return v, rejectCRLF(v, ref)
+}
+
+// rejectCRLF stops a resolved value from carrying CR or LF outright, naming
+// the input. A resolved value is materialized straight into places like a
+// header value (§13); an embedded CR/LF there is header injection, and this
+// is the layer that reads the raw bytes, so it is where that gets stopped.
+func rejectCRLF(v string, ref Ref) error {
+	if strings.ContainsAny(v, "\r\n") {
+		return fmt.Errorf("%s %q: resolved value contains a CR or LF", ref.Kind, ref.Name)
+	}
+	return nil
 }
 
 // resourceLabel turns a Ref.Resource (e.g. "skills.company-review", or the

@@ -83,9 +83,13 @@ func mergeAt(base, overlay *Node, s Schema, path []string) (*Node, error) {
 }
 
 // sameBranch reports whether both sides of a branch-keyed union select the same
-// branch. A union node holds exactly one key by construction (schema validation
-// enforces that within a single document), so comparing the first key is the
-// whole comparison.
+// branch. A union node is INTENDED to hold exactly one key — that is what
+// makes comparing the first key the whole comparison — but this function does
+// not itself enforce that: Merge runs before Decode, so an overlay reaches
+// here before schema validation has ever looked at it. The len == 0 guards
+// below exist precisely because that invariant is not enforced at this point;
+// they are not defensive padding for a case schema validation already rules
+// out.
 func sameBranch(base, overlay *Node) bool {
 	if len(base.Keys) == 0 || len(overlay.Keys) == 0 {
 		return false

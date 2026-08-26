@@ -18,8 +18,8 @@ func TestSchemaMarksTheThreeV1UnionPointsAndNothingElse(t *testing.T) {
 			t.Errorf("%v: not marked as a union", p)
 		}
 	}
-	// transport is discriminated by an inner `type` field, not a branch key.
-	// §3.5 lists exactly three v1 union points and this is not one of them.
+	// Why mcps.*.transport is not a union: see the comment in schema.go, next
+	// to V1Schema's unions list.
 	if s.IsUnion([]string{"mcps", "memory", "transport"}) {
 		t.Error("mcps.*.transport is marked as a union; §3.5 does not list it")
 	}

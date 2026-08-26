@@ -57,8 +57,15 @@ func Effective(path, runtime string) (Profile, []Warning, error) {
 	}
 	// Every runtime block other than the selected one is dropped from the
 	// effective profile: it is runtime-specific and this profile now has a
-	// runtime.
-	p.Runtimes = map[string]Runtime{runtime: p.Runtimes[runtime]}
+	// runtime. A manifest that never declared runtimes.<runtime> at all keeps
+	// p.Runtimes nil rather than gaining an invented, empty one — Render would
+	// otherwise print a `runtimes:\n  <runtime>:` block with nothing under it
+	// for a manifest that declared none.
+	if rt, ok := p.Runtimes[runtime]; ok {
+		p.Runtimes = map[string]Runtime{runtime: rt}
+	} else {
+		p.Runtimes = nil
+	}
 	return p, warns, nil
 }
 

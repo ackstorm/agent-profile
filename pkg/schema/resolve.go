@@ -1,6 +1,9 @@
 package schema
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 // Resolution is everything the resolution phase produced. Phase 4 consumes
 // it and materializes; --dry-run prints it and stops.
@@ -23,10 +26,12 @@ func Resolve(path, runtime string, strict bool) (*Resolution, *Resolved, error) 
 	if err != nil {
 		return nil, nil, err
 	}
-	if strict {
-		for _, w := range warns {
-			return nil, nil, fmt.Errorf("strict: %s", w.Text)
+	if strict && len(warns) > 0 {
+		errs := make([]error, len(warns))
+		for i, w := range warns {
+			errs[i] = fmt.Errorf("strict: %s", w.Text)
 		}
+		return nil, nil, errors.Join(errs...)
 	}
 
 	refs := Required(p)

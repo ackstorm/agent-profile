@@ -88,10 +88,69 @@ func TestResolveInputsReadsAnEnvBindingAndAFileBinding(t *testing.T) {
 	}
 }
 
+// TestResolveInputsTrimsATrailingNewlineFromAFileBinding is the regression
+// for a file made with `echo T > f`: its trailing newline is not part of the
+// value, and left in it lands verbatim in a materialized header as
+// "Bearer T\n".
+func TestResolveInputsTrimsATrailingNewlineFromAFileBinding(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "token")
+	if err := os.WriteFile(file, []byte("T\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := Profile{Inputs: Inputs{Secrets: map[string]Binding{
+		"gitlab-token": {File: file},
+	}}}
+	refs := []Ref{{Resource: "skills.company-review", Kind: "secret", Name: "gitlab-token"}}
+	resolved, err := ResolveInputs(p, refs)
+	if err != nil {
+		t.Fatalf("resolveinputs: %v", err)
+	}
+	if v, ok := resolved.Value("secret", "gitlab-token"); !ok || v != "T" {
+		t.Errorf("value = %q, %v, want %q, true", v, ok, "T")
+	}
+}
+
+// TestResolveInputsRejectsAResolvedValueContainingCRLF covers both binding
+// sources: a resolved value is materialized straight into places like a
+// header value, and an embedded CR/LF there is header injection.
+func TestResolveInputsRejectsAResolvedValueContainingCRLF(t *testing.T) {
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("AP_TEST_CRLF_TOKEN", "line1\r\nline2")
+		p := Profile{Inputs: Inputs{Secrets: map[string]Binding{
+			"gitlab-token": {Env: "AP_TEST_CRLF_TOKEN"},
+		}}}
+		refs := []Ref{{Resource: "skills.company-review", Kind: "secret", Name: "gitlab-token"}}
+		_, err := ResolveInputs(p, refs)
+		if err == nil || !strings.Contains(err.Error(), "gitlab-token") {
+			t.Errorf("err = %v, want an error naming the input", err)
+		}
+	})
+	t.Run("file", func(t *testing.T) {
+		dir := t.TempDir()
+		file := filepath.Join(dir, "token")
+		if err := os.WriteFile(file, []byte("line1\r\nline2\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := Profile{Inputs: Inputs{Secrets: map[string]Binding{
+			"gitlab-token": {File: file},
+		}}}
+		refs := []Ref{{Resource: "skills.company-review", Kind: "secret", Name: "gitlab-token"}}
+		_, err := ResolveInputs(p, refs)
+		if err == nil || !strings.Contains(err.Error(), "gitlab-token") {
+			t.Errorf("err = %v, want an error naming the input", err)
+		}
+	})
+}
+
 // TestResolvedNeverPrintsASecretValue is the guard against the accident this
-// phase exists to prevent: a Resolved formatted with %v or %+v — the two
-// verbs a stray log.Printf or fmt.Errorf("%v", ...) would reach for — must
-// never contain the secret value.
+// phase exists to prevent. It must cover more than %v/%+v on a *Resolved: a
+// pointer receiver on String would not be in the VALUE type's method set, so
+// a value copy — exactly what a cross-module caller (ach) gets by assigning
+// or embedding one — falls back to reflection, and %#v never routes through
+// Stringer at all regardless of receiver. Every path below was measured
+// leaking before String/GoString had value receivers; see the mutation
+// transcript in the phase's final-fix report.
 func TestResolvedNeverPrintsASecretValue(t *testing.T) {
 	const secretValue = "super-s3cret-v4lue"
 	t.Setenv("AP_TEST_REDACT_TOKEN", secretValue)
@@ -103,10 +162,28 @@ func TestResolvedNeverPrintsASecretValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveinputs: %v", err)
 	}
-	for _, format := range []string{"%v", "%+v"} {
-		out := fmt.Sprintf(format, resolved)
-		if strings.Contains(out, secretValue) {
-			t.Errorf("fmt.Sprintf(%q, resolved) = %q: leaked the secret value", format, out)
+
+	assertRedacted := func(t *testing.T, label string, v any) {
+		t.Helper()
+		for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
+			out := fmt.Sprintf(format, v)
+			if strings.Contains(out, secretValue) {
+				t.Errorf("fmt.Sprintf(%q, %s) = %q: leaked the secret value", format, label, out)
+			}
 		}
 	}
+
+	assertRedacted(t, "resolved (pointer)", resolved)
+	assertRedacted(t, "*resolved (value copy)", *resolved)
+
+	wrapper := struct{ R Resolved }{R: *resolved}
+	for _, format := range []string{"%v", "%+v", "%#v"} {
+		out := fmt.Sprintf(format, wrapper)
+		if strings.Contains(out, secretValue) {
+			t.Errorf("fmt.Sprintf(%q, struct{R Resolved}{...}) = %q: leaked the secret value", format, out)
+		}
+	}
+
+	assertRedacted(t, "[]Resolved", []Resolved{*resolved})
+	assertRedacted(t, "map[string]Resolved", map[string]Resolved{"x": *resolved})
 }

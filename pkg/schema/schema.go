@@ -34,6 +34,20 @@ func V1Schema() Schema {
 			{"runtimes", "*", "marketplaces", "*", "source"},
 			{"runtimes", "*", "plugins", "*", "source"},
 		},
+		// mcps.*.transport is deliberately NOT a marked union, even though it too
+		// picks one of two shapes (http vs stdio). Every union above is
+		// BRANCH-keyed: the overlay selects a shape by which nested key is
+		// present (source: {git: {...}} vs source: {local: {...}}), so an
+		// ordinary mapping merge would blend git.url with local.path into a
+		// value that names nothing. transport is shaped differently: `type:
+		// http | stdio` plus type-conditional keys sit directly alongside it in
+		// the same flat mapping — url/headers for http, command/args for
+		// stdio — not nested under a branch key. decodeTransport enforces the
+		// type/key pairing at decode time, so there is nothing for the merge
+		// engine to disambiguate: an ordinary mapping merge is the WANTED
+		// behavior here, letting an overlay that supplies only headers compose
+		// onto an inherited url instead of discarding the whole node the
+		// moment a single key is overlaid.
 		groups: []group{
 			// Members sorted, so Group's result is stable and comparable.
 			{at: []string{"skills", "*"}, members: []string{"ref", "source"}},
