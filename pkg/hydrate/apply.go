@@ -75,6 +75,9 @@ func Apply(ctx context.Context, p Plan) (Result, error) {
 	if err := applyArtifacts(ctx, p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
+	if err := applyPlugins(ctx, p, ledger, &res, stamp); err != nil {
+		return res, err
+	}
 	if err := applyMCPs(p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
@@ -119,6 +122,76 @@ func applySkills(ctx context.Context, p Plan, l *Ledger, res *Result, stamp stri
 		}
 		l.Put(ResourceRec{
 			Name: name, Kind: "skill", Ref: r.Ref, Source: r.Source,
+			ResolvedRef: fetched.ResolvedRef, InstalledAt: stamp, Files: files,
+		})
+	}
+	return nil
+}
+
+// applyPlugins routes each component kind of a plugin tree to this runtime's
+// destination (§24.2).
+//
+// The routing is the adapter's and the copying is not: that split is why one
+// plugin declaration works on four runtimes, and why it cannot be expressed as
+// four artifacts with hand-written destinations — an artifact names ONE
+// destination, and a plugin has a different one per runtime.
+//
+// Everything Route declines to route is REPORTED. A known kind this runtime has
+// no destination for, and a kind needing a format conversion that is not
+// implemented, both come back as warnings naming the runtime and the kind: §8
+// forbids the silent drop, and "why is my hook missing" has exactly one useful
+// answer.
+func applyPlugins(ctx context.Context, p Plan, l *Ledger, res *Result, stamp string) error {
+	for _, name := range sortedKeys(p.Profile.Plugins) {
+		r := p.Profile.Plugins[name]
+		if !r.Enabled {
+			continue
+		}
+		fetched, ok := p.Fetched["plugin "+name]
+		if !ok {
+			continue
+		}
+		entries, err := os.ReadDir(fetched.Dir)
+		if err != nil {
+			return fmt.Errorf("plugin %q: %w", name, err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		routed, err := Route(p.Adapter.Name(), names)
+		if err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("plugin %q: %v", name, err))
+			continue
+		}
+
+		var files []FileRec
+		for _, rt := range routed {
+			if rt.Dropped != "" {
+				res.Warnings = append(res.Warnings, fmt.Sprintf("plugin %q: %s", name, rt.Dropped))
+				continue
+			}
+			if rt.Merge != "" {
+				// Structured destinations — a plugin's MCP servers, claude's
+				// CLAUDE.md — merge into a file the user co-owns. Phase 5's
+				// machinery does that, and wiring a plugin's .mcp.json through
+				// it is the remaining piece; reported rather than half-done.
+				res.Warnings = append(res.Warnings, fmt.Sprintf(
+					"plugin %q: %q merges into %q, which is not wired yet; the files were not written",
+					name, rt.Kind, rt.To))
+				continue
+			}
+			recs, err := copyTree(ctx, filepath.Join(fetched.Dir, rt.Kind), p.Root, rt.To, res)
+			if err != nil {
+				return fmt.Errorf("plugin %q: %s: %w", name, rt.Kind, err)
+			}
+			files = append(files, recs...)
+		}
+		if len(files) == 0 {
+			continue
+		}
+		l.Put(ResourceRec{
+			Name: name, Kind: "plugin", Ref: r.Ref, Source: r.Source,
 			ResolvedRef: fetched.ResolvedRef, InstalledAt: stamp, Files: files,
 		})
 	}

@@ -472,3 +472,97 @@ func TestARuntimeWithNoModelDestinationWarns(t *testing.T) {
 		t.Errorf("pi silently dropped the model block: %v", res.Warnings)
 	}
 }
+
+// One plugin declaration, four runtimes, four different layouts. That is why
+// plugins is one common type and not four artifacts with hand-written
+// destinations: an artifact names ONE destination.
+func TestAPluginRoutesPerRuntimeAndReportsWhatItCannot(t *testing.T) {
+	src := writeTree(t, t.TempDir(), map[string]string{
+		"skills/review/SKILL.md":     "# review",
+		"commands/deploy.md":         "# deploy",
+		"hooks/pre.sh":               "#!/bin/sh",
+		"README.md":                  "docs",
+		".claude-plugin/plugin.json": `{"name":"p"}`,
+	})
+	for _, tc := range []struct {
+		runtime  string
+		want     map[string]string // path under root -> content
+		dropped  []string
+		notThere []string
+	}{
+		{
+			runtime: "claude",
+			want: map[string]string{
+				"skills/review/SKILL.md": "# review",
+				"commands/deploy.md":     "# deploy",
+			},
+			dropped: []string{"hooks"},
+		},
+		{
+			// pi puts commands under prompts/ and has no destination for hooks.
+			runtime: "pi",
+			want: map[string]string{
+				"skills/review/SKILL.md": "# review",
+				"prompts/deploy.md":      "# deploy",
+			},
+			dropped: []string{"hooks"},
+		},
+		{
+			// codex has NO skills destination inside its config dir.
+			runtime: "codex",
+			want:    map[string]string{"prompts/deploy.md": "# deploy"},
+			dropped: []string{"hooks", "skills"},
+			// Writing codex skills would leak one profile's into every other.
+			notThere: []string{"skills/review/SKILL.md"},
+		},
+	} {
+		t.Run(tc.runtime, func(t *testing.T) {
+			a, _ := agentreg.Lookup(tc.runtime)
+			ad, _ := AdapterFor(a)
+			root := t.TempDir()
+			res, err := Apply(t.Context(), Plan{
+				Root: root, Adapter: ad, Now: fixedNow,
+				Profile: schema.Profile{Plugins: map[string]schema.Resource{
+					"p": {Enabled: true, Source: &schema.Source{}},
+				}},
+				Fetched: map[string]source.Resolved{"plugin p": {Dir: src, ResolvedRef: "abc"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for rel, want := range tc.want {
+				got, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+				if err != nil || string(got) != want {
+					t.Errorf("%s = %q %v", rel, got, err)
+				}
+			}
+			for _, rel := range tc.notThere {
+				if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel))); !os.IsNotExist(err) {
+					t.Errorf("%s was written; this runtime has no destination for it", rel)
+				}
+			}
+			joined := strings.Join(res.Warnings, "\n")
+			for _, kind := range tc.dropped {
+				if !strings.Contains(joined, kind) {
+					t.Errorf("%q was dropped with no report:\n%s", kind, joined)
+				}
+			}
+			// Non-content is skipped SILENTLY: reporting a README would bury
+			// the signal the drop warnings carry.
+			for _, quiet := range []string{"README", "claude-plugin"} {
+				if strings.Contains(joined, quiet) {
+					t.Errorf("%q was reported; §24.1 skips non-content silently:\n%s", quiet, joined)
+				}
+			}
+			// And the ledger records the files, not the drops.
+			l, _ := LoadLedger(root)
+			rec, ok := l.Resource("plugin", "p")
+			if !ok {
+				t.Fatalf("the plugin was not recorded: %+v", l)
+			}
+			if len(rec.Files) != len(tc.want) {
+				t.Errorf("recorded %d files, want %d: %+v", len(rec.Files), len(tc.want), rec.Files)
+			}
+		})
+	}
+}
