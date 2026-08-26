@@ -262,6 +262,16 @@ smoke: ## Drive the four real agent binaries inside their own container.
 	@$(MAKE) --no-print-directory build GOOS=linux GOARCH=$(SMOKE_ARCH) BIN=.gocache/smoke/ap
 	AP_SMOKE_IMAGE=$(SMOKE_IMAGE) ./scripts/smoke.sh
 
+HYDRATE_IMAGE ?= agent-profile-hydrate:latest
+
+.PHONY: hydrate
+hydrate: hydrate-image ## Run the hydrator image headlessly: no TTY, no HOME, root as a parameter.
+	AP_HYDRATE_IMAGE=$(HYDRATE_IMAGE) ./scripts/hydrate-check.sh
+
+.PHONY: hydrate-image
+hydrate-image: ## Build the hydrator image ach-runtime ships as its init container.
+	docker build -t $(HYDRATE_IMAGE) -f Dockerfile.hydrate .
+
 .PHONY: smoke-image
 smoke-image: ## Rebuild the smoke image (the four agents, unpinned on purpose).
 	docker build --pull --no-cache -t $(SMOKE_IMAGE) -f Dockerfile.smoke .
@@ -335,6 +345,11 @@ _crossbuild:
 	# windows ap would take, and vet is what stops it rotting while unshipped.
 	GOOS=windows GOARCH=amd64 go vet ./internal/run/
 	GOOS=windows GOARCH=amd64 go vet ./pkg/...
+	# darwin is a SUPPORTED platform, not a portability claim, and verify runs
+	# in a linux container — so a macOS-only defect has shipped this way before.
+	# The whole unix tree is vetted for it, which is what catches a syscall
+	# constant that exists on one of them and not the other.
+	GOOS=darwin  GOARCH=arm64 go vet ./...
 
 .PHONY: secrets
 secrets: ## Scan the full git history for secrets.

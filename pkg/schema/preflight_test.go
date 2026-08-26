@@ -19,7 +19,7 @@ func stubBin(t *testing.T, dir, name string) {
 
 func TestPreflightFailsNamingAMissingRuntimeBinary(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // empty: nothing resolves
-	err := Preflight(Profile{}, "claude")
+	err := Preflight(Profile{}, "claude", true)
 	if err == nil || !strings.Contains(err.Error(), "claude") {
 		t.Errorf("err = %v, want it to name the missing runtime CLI", err)
 	}
@@ -33,7 +33,7 @@ func TestPreflightFailsNamingAnActiveStdioMCPWithAMissingCommand(t *testing.T) {
 	p := Profile{MCPs: map[string]MCP{
 		"memory": {Enabled: true, Transport: Transport{Type: "stdio", Command: "no-such-mcp-command"}},
 	}}
-	err := Preflight(p, "claude")
+	err := Preflight(p, "claude", true)
 	if err == nil || !strings.Contains(err.Error(), "memory") || !strings.Contains(err.Error(), "no-such-mcp-command") {
 		t.Errorf("err = %v, want it to name the mcp and its command", err)
 	}
@@ -47,7 +47,7 @@ func TestPreflightIgnoresADisabledMCPWithAMissingCommand(t *testing.T) {
 	p := Profile{MCPs: map[string]MCP{
 		"memory": {Enabled: false, Transport: Transport{Type: "stdio", Command: "no-such-mcp-command"}},
 	}}
-	if err := Preflight(p, "claude"); err != nil {
+	if err := Preflight(p, "claude", true); err != nil {
 		t.Errorf("err = %v, want nil: a disabled MCP's command must not be checked", err)
 	}
 }
@@ -61,7 +61,7 @@ func TestPreflightPassesWithAnActiveStdioMCPWhoseCommandResolves(t *testing.T) {
 	p := Profile{MCPs: map[string]MCP{
 		"memory": {Enabled: true, Transport: Transport{Type: "stdio", Command: "mcp-server"}},
 	}}
-	if err := Preflight(p, "claude"); err != nil {
+	if err := Preflight(p, "claude", true); err != nil {
 		t.Errorf("err = %v, want nil", err)
 	}
 }
@@ -74,7 +74,7 @@ func TestPreflightSkipsAnHTTPMCPsCommandCheck(t *testing.T) {
 	p := Profile{MCPs: map[string]MCP{
 		"memory": {Enabled: true, Transport: Transport{Type: "http", URL: "https://example.com"}},
 	}}
-	if err := Preflight(p, "claude"); err != nil {
+	if err := Preflight(p, "claude", true); err != nil {
 		t.Errorf("err = %v, want nil: an http transport has no command to resolve", err)
 	}
 }

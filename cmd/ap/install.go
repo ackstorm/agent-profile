@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/pkg/hydrate"
 	"github.com/ackstorm/agent-profile/pkg/schema"
 )
@@ -25,7 +24,7 @@ import (
 // The first argument is the subject, as everywhere except render: the reference
 // names the agent and the root, then the kind and the name say what.
 func cmdInstall(args []string) error {
-	const use = "install <agent>:<profile> <kind> <name> [--git <url> [--ref <r>] [--subpath <p>] | --local <path> | --url <url> --digest <sha256:...>] [--dest <d>] [--auth-secret-env <VAR> | --auth-secret-file <path>] [--yes]"
+	const use = "install <agent>:<profile>|<agent> --root <dir> <kind> <name> [--git <url> [--ref <r>] [--subpath <p>] | --local <path> | --url <url> --digest <sha256:...>] [--dest <d>] [--auth-secret-env <VAR> | --auth-secret-file <path>] [--yes]"
 	fs := flagSet("install")
 	git := fs.String("git", "", "git repository to install from")
 	gitRef := fs.String("ref", "", "branch, tag or commit for --git")
@@ -37,6 +36,7 @@ func cmdInstall(args []string) error {
 	secretEnv := fs.String("auth-secret-env", "", "environment variable holding the source credential")
 	secretFile := fs.String("auth-secret-file", "", "file holding the source credential")
 	strict := fs.Bool("strict", false, "promote every degradation warning (§7.2, §8) to an error")
+	rootFlag := fs.String("root", "", "install into this directory instead of a profile's (§33.2)")
 	yes := fs.Bool("yes", false, "install into the agent's real configuration without asking")
 	fs.BoolVar(yes, "y", false, "shorthand for --yes")
 
@@ -47,12 +47,9 @@ func cmdInstall(args []string) error {
 	if len(pos) != 3 {
 		return fmt.Errorf("usage: ap %s", use)
 	}
-	agent, name, variant, err := profile.ParseVariantRefAllowDefault(pos[0])
+	tgt, err := resolveTarget(pos[0], *rootFlag, "install")
 	if err != nil {
 		return err
-	}
-	if variant != "" {
-		return fmt.Errorf("install takes a profile, not a variant: drop %q from %q", variant, pos[0])
 	}
 	kind, resource := pos[1], pos[2]
 	if err := checkInstallKind(kind, resource); err != nil {
@@ -63,12 +60,11 @@ func cmdInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	root := profile.Dir(agent, name)
-	if err := gateRealConfig(agent, name, root, *yes); err != nil {
+	if err := tgt.gate(*yes); err != nil {
 		return err
 	}
 
-	prof, base, err := oneResourceProfile(root, agent.Name, kind, resource, locator{
+	prof, base, err := oneResourceProfile(tgt.Root, tgt.Agent.Name, kind, resource, locator{
 		git: *git, gitRef: *gitRef, subpath: *subpath,
 		local: *local, url: *archiveURL, digest: *digest, dest: *dest,
 	}, binding)
@@ -76,7 +72,7 @@ func cmdInstall(args []string) error {
 		return err
 	}
 
-	res, resolved, err := schema.ResolveProfile(prof, agent.Name)
+	res, resolved, err := schema.ResolveProfile(prof, tgt.Agent.Name, tgt.Name != "")
 	if err != nil {
 		return err
 	}
@@ -88,17 +84,17 @@ func cmdInstall(args []string) error {
 		return err
 	}
 
-	adapter, err := hydrate.AdapterFor(agent)
+	adapter, err := hydrate.AdapterFor(tgt.Agent)
 	if err != nil {
 		return err
 	}
 	applied, err := hydrate.Apply(context.Background(), hydrate.Plan{
-		Root: root, Adapter: adapter, Profile: res.Profile, Fetched: fetched,
+		Root: tgt.Root, Adapter: adapter, Profile: res.Profile, Fetched: fetched,
 	})
 	if err != nil {
 		return err
 	}
-	return printApplied(os.Stdout, res, agent.Name, name, root, applied, reports)
+	return printApplied(os.Stdout, res, tgt, applied, reports)
 }
 
 // checkInstallKind refuses, by name, the two things v1 deliberately does not do

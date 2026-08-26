@@ -29,7 +29,7 @@ model:
     value_from:
       secret: undeclared-secret
 `)
-	_, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false)
+	_, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false, true)
 	if err == nil {
 		t.Fatal("resolve on a broken profile = nil error, want error")
 	}
@@ -56,7 +56,7 @@ mcps:
 	binDir := t.TempDir()
 	stubBin(t, binDir, "claude")
 	t.Setenv("PATH", binDir)
-	_, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false)
+	_, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false, true)
 	if err == nil || !strings.Contains(err.Error(), "no-such-mcp-command") {
 		t.Errorf("err = %v, want the preflight error naming the missing command", err)
 	}
@@ -82,7 +82,7 @@ model:
     value_from:
       secret: llm-token
 `)
-	res, resolved, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false)
+	res, resolved, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false, true)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -114,7 +114,7 @@ runtimes:
     environment:
       A: b
 `)
-	res, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false)
+	res, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false, true)
 	if err != nil {
 		t.Fatalf("resolve without strict: %v", err)
 	}
@@ -122,7 +122,7 @@ runtimes:
 		t.Fatalf("warnings = %v, want one", res.Warnings)
 	}
 
-	_, _, err = Resolve(filepath.Join(dir, "p.yaml"), "claude", true)
+	_, _, err = Resolve(filepath.Join(dir, "p.yaml"), "claude", true, true)
 	if err == nil {
 		t.Fatal("resolve with strict on a profile with a warning = nil error, want error")
 	}
@@ -152,7 +152,7 @@ runtimes:
     environment:
       A: b
 `)
-	_, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", true)
+	_, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", true, true)
 	if err == nil {
 		t.Fatal("resolve with strict on a profile with two warnings = nil error, want error")
 	}
@@ -174,7 +174,7 @@ func TestResolveDoesNotMutateAnything(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false); err != nil {
+	if _, _, err := Resolve(filepath.Join(dir, "p.yaml"), "claude", false, true); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	after, err := filepath.Glob(filepath.Join(dir, "*"))

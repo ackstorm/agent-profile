@@ -35,13 +35,14 @@ import (
 // stdin so a caller (ach, ach-agent) can pipe a generated one with no temp
 // file of its own. Exactly one of the two.
 func manifestApply(args []string) error {
-	const use = "manifest apply <agent>:<profile> [--dry-run] [--strict] [--yes] [--manifest -] <manifest.yaml>"
+	const use = "manifest apply <agent>:<profile>|<agent> --root <dir> [--dry-run] [--strict] [--yes] [--manifest -] <manifest.yaml>"
 	fs := flagSet("manifest")
 	dryRun := fs.Bool("dry-run", false, "run the resolution phase and print it; touch nothing")
 	strict := fs.Bool("strict", false, "promote every degradation warning (§7.2, §8) to an error")
 	yes := fs.Bool("yes", false, "materialize into the agent's real configuration without asking")
 	fs.BoolVar(yes, "y", false, "shorthand for --yes")
 	manifestFlag := fs.String("manifest", "", `manifest path, or "-" to read it from stdin`)
+	rootFlag := fs.String("root", "", "materialize into this directory instead of a profile's (§33.2)")
 
 	stop, pos, err := parsePositionals(fs, args, use, 2)
 	if stop {
@@ -51,16 +52,11 @@ func manifestApply(args []string) error {
 		return fmt.Errorf("usage: ap %s", use)
 	}
 
-	// A two-segment reference only. A variant is a set of launch arguments
-	// over a profile; it is not a root, and applying "into" one would have no
-	// meaning. Default is allowed here and gated at materialization, not now:
-	// the resolution phase writes nothing to gate.
-	agent, name, variant, err := profile.ParseVariantRefAllowDefault(pos[0])
+	// Default is allowed here and gated at materialization, not now: the
+	// resolution phase writes nothing to gate.
+	tgt, err := resolveTarget(pos[0], *rootFlag, "apply")
 	if err != nil {
 		return err
-	}
-	if variant != "" {
-		return fmt.Errorf("apply takes a profile, not a variant: drop %q from %q", variant, pos[0])
 	}
 
 	var ref string
@@ -74,17 +70,12 @@ func manifestApply(args []string) error {
 		return fmt.Errorf("name the manifest once: a path or --manifest, not both")
 	}
 
-	// The reference resolves to a root; nothing is INFERRED from the
-	// environment (§33.2). Two roots, and they are one mechanism: point the
-	// agent's config-directory variable at a directory.
-	root := profile.Dir(agent, name)
-
 	// Ask BEFORE doing any work. The question is whether ap may touch this
 	// root at all, and it does not depend on the manifest resolving — asking
 	// after a long fetch would spend the user's time on a run they were about
 	// to decline.
 	if !*dryRun {
-		if err := gateRealConfig(agent, name, root, *yes); err != nil {
+		if err := tgt.gate(*yes); err != nil {
 			return err
 		}
 	}
@@ -99,35 +90,35 @@ func manifestApply(args []string) error {
 		path = p
 	}
 
-	res, resolved, fetched, reports, err := resolvePhase(path, agent.Name, *strict)
+	res, resolved, fetched, reports, err := resolvePhase(path, tgt.Agent.Name, *strict, tgt.Name != "")
 	if err != nil {
 		return err
 	}
 	if *dryRun {
-		return printResolution(os.Stdout, res, resolved, agent.Name, name, fetched, reports)
+		return printResolution(os.Stdout, res, resolved, tgt.Label(), fetched, reports)
 	}
 
-	adapter, err := hydrate.AdapterFor(agent)
+	adapter, err := hydrate.AdapterFor(tgt.Agent)
 	if err != nil {
 		return err
 	}
 	applied, err := hydrate.Apply(context.Background(), hydrate.Plan{
-		Root: root, Adapter: adapter, Profile: res.Profile, Fetched: fetched,
+		Root: tgt.Root, Adapter: adapter, Profile: res.Profile, Fetched: fetched,
 	})
 	if err != nil {
 		return err
 	}
-	return printApplied(os.Stdout, res, agent.Name, name, root, applied, reports)
+	return printApplied(os.Stdout, res, tgt, applied, reports)
 }
 
 // resolvePhase is §37.1 steps 1-14: compose, resolve inputs, preflight, fetch
 // every active source, and validate contracts. It mutates no root. Split out of
 // manifestApply so the command stays argument handling and the phase stays one
 // readable sequence — the boundary gocyclo was pointing at.
-func resolvePhase(path, runtime string, strict bool) (
+func resolvePhase(path, runtime string, strict, runtimeIsLocal bool) (
 	*schema.Resolution, *schema.Resolved, map[string]source.Resolved, []source.Report, error,
 ) {
-	res, resolved, err := schema.Resolve(path, runtime, strict)
+	res, resolved, err := schema.Resolve(path, runtime, strict, runtimeIsLocal)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -211,12 +202,12 @@ func gateRealConfig(agent agentreg.Agent, name, root string, yes bool) error {
 // printApplied is the house report style: two-space indent, a mark, a padded
 // label. Every overwrite appears, because §33 requires it and because the
 // user's evidence that apply did not quietly eat something is this list.
-func printApplied(w io.Writer, res *schema.Resolution, agent, name, root string,
+func printApplied(w io.Writer, res *schema.Resolution, tgt target,
 	applied hydrate.Result, reports []source.Report,
 ) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s:%s\n", agent, name)
-	fmt.Fprintf(&b, "  %-10s %s\n", "root", root)
+	fmt.Fprintln(&b, tgt.Label())
+	fmt.Fprintf(&b, "  %-10s %s\n", "root", tgt.Root)
 	for _, rep := range reports {
 		fmt.Fprintf(&b, "  ✓ %-10s %s\n", rep.Resource, rep.Text)
 	}
@@ -298,10 +289,10 @@ func manifestPath(v string) (path string, cleanup func(), err error) {
 // itself here could not leak one), what each locator resolved to, and every
 // degradation warning. Nothing below reads a resolved value.
 func printResolution(w io.Writer, res *schema.Resolution, resolved *schema.Resolved,
-	agent, root string, fetched map[string]source.Resolved, reports []source.Report,
+	label string, fetched map[string]source.Resolved, reports []source.Report,
 ) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s:%s\n", agent, root)
+	fmt.Fprintln(&b, label)
 	fmt.Fprintf(&b, "  %-10s %s\n", "profile", res.Profile.Name)
 
 	if len(res.Refs) == 0 {

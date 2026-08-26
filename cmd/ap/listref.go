@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/pkg/hydrate"
 )
 
@@ -20,34 +19,29 @@ import (
 // file plus the contributed keys for a merged one. A user asking "what is in
 // this profile" and a user asking "what happens if I remove this" are looking
 // at the same line.
-func listResources(ref string, fs *flag.FlagSet, raw bool) error {
-	agent, name, variant, err := profile.ParseVariantRefAllowDefault(ref)
-	if err != nil {
-		return err
-	}
-	if variant != "" {
-		return fmt.Errorf("list takes a profile, not a variant: drop %q from %q", variant, ref)
-	}
+func listResources(ref, rootFlag string, fs *flag.FlagSet, raw bool) error {
 	if stop, err := parse(fs, fs.Args()[1:]); stop {
 		return err
 	}
 	if extra := fs.Args(); len(extra) > 0 {
-		return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [<agent>[:<profile>]]", extra[0])
+		return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [--root <dir>] [<agent>[:<profile>]]", extra[0])
 	}
-
-	root := profile.Dir(agent, name)
-	ledger, err := hydrate.LoadLedger(root)
+	tgt, err := resolveTarget(ref, rootFlag, "list")
 	if err != nil {
 		return err
 	}
-	return printLedger(os.Stdout, agent.Name, name, root, ledger, raw)
+	ledger, err := hydrate.LoadLedger(tgt.Root)
+	if err != nil {
+		return err
+	}
+	return printLedger(os.Stdout, tgt, ledger, raw)
 }
 
-func printLedger(w io.Writer, agent, name, root string, l *hydrate.Ledger, raw bool) error {
+func printLedger(w io.Writer, tgt target, l *hydrate.Ledger, raw bool) error {
 	var b strings.Builder
 	if !raw {
-		fmt.Fprintf(&b, "%s:%s\n", agent, name)
-		fmt.Fprintf(&b, "  %-10s %s\n", "root", root)
+		fmt.Fprintln(&b, tgt.Label())
+		fmt.Fprintf(&b, "  %-10s %s\n", "root", tgt.Root)
 	}
 	if len(l.Resources) == 0 && !raw {
 		fmt.Fprintln(&b, "\n  nothing is installed; `ap manifest apply` or `ap install` puts something here.")
@@ -65,8 +59,8 @@ func printLedger(w io.Writer, agent, name, root string, l *hydrate.Ledger, raw b
 		fmt.Fprintf(&b, "  %-9s %-16s %s\n", r.Kind, r.Name, describeFiles(r.Files))
 	}
 	if !raw {
-		fmt.Fprintf(&b, "\n  %d resource(s); `ap uninstall %s:%s <kind> <name>` removes one.\n",
-			len(l.Resources), agent, name)
+		fmt.Fprintf(&b, "\n  %d resource(s); `ap uninstall %s <kind> <name>` removes one.\n",
+			len(l.Resources), tgt.Label())
 	}
 	_, err := io.WriteString(w, b.String())
 	return err

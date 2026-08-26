@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/pkg/hydrate"
 )
 
@@ -21,9 +20,10 @@ import (
 // user's, so there is no gate here: removal is bounded by a record, not by a
 // question.
 func cmdUninstall(args []string) error {
-	const use = "uninstall <agent>:<profile> <kind> <name> [--dry-run]"
+	const use = "uninstall <agent>:<profile>|<agent> --root <dir> <kind> <name> [--dry-run]"
 	fs := flagSet("uninstall")
 	dryRun := fs.Bool("dry-run", false, "print what would be removed; touch nothing")
+	rootFlag := fs.String("root", "", "remove from this directory instead of a profile's (§33.2)")
 
 	stop, pos, err := parsePositionals(fs, args, use, 3)
 	if stop {
@@ -32,32 +32,27 @@ func cmdUninstall(args []string) error {
 	if len(pos) != 3 {
 		return fmt.Errorf("usage: ap %s", use)
 	}
-	agent, name, variant, err := profile.ParseVariantRefAllowDefault(pos[0])
+	tgt, err := resolveTarget(pos[0], *rootFlag, "uninstall")
 	if err != nil {
 		return err
 	}
-	if variant != "" {
-		return fmt.Errorf("uninstall takes a profile, not a variant: drop %q from %q", variant, pos[0])
-	}
-
-	root := profile.Dir(agent, name)
-	rm, err := hydrate.Remove(root, pos[1], pos[2], *dryRun)
+	rm, err := hydrate.Remove(tgt.Root, pos[1], pos[2], *dryRun)
 	if err != nil {
 		return err
 	}
-	return printRemoval(os.Stdout, agent.Name, name, rm, *dryRun)
+	return printRemoval(os.Stdout, tgt, rm, *dryRun)
 }
 
 // printRemoval prints the verdicts — the same values in both modes, because
 // there is one classifier and the preview is literally what ran.
-func printRemoval(w io.Writer, agent, name string, rm hydrate.Removal, dryRun bool) error {
+func printRemoval(w io.Writer, tgt target, rm hydrate.Removal, dryRun bool) error {
 	var b strings.Builder
 	verb := "removed"
 	if dryRun {
 		verb = "would remove"
 	}
 	fmt.Fprintf(&b, "%s %s %q\n", verb, rm.Kind, rm.Name)
-	fmt.Fprintf(&b, "  %-10s %s:%s\n", "root", agent, name)
+	fmt.Fprintf(&b, "  %-10s %s\n", "root", tgt.Label())
 
 	for _, v := range rm.Verdicts {
 		switch v.Op {

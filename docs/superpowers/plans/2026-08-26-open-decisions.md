@@ -36,6 +36,46 @@ the width.
 
 ---
 
+## Spec amendment from Phase 8 (2026-08-26): a root may be named literally
+
+SPEC v0.6.3 §33.2 says a root is a **parameter** and MUST NOT be inferred from
+the environment, and lists two: the agent's real configuration directory, and a
+named profile's namespace. Both are addressed by a reference.
+
+Phase 8's exit criterion — the hydrator image materializing into an empty
+directory with **no `$HOME` set** — cannot be met that way. A named profile
+resolves through `XDG_DATA_HOME` or `$HOME`, and an init container arranging
+`XDG_DATA_HOME` so that `<it>/agent-profile/profiles/claude/hydrated` lands on
+the volume the main container reads is inferring a root from the environment
+through two layers of indirection — with no `$HOME` to infer from in the first
+place.
+
+**`--root <dir>` names the directory literally, and the subject is then a bare
+agent name.** This is not a third root in §33.2's sense: it is the same one
+mechanism — point the agent's configuration-directory variable at a directory —
+with the directory stated instead of derived. The section's own reasoning for
+excluding a project root (it is a *different* mechanism, and needs a containment
+rule and a per-agent file list) does not apply.
+
+Consequences, each settled with the flag:
+
+- **A reference and `--root` together is an error.** They answer the same
+  question, and a silent precedence rule is how the wrong directory gets
+  written.
+- **A literal root is not gated.** It is neither the user's real configuration
+  nor a profile ap manages, so there is nothing ap could claim to undo, and the
+  resolved absolute path the gate exists to display is the argument the user
+  just typed.
+- **Preflight's executable checks become conditional (§28).** Both of them —
+  the runtime CLI and every active stdio MCP command — belong to the runtime's
+  process, not to ap. An init container has neither, and must not: that
+  separation is the topology. `Preflight` takes `runtimeIsLocal`, true whenever
+  the root came from a reference, because a profile exists to be launched.
+
+For v0.6.4.
+
+---
+
 ## Spec amendments these answers require
 
 S7 and S8 are not gaps in SPEC v0.5 — they contradict it. Recording them so the

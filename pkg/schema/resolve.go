@@ -21,7 +21,7 @@ type Resolution struct {
 // must report the input error, because step 10 runs before step 11.
 //
 // strict promotes every Warning §7.2/§8 produced into an error.
-func Resolve(path, runtime string, strict bool) (*Resolution, *Resolved, error) {
+func Resolve(path, runtime string, strict, runtimeIsLocal bool) (*Resolution, *Resolved, error) {
 	p, warns, err := Effective(path, runtime)
 	if err != nil {
 		return nil, nil, err
@@ -34,7 +34,7 @@ func Resolve(path, runtime string, strict bool) (*Resolution, *Resolved, error) 
 		return nil, nil, errors.Join(errs...)
 	}
 
-	res, resolved, err := ResolveProfile(p, runtime)
+	res, resolved, err := ResolveProfile(p, runtime, runtimeIsLocal)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -49,7 +49,7 @@ func Resolve(path, runtime string, strict bool) (*Resolution, *Resolved, error) 
 // do. Sharing the rest is what keeps an imperative install running the same
 // required-inputs, resolve-inputs and preflight sequence — in the same order,
 // which §37 makes a contract — as an apply.
-func ResolveProfile(p Profile, runtime string) (*Resolution, *Resolved, error) {
+func ResolveProfile(p Profile, runtime string, runtimeIsLocal bool) (*Resolution, *Resolved, error) {
 	refs := Required(p)
 
 	resolved, err := ResolveInputs(p, refs)
@@ -57,7 +57,7 @@ func ResolveProfile(p Profile, runtime string) (*Resolution, *Resolved, error) {
 		return nil, nil, err
 	}
 
-	if err := Preflight(p, runtime); err != nil {
+	if err := Preflight(p, runtime, runtimeIsLocal); err != nil {
 		return nil, nil, err
 	}
 

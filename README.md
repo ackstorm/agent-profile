@@ -68,6 +68,7 @@ exactly that reason — see "`default`" below.
 | `ap manifest render [--target <runtime>] <manifest>` | what a manifest MEANS. With no target it composes every target it declares and prints nothing; the exit status is the contract check |
 | `ap manifest apply [--dry-run] [--strict] [--yes] <agent>:<profile> <manifest>` | materialise a whole manifest into that profile. Additive: a manifest that stops mentioning something does not remove it. `--manifest -` reads it from stdin |
 | `ap manifest export <agent>:<profile>` | the profile's ledger, back as a manifest, so an environment assembled by hand becomes portable |
+| `<agent> --root <dir>` | wherever a command takes `<agent>:<profile>`, this names the directory outright instead — for a container, where there is no `$HOME` to derive a profile namespace from. Naming both is an error |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
 | `ap env <agent>:<profile>[:<variant>]` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile>[:<variant>] <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory. `cmd` never receives a variant's arguments: those are the agent's flags |
@@ -463,6 +464,21 @@ ap install claude:execute skill pdf \
 
 Apply is **additive**: removing a line does not undo it, and `ap uninstall` is
 how things are removed. A variant of the same name is overwritten.
+
+### Hydrating somewhere that is not a profile
+
+`--root` names the directory instead of deriving one, so `ap` works where there
+is no `$HOME` at all:
+
+```bash
+docker run --rm -v "$PWD/config:/config" -v "$PWD:/manifest:ro" \
+  ghcr.io/ackstorm/agent-profile-hydrate \
+  manifest apply claude --root /config /manifest/agent-profile.yaml
+```
+
+That is the init-container shape: hydrate the volume, exit, and let the
+container that actually runs the agent read what was left behind. `make hydrate`
+builds and exercises the image.
 
 Two limits worth knowing before you write a manifest:
 

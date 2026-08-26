@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ackstorm/agent-profile/internal/profile"
+	"path/filepath"
+
 	"github.com/ackstorm/agent-profile/pkg/hydrate"
 	"github.com/ackstorm/agent-profile/pkg/schema"
 )
@@ -95,26 +96,29 @@ func manifestRender(args []string) error {
 // down. It prints to stdout and writes nothing, because nothing in this program
 // writes a manifest — the user decides where it lands.
 func manifestExport(args []string) error {
-	const use = "manifest export <agent>:<profile> [--name <name>]"
+	const use = "manifest export <agent>:<profile>|<agent> --root <dir> [--name <name>]"
 	fs := flagSet("manifest")
 	nameFlag := fs.String("name", "", "the manifest's name; defaults to the profile's")
+	rootFlag := fs.String("root", "", "export the ledger in this directory (§33.2)")
 	stop, ref, err := parseAroundRef(fs, args, use)
 	if stop {
 		return err
 	}
-	agent, name, variant, err := profile.ParseVariantRefAllowDefault(ref)
+	tgt, err := resolveTarget(ref, *rootFlag, "export")
 	if err != nil {
 		return err
-	}
-	if variant != "" {
-		return fmt.Errorf("export takes a profile, not a variant: drop %q from %q", variant, ref)
 	}
 
 	manifestName := *nameFlag
 	if manifestName == "" {
-		manifestName = name
+		manifestName = tgt.Name
 	}
-	p, err := hydrate.Export(profile.Dir(agent, name), manifestName, []string{agent.Name})
+	if manifestName == "" {
+		// A literal root has no profile name to borrow, and a manifest needs
+		// one. The directory's own base name is what the user typed.
+		manifestName = filepath.Base(tgt.Root)
+	}
+	p, err := hydrate.Export(tgt.Root, manifestName, []string{tgt.Agent.Name})
 	if err != nil {
 		return err
 	}

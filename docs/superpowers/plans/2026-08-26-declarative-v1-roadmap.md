@@ -499,8 +499,12 @@ disk; uninstalling an MCP server from codex's `config.toml` leaves every other k
 intact; a user-edited skill file is never removed; `ap manifest export` of a hand-built
 root re-applies to a byte-identical result; `make smoke` green.
 
-### Phase 8 — Distribution: one implementation, three ways in
-**Blocked on D6 confirmation**
+### Phase 8 — Distribution: one implementation, three ways in — **COMPLETE (2026-08-26)**
+**Not blocked after all:** D6 stays deferred, and the parity test is what makes
+it cheap to answer later. Write-up:
+`2026-08-26-phase-8-distribution.md`. `--root <dir>` names a materialization
+directory literally (spec amendment for v0.6.4), and running the image headlessly
+found that `stdinIsTerminal` had been reporting `/dev/null` as a terminal.
 
 - **Zero-logic CLI.** `cmd/ap` is argument parsing and exit codes; everything else
   is `pkg/`. A golden test asserts the CLI's result for a manifest is

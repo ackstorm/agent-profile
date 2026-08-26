@@ -1,0 +1,50 @@
+# The hydrator image: one binary, and the two things it needs to reach a source.
+#
+# This is the artifact ach-runtime runs as its init container. It hydrates a
+# manifest into a mounted directory and exits; the main container execs the
+# runtime against what it left behind.
+#
+# It runs HEADLESS, and that word means three specific things ap must not
+# assume: there is no terminal to ask a question on, there is no $HOME to derive
+# a profile namespace from, and the root is named on the command line — which is
+# what §33.2 requires of every root and what --root makes possible.
+#
+# Pinning: the builder floats on the same base as Dockerfile.devtools, so
+# patch-level Go fixes arrive without anyone editing a pin. The runtime pins
+# nothing either; it carries git and CA certificates, and freezing those would
+# freeze the trust store.
+FROM golang:1.26-bookworm AS builder
+
+# GOTOOLCHAIN=local turns a base that drifted BELOW go.mod into a build failure
+# rather than a silent toolchain download, the same as in the devtools image.
+ENV GOTOOLCHAIN=local CGO_ENABLED=0
+WORKDIR /src
+
+# Explicit copies, never `COPY . .`: it bloats the image, breaks layer caching
+# and ships .git. Dependencies first, so a source-only change reuses the layer.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY pkg/ ./pkg/
+RUN go build -trimpath -ldflags "-s -w" -o /out/ap ./cmd/ap
+
+FROM debian:bookworm-slim
+
+# git clones a git source; ca-certificates is what makes an HTTPS source and
+# §17.2's TLS-only rule possible at all. Nothing else belongs here.
+RUN apt-get update \
+ && apt-get install --no-install-recommends -y git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/ap /usr/local/bin/ap
+
+# A numeric, non-root user with NO home directory. An init container runs as
+# whatever the PodSpec says, usually not root and usually with no home, and this
+# is the condition ap has to work under rather than one it may assume away.
+USER 65532:65532
+ENV HOME=
+
+ENTRYPOINT ["/usr/local/bin/ap"]
+CMD ["--help"]

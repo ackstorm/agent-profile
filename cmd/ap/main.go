@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
@@ -84,9 +86,11 @@ here. Each row shows what the resource wrote, because that is what
 "ap uninstall" will act on.
 
 Flags:
-  --raw   one tab-separated line per row, for scripts: for an agent listing,
-          the reference in field 1 and one argument per field after it; for a
-          profile's resources, kind, name and the resolved ref
+  --raw          one tab-separated line per row, for scripts: for an agent
+                 listing, the reference in field 1 and one argument per field
+                 after it; for a profile's resources, kind, name, resolved ref
+  --root <dir>   list what the ledger in that directory holds, with the agent
+                 named on its own: "ap list claude --root /config"
 
 Examples:
   ap list
@@ -115,6 +119,7 @@ A locator is required, and exactly one:
                                             extracted
 
 Flags:
+  --root <dir>             install into that directory instead of a profile's
   --dest <d>               where an artifact's content lands; required for one
   --auth-secret-env <VAR>  environment variable holding the source credential
   --auth-secret-file <p>   file holding the source credential
@@ -151,6 +156,7 @@ configuration: the ledger can tell ap's writes from yours.
 classifier, so the preview cannot disagree with what happens.
 
 Flags:
+  --root <dir>   remove from that directory instead of a profile's
   --dry-run   print what would be removed; touch nothing
 
 Examples:
@@ -302,67 +308,48 @@ Examples:
 	"manifest": `ap manifest - apply, render or export a whole manifest
 
 Usage:
-  ap manifest render <manifest.yaml> [--target <runtime>] [--quiet]
-  ap manifest apply  <agent>:<profile> <manifest.yaml> [--dry-run] [--strict]
-  ap manifest apply  <agent>:<profile> --manifest - [--dry-run]
-  ap manifest export <agent>:<profile>
+  ap manifest render [--target <runtime>] [--quiet] <manifest.yaml>
+  ap manifest apply  <root> [--dry-run] [--strict] [--yes] <manifest.yaml>
+  ap manifest apply  <root> [--manifest -] < manifest.yaml
+  ap manifest export <root> [--name <name>]
 
-The group for operations whose input is a whole manifest. Installing one loose
-capability is "ap install", and the two are separate because the architecture
-has exactly two inputs to a root.
+render answers what a manifest MEANS, before any root is chosen. With no
+--target it composes EVERY target the manifest declares and prints nothing —
+the exit status is the answer, and that is the contract check a producer runs
+against a manifest it generated. There is no separate "validate".
 
-render answers what a manifest MEANS, before any root is chosen, so it is the
-only one taking a path rather than a reference. With --target it prints the
-effective profile for that runtime: two-space indent, collection keys sorted,
-secrets shown by their binding name only — never a resolved value, which this
-composes without ever reading. WITHOUT --target it composes every target the
-manifest declares, prints nothing, and its exit status is the answer. That is
-the contract check another repository runs against a manifest it generated: a
-manifest that composes for claude and not codex is broken, and one call says
-so.
+apply materialises it. It is ADDITIVE: a manifest that stops mentioning a
+resource does not remove it, and "ap uninstall" is how things are removed. A
+file you added by hand survives, and so does a key you added by hand to a file
+this profile only merged into.
 
-apply takes a reference, not --target — the reference already names the agent
-and the root. It runs the resolution phase (§37 steps 1-13): composes the
-effective profile, computes which inputs it actually needs, resolves them, runs
-derived preflight, and fetches every active source into the cache.
+export turns the profile's ledger back into a manifest, so an environment
+assembled one "ap install" at a time becomes portable. It emits binding names,
+never secret values, and writes the auth scheme it actually resolved.
 
---dry-run prints the result and exits 0. Without it, apply materializes into
-the root and writes the ledger.
-
-Apply is ADDITIVE. A manifest that stops declaring a resource does not remove
-it, and a file you added by hand survives an apply that overwrites its
-siblings. Every overwrite is printed, marked "~", because a silent overwrite is
-the one thing an additive policy cannot afford.
-
-<agent>:default is the configuration that agent already uses. ap cannot undo a
-write there by deleting a profile, so it shows the resolved absolute path and
-asks; --yes answers in advance, and off a terminal it refuses, because a pipe
-is not consent. A named profile is not gated: ap delete removes it whole.
-
-A DRY RUN IS NOT OFFLINE. It resolves secrets, authenticates to private sources
-and downloads content, because that is the only way to check a contract before
-an overwriting apply touches anything. What it does not do is write to a root.
-The cache is not a root: acquiring a source during resolution is not mutation,
-and a cached entry costs a re-fetch to discard.
-
-export is Phase 7.
+<root> is one of:
+  <agent>:<profile>   a profile, or <agent>:default for the real configuration
+  <agent> --root <d>  that directory, named outright — for a container, where
+                      there is no $HOME to derive a profile namespace from
 
 Flags:
-  --target      render only: the runtime to compose for; omit to check all
-  --quiet       render only: compose and print nothing
-  --dry-run     apply only: run the resolution phase and print it; write nothing
-  --strict      apply only: promote every degradation warning to an error
-  --yes, -y     apply only: answer the <agent>:default question in advance
-  --manifest -  apply only: read the manifest from stdin instead of a path
-                argument, so a caller can pipe a generated manifest with no temp
-                file of its own; give a path or --manifest, never both
+  --target <runtime>  render for one runtime and print it
+  --quiet             render: compose and print nothing
+  --dry-run           apply: resolve, authenticate and fetch, then stop. It
+                      does NOT do nothing: that is the only way to check a
+                      source contract
+  --strict            promote every degradation warning to an error
+  --yes               apply into <agent>:default without asking
+  --manifest -        read the manifest from stdin, for a caller that
+                      generated one and has no temp file
+  --root <dir>        materialise into that directory (see <root> above)
+  --name <name>       export: the manifest's name; defaults to the profile's
 
 Examples:
-  ap manifest render ./profile.yaml
-  ap manifest render ./profile.yaml --target claude
-  ap manifest apply claude:plan ./profile.yaml --dry-run
-  ap manifest apply claude:plan ./profile.yaml
-  ach export | ap manifest apply claude:default --manifest - --dry-run
+  ap manifest render ./agent-profile.yaml
+  ap manifest apply claude:plan ./agent-profile.yaml --dry-run
+  ap manifest apply claude --root /config ./agent-profile.yaml
+  ap manifest export claude:plan > team-plan.yaml
 `,
 
 	"env": `ap env - print the environment override, or run a command under it
@@ -1014,6 +1001,7 @@ func cmdVersion(args []string) error {
 func cmdList(args []string) error {
 	fs := flagSet("list")
 	raw := fs.Bool("raw", false, "one tab-separated line per reference, no tree and no padding")
+	rootFlag := fs.String("root", "", "list what the ledger in this directory holds (§33.2)")
 	stop, err := parse(fs, args)
 	if stop {
 		return err
@@ -1031,8 +1019,8 @@ func cmdList(args []string) error {
 		//
 		// It reads the LEDGER, never a manifest: a manifest is an input and
 		// says nothing about what is installed (§1.1).
-		if strings.Contains(rest[0], ":") {
-			return listResources(rest[0], fs, *raw)
+		if strings.Contains(rest[0], ":") || *rootFlag != "" {
+			return listResources(rest[0], *rootFlag, fs, *raw)
 		}
 		if _, ok := agentreg.Lookup(rest[0]); !ok {
 			return fmt.Errorf("unknown agent %q: supported are %s", rest[0], strings.Join(agentreg.Names(), ", "))
@@ -1694,9 +1682,26 @@ func askToPromote(a agentreg.Agent, name string, c profile.Conflict) profile.Res
 
 // stdinIsTerminal reports whether there is anyone there to answer a prompt.
 // os.Stdin.Stat rather than x/term because this project is standard library only.
+// stdinIsTerminal asks the kernel, because the file mode cannot answer.
+//
+// It used to test os.ModeCharDevice, and /dev/null is a character device — so
+// is /dev/zero, and so is /dev/urandom. Anything started by systemd, cron or a
+// container runtime gets /dev/null on stdin by default and was reported as a
+// terminal. `docker run` with no -t found it: the real-configuration gate
+// PRINTED its question and read the answer off a pipe, where the rule is that
+// it must refuse without asking.
+//
+// The outcome there was safe by luck — EOF is not "y" — but the rule this
+// program states is "a pipe is not consent", and a check that accepts any
+// character device accepts one that can deliver a "y".
+//
+// A TCGETS ioctl is what a terminal actually is, and it is what x/term does.
+// Standard library only, so it is spelled out here rather than depended on.
 func stdinIsTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	var t syscall.Termios
+	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, os.Stdin.Fd(),
+		ioctlReadTermios, uintptr(unsafe.Pointer(&t)), 0, 0, 0)
+	return errno == 0
 }
 
 // readLine reads one line from r, one byte at a time.

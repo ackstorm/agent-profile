@@ -297,6 +297,58 @@ the catalogue name against. It is refused BY NAME — without that refusal the r
 is treated as a literal resource name and the user gets a contract error naming
 a cache directory.
 
+## A root may be named literally, and then nothing is inferred
+
+`--root <dir>` names the materialization directory outright, and the subject is
+then a bare agent name. It is the artifact `ach-runtime` runs as an init
+container: hydrate onto a volume, exit, and let the main container exec the
+runtime against what was left behind.
+
+It is **not** a third root. SPEC §33.2's two roots and this are one mechanism —
+point the agent's configuration-directory variable at a directory — with the
+directory stated instead of derived. The project root stays deferred because it
+is a *different* mechanism.
+
+- **A reference and `--root` together is an error.** They answer the same
+  question, and a silent precedence rule is how the wrong directory gets
+  written. `TestARootIsNamedOnce` is the guard.
+- **Neither is not a default.** A bare agent name with no `--root` is refused
+  with the way forward, never resolved to somewhere nobody named.
+- **A literal root is not gated.** It is neither the user's real configuration
+  nor a profile ap manages, so there is nothing ap could claim to undo — and
+  the resolved absolute path the gate exists to display is the argument the
+  user just typed.
+- **Preflight's executable checks are conditional on `runtimeIsLocal`.** Both
+  of them — the runtime CLI and every active stdio MCP command — belong to the
+  runtime's process, not to ap. An init container has neither and must not:
+  that separation is the topology. The runtime is local whenever the root came
+  from a reference, because a profile exists to be launched.
+
+`make hydrate` builds `Dockerfile.hydrate` and runs it headlessly — no TTY, no
+`$HOME`, non-root — against a git repository mounted in. Keep that image to one
+binary plus git and CA certificates; it pins nothing, because freezing the trust
+store is not a reproducibility win.
+
+## `stdinIsTerminal` asks the kernel, and it must keep doing so
+
+It used to test `os.ModeCharDevice`. `/dev/null` is a character device — so are
+`/dev/zero` and `/dev/urandom` — and systemd, cron and every container runtime
+hand a process `/dev/null` on stdin by default. Every one of them was reported
+as a terminal, and the real-configuration gate **printed its question and read
+the answer off a pipe**, where the rule is that it refuses without asking.
+`docker run` with no `-t` is what found it, after the check had been wrong since
+the gate was written.
+
+It is a `TCGETS` ioctl now (`TIOCGETA` on the BSDs and macOS), which is what a
+terminal actually is and what `x/term` does — spelled out here because the
+standard library is the only dependency. Do not "simplify" it back to a mode
+test: a check that accepts any character device accepts one that can deliver a
+`y`.
+
+`GOOS=darwin go vet ./...` is in `crossbuild` for exactly this: the constant
+exists under one name on linux and another on darwin, `verify` runs in a linux
+container, and a macOS-only defect has shipped that way before.
+
 ## Render's output must parse
 
 Two defects lived in `pkg/schema/render.go` because its tests compared emitted
