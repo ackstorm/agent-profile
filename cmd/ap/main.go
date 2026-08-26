@@ -291,8 +291,18 @@ and the root. It runs the resolution phase (§37 steps 1-13): composes the
 effective profile, computes which inputs it actually needs, resolves them, runs
 derived preflight, and fetches every active source into the cache.
 
---dry-run prints the result and exits 0. Without it, apply says materialization
-is Phase 4 and exits 1 — there is no fake apply to stub.
+--dry-run prints the result and exits 0. Without it, apply materializes into
+the root and writes the ledger.
+
+Apply is ADDITIVE. A manifest that stops declaring a resource does not remove
+it, and a file you added by hand survives an apply that overwrites its
+siblings. Every overwrite is printed, marked "~", because a silent overwrite is
+the one thing an additive policy cannot afford.
+
+<agent>:default is the configuration that agent already uses. ap cannot undo a
+write there by deleting a profile, so it shows the resolved absolute path and
+asks; --yes answers in advance, and off a terminal it refuses, because a pipe
+is not consent. A named profile is not gated: ap delete removes it whole.
 
 A DRY RUN IS NOT OFFLINE. It resolves secrets, authenticates to private sources
 and downloads content, because that is the only way to check a contract before
@@ -307,6 +317,7 @@ Flags:
   --quiet       render only: compose and print nothing
   --dry-run     apply only: run the resolution phase and print it; write nothing
   --strict      apply only: promote every degradation warning to an error
+  --yes, -y     apply only: answer the <agent>:default question in advance
   --manifest -  apply only: read the manifest from stdin instead of a path
                 argument, so a caller can pipe a generated manifest with no temp
                 file of its own; give a path or --manifest, never both
@@ -315,6 +326,7 @@ Examples:
   ap manifest render ./profile.yaml
   ap manifest render ./profile.yaml --target claude
   ap manifest apply claude:plan ./profile.yaml --dry-run
+  ap manifest apply claude:plan ./profile.yaml
   ach export | ap manifest apply claude:default --manifest - --dry-run
 `,
 

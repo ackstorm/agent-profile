@@ -271,25 +271,6 @@ model:
 	}
 }
 
-// Without --dry-run, apply must refuse rather than stub a fake success: F6.
-func TestDispatchManifestApplyWithoutDryRunRefuses(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	binDir := t.TempDir()
-	stubExecutable(t, binDir)
-	t.Setenv("PATH", binDir)
-
-	err := dispatch([]string{"manifest", "apply", "claude:plan", filepath.Join(dir, "p.yaml")})
-	if err == nil {
-		t.Fatal("apply without --dry-run succeeded, want it to refuse")
-	}
-	if !strings.Contains(err.Error(), "Phase 4") {
-		t.Errorf("error %q does not say materialization is Phase 4", err)
-	}
-}
-
 // TestDispatchManifestApplyDashReadsStdin is design point 5: --manifest -
 // reads the manifest from a temp file this command owns and cleans up, so a
 // caller can pipe a generated manifest with no temp file of its own.
@@ -2630,9 +2611,67 @@ func TestManifestApplyDryRunResolvesRealSourcesAndWritesNothing(t *testing.T) {
 	}
 }
 
-// A stub that silently does nothing is worse than an unimplemented command.
-func TestManifestApplyWithoutDryRunRefusesUntilPhase4(t *testing.T) {
-	repo := seedRepo(t, map[string]string{"a/SKILL.md": "#"})
+// Phase 4's payoff: apply writes into a root and records what it wrote.
+func TestManifestApplyMaterializesIntoAProfile(t *testing.T) {
+	repo := seedRepo(t, map[string]string{
+		"skills/pdf/SKILL.md":  "# pdf",
+		"skills/pdf/notes.txt": "n",
+	})
+	data, cache := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", "claude:plan", path})
+	})
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+
+	root := filepath.Join(data, "agent-profile", "profiles", "claude", "plan")
+	if b, err := os.ReadFile(filepath.Join(root, "skills", "pdf", "SKILL.md")); err != nil || string(b) != "# pdf" {
+		t.Errorf("SKILL.md = %q %v\n%s", b, err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".ap-ledger.json")); err != nil {
+		t.Errorf("no ledger: %v", err)
+	}
+
+	// A second apply reports every file as an overwrite, and the ledger does
+	// not grow a duplicate.
+	out2, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", "claude:plan", path})
+	})
+	if err != nil {
+		t.Fatalf("second apply: %v\n%s", err, out2)
+	}
+	if strings.Contains(out2, "+ skills/pdf/SKILL.md") {
+		t.Errorf("a second apply reported a create:\n%s", out2)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".ap-ledger.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(raw), `"name": "pdf"`); n != 1 {
+		t.Errorf("the ledger holds %d records for pdf, want 1:\n%s", n, raw)
+	}
+}
+
+// A SKILL.md violation must fail in the RESOLUTION phase, so --dry-run reports
+// it and an overwriting apply never starts. Asserting it through --dry-run is
+// what proves the check is not in the materialization half.
+func TestAContractViolationFailsTheDryRun(t *testing.T) {
+	repo := seedRepo(t, map[string]string{"skills/pdf/README.md": "no skill file here"})
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	binDir := t.TempDir()
@@ -2641,19 +2680,64 @@ func TestManifestApplyWithoutDryRunRefusesUntilPhase4(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "p.yaml")
-	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  a:\n    source:\n      git:\n        url: " + repo + "\n"
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := dispatch([]string{"manifest", "apply", "claude:plan", path})
+	_, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", "claude:plan", path, "--dry-run"})
+	})
 	if err == nil {
-		t.Fatal("apply without --dry-run succeeded")
+		t.Fatal("a skill with no SKILL.md passed --dry-run")
 	}
-	if !strings.Contains(err.Error(), "Phase 4") {
-		t.Errorf("error %q does not say materialization is Phase 4", err)
+	if !strings.Contains(err.Error(), "SKILL.md") || !strings.Contains(err.Error(), "pdf") {
+		t.Errorf("error %q does not name the contract and the skill", err)
 	}
-	// And it must refuse BEFORE fetching: there is nothing to fetch for.
-	if ents, _ := os.ReadDir(filepath.Join(os.Getenv("XDG_CACHE_HOME"), "agent-profile", "sources", "objects")); len(ents) != 0 {
-		t.Errorf("a refused apply fetched %d entries anyway", len(ents))
+}
+
+// claude:default is the configuration the developer's own agent reads, and ap
+// cannot undo a write there by deleting a profile. Off a terminal it refuses:
+// a pipe is not consent.
+func TestApplyIntoTheRealConfigRefusesOffATerminal(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(path, []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A pipe is not a terminal, and it is not consent. go test's own stdin is
+	// a character device, so without this the gate would find a "terminal",
+	// ask, read nothing, and cancel — which passes for the wrong reason.
+	oldStdin := os.Stdin
+	r, w, perr := os.Pipe()
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+
+	err := dispatch([]string{"manifest", "apply", "claude:default", path})
+	if err == nil {
+		t.Fatal("apply into the real config succeeded with no terminal and no --yes")
+	}
+	// The message must name the resolved absolute path: that display is the
+	// only thing distinguishing the two blast radii on one screen.
+	for _, want := range []string{"real configuration", "--yes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	// --dry-run needs no gate: it writes nothing to the root.
+	if _, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", "claude:default", path, "--dry-run"})
+	}); err != nil {
+		t.Errorf("--dry-run against default was gated: %v", err)
 	}
 }

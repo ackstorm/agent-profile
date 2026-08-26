@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
+	"github.com/ackstorm/agent-profile/pkg/hydrate"
 	"github.com/ackstorm/agent-profile/pkg/schema"
 	"github.com/ackstorm/agent-profile/pkg/source"
 )
@@ -32,10 +35,12 @@ import (
 // stdin so a caller (ach, ach-agent) can pipe a generated one with no temp
 // file of its own. Exactly one of the two.
 func manifestApply(args []string) error {
-	const use = "manifest apply <agent>:<profile> [--dry-run] [--strict] [--manifest -] <manifest.yaml>"
+	const use = "manifest apply <agent>:<profile> [--dry-run] [--strict] [--yes] [--manifest -] <manifest.yaml>"
 	fs := flagSet("manifest")
 	dryRun := fs.Bool("dry-run", false, "run the resolution phase and print it; touch nothing")
 	strict := fs.Bool("strict", false, "promote every degradation warning (§7.2, §8) to an error")
+	yes := fs.Bool("yes", false, "materialize into the agent's real configuration without asking")
+	fs.BoolVar(yes, "y", false, "shorthand for --yes")
 	manifestFlag := fs.String("manifest", "", `manifest path, or "-" to read it from stdin`)
 
 	stop, pos, err := parsePositionals(fs, args, use, 2)
@@ -69,6 +74,21 @@ func manifestApply(args []string) error {
 		return fmt.Errorf("name the manifest once: a path or --manifest, not both")
 	}
 
+	// The reference resolves to a root; nothing is INFERRED from the
+	// environment (§33.2). Two roots, and they are one mechanism: point the
+	// agent's config-directory variable at a directory.
+	root := profile.Dir(agent, name)
+
+	// Ask BEFORE doing any work. The question is whether ap may touch this
+	// root at all, and it does not depend on the manifest resolving — asking
+	// after a long fetch would spend the user's time on a run they were about
+	// to decline.
+	if !*dryRun {
+		if err := gateRealConfig(agent, name, root, *yes); err != nil {
+			return err
+		}
+	}
+
 	path := ref
 	if *manifestFlag != "" {
 		p, cleanup, err := manifestPath(*manifestFlag)
@@ -79,27 +99,51 @@ func manifestApply(args []string) error {
 		path = p
 	}
 
-	res, resolved, err := schema.Resolve(path, agent.Name, *strict)
+	res, resolved, fetched, reports, err := resolvePhase(path, agent.Name, *strict)
 	if err != nil {
 		return err
 	}
+	if *dryRun {
+		return printResolution(os.Stdout, res, resolved, agent.Name, name, fetched, reports)
+	}
 
-	if !*dryRun {
-		return fmt.Errorf("materialization is Phase 4 and does not exist yet; rerun with --dry-run")
+	adapter, err := hydrate.AdapterFor(agent)
+	if err != nil {
+		return err
+	}
+	applied, err := hydrate.Apply(context.Background(), hydrate.Plan{
+		Root: root, Adapter: adapter, Profile: res.Profile, Fetched: fetched,
+	})
+	if err != nil {
+		return err
+	}
+	return printApplied(os.Stdout, res, agent.Name, name, root, applied, reports)
+}
+
+// resolvePhase is §37.1 steps 1-14: compose, resolve inputs, preflight, fetch
+// every active source, and validate contracts. It mutates no root. Split out of
+// manifestApply so the command stays argument handling and the phase stays one
+// readable sequence — the boundary gocyclo was pointing at.
+func resolvePhase(path, runtime string, strict bool) (
+	*schema.Resolution, *schema.Resolved, map[string]source.Resolved, []source.Report, error,
+) {
+	res, resolved, err := schema.Resolve(path, runtime, strict)
+	if err != nil {
+		return nil, nil, nil, nil, err
 	}
 
 	// The cache root is a parameter, like every root in pkg/. It is the one
-	// thing a dry run may create: a cache is not a materialization root, and
-	// §37.1 says source acquisition during resolution is not mutation.
+	// thing an apply may create outside the target root: a cache is not a
+	// materialization root, and §37.1 says source acquisition during
+	// resolution is not mutation.
 	cacheRoot, err := profile.CacheDir()
 	if err != nil {
-		return err
+		return nil, nil, nil, nil, err
 	}
 	cache, err := source.NewCache(cacheRoot)
 	if err != nil {
-		return err
+		return nil, nil, nil, nil, err
 	}
-
 	fetched, reports, err := source.Resolve(context.Background(), res.Profile, source.Opts{
 		Cache:       cache,
 		ManifestDir: filepath.Dir(path),
@@ -112,10 +156,78 @@ func manifestApply(args []string) error {
 		},
 	})
 	if err != nil {
-		return err
+		return nil, nil, nil, nil, err
 	}
 
-	return printResolution(os.Stdout, res, resolved, agent.Name, name, fetched, reports)
+	// §37.1 step 14: contracts are validated in the RESOLUTION phase, before
+	// anything is written. Apply overwrites, so a violation found halfway
+	// through leaves a root partly written — and running the check here is
+	// what makes --dry-run report it.
+	if err := hydrate.CheckContracts(res.Profile, fetched); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	return res, resolved, fetched, reports, nil
+}
+
+// gateRealConfig is the one question, and only for the one root that has no
+// undo.
+//
+// `<agent>:default` is the configuration the developer's own agent reads. ap
+// cannot undo a write there by deleting a profile, so the resolved ABSOLUTE
+// path is displayed and named for what it is — that display is the only thing
+// distinguishing the two blast radii on one screen. A named profile needs no
+// gate: `ap delete` removes it whole.
+//
+// Off a terminal it refuses. A pipe is not consent, checked with
+// stdinIsTerminal and never with the answer to a question nobody was asked.
+func gateRealConfig(agent agentreg.Agent, name, root string, yes bool) error {
+	if name != agentreg.Default {
+		return nil
+	}
+	if yes {
+		return nil
+	}
+	if !stdinIsTerminal() {
+		return fmt.Errorf("%s:%s is the real configuration %s already uses (%s), and there is no terminal to confirm on; pass --yes",
+			agent.Name, agentreg.Default, agent.Name, root)
+	}
+	fmt.Fprintf(os.Stderr, "\n%s:%s is the real configuration %s already uses:\n  %s\n",
+		agent.Name, agentreg.Default, agent.Name, root)
+	fmt.Fprintln(os.Stderr, "This is not a profile. ap cannot undo it.")
+	if !askYes("materialize into it?") {
+		return errors.New("cancelled — nothing was written")
+	}
+	return nil
+}
+
+// printApplied is the house report style: two-space indent, a mark, a padded
+// label. Every overwrite appears, because §33 requires it and because the
+// user's evidence that apply did not quietly eat something is this list.
+func printApplied(w io.Writer, res *schema.Resolution, agent, name, root string,
+	applied hydrate.Result, reports []source.Report,
+) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s:%s\n", agent, name)
+	fmt.Fprintf(&b, "  %-10s %s\n", "root", root)
+	for _, rep := range reports {
+		fmt.Fprintf(&b, "  ✓ %-10s %s\n", rep.Resource, rep.Text)
+	}
+	for _, c := range applied.Changes {
+		mark := "+"
+		if c.Op == "overwrite" {
+			mark = "~"
+		}
+		fmt.Fprintf(&b, "  %s %s\n", mark, c.Path)
+	}
+	for _, warn := range res.Warnings {
+		fmt.Fprintln(&b, "  ! warning:", warn.Text)
+	}
+	for _, warn := range applied.Warnings {
+		fmt.Fprintln(&b, "  ! warning:", warn)
+	}
+	fmt.Fprintf(&b, "\n  %d file(s) written; the ledger records what landed.\n", len(applied.Changes))
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 // parsePositionals is parseAroundRef generalised to at most max positional
