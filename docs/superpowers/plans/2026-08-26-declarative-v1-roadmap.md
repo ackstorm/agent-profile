@@ -1,0 +1,349 @@
+# Declarative Agent Profiles (SPEC v0.5) — Phased Roadmap
+
+> **For agentic workers:** this is a ROADMAP, not an executable plan. Each phase
+> gets its own bite-sized plan file before it is executed. Phase 1's plan is
+> `2026-08-26-phase-1-manifest-and-composition.md`. Do not execute this file.
+
+**Goal:** Make this repository the universal hydrator — one implementation of
+SPEC v0.5 that `ap`, `ackstorm/ach` and `ackstorm/ach-agent` all drive, replacing
+`ap sync`'s imperative `install:` commands and `ach`'s own hydration path.
+
+**Architecture:** two layers, split by who consumes them. `internal/` is the
+*launcher* — profile namespaces, symlinked shares, the XDG shim, `syscall.Exec`,
+sessions — unix-only and `ap`-only, present today and untouched. `pkg/` is the
+*hydrator* — manifest → composition → effective profile → resolution →
+materialization — exported, portable, and the thing `ach` imports and `ach-agent`
+drives through the binary. `ap sync` is the hydrator's v0 and is deleted in
+Phase 7.
+
+**Tech Stack:** Go 1.25 (floor). `pkg/` is portable and must build for windows;
+`internal/` and `cmd/ap` stay unix-only. Standard library plus exactly one new
+dependency (`github.com/BurntSushi/toml`, Phase 5 — justified below). Selected
+packages are **copied** from `github.com/ackstorm/ach` (Apache-2.0, same
+organisation) because Go's `internal/` rule forbids importing them across modules
+— which is precisely the mistake `pkg/` exists here to avoid repeating.
+
+---
+
+## 0. What this repository becomes
+
+`agent-profile` is the **universal hydrator**: the one implementation that turns a
+declared agent environment into native configuration for claude, codex, opencode
+and pi. It has three consumers, and they do not consume it the same way.
+
+| Consumer | Language | How it consumes | What it needs |
+|---|---|---|---|
+| `ap` (this repo) | Go | the CLI | everything, including the launcher |
+| `ackstorm/ach` | Go | **imports the library** | schema + hydrate, no launcher |
+| `ackstorm/ach-agent` | **Python** | runs the binary, feeds it a manifest | a stable manifest format + `ap apply --manifest -` |
+| `ackstorm/ach-runtime` | Go (operator) | ships it as the `ach-hydrator` init container | a headless container image, root as a parameter — pending D6 |
+
+`ach` stops hydrating. It exports what an Environment resolves to, in this
+repository's manifest format, and this repository materializes it. `ach-agent`
+does the same from Python, over a file or a pipe. `ach-runtime` stops shipping a
+separate hydrator image and ships this one. `ccplugin` is retired whole.
+
+Not replaced, recorded so it is not revisited: `omnigent` and `hermes-agent` are
+third-party clones (`omnigent-ai/omnigent`, `NousResearch/hermes-agent`), and
+`ach-agent`'s harness — channels, limits, memory, cost — is not hydration and
+stays in Python.
+
+Three consequences follow, and each is a change to the plan as first written.
+
+### The reusable half must be EXPORTED, not `internal/`
+
+This is the one mistake `ach` made and this repository must not repeat: every
+package worth reusing there lives under `internal/`, so Go forbids importing it
+across modules and the only way in is to copy. If `ach` is to import this
+repository, the library cannot be `internal/`.
+
+```
+pkg/schema/     parse, compose, validate → EffectiveProfile   ← the CONTRACT
+pkg/hydrate/    resolve sources, lock, materialize, adapters  ← the ENGINE
+pkg/agentreg/   the agent registry: config dirs, env vars, modes
+internal/profile/  namespaces, symlinked shares, the XDG shim ← ap only
+internal/run/      Env + syscall.Exec                          ← ap only
+cmd/ap/
+```
+
+The `internal/` half is the *launcher*: it exists because `ap` runs an agent with
+a per-profile home. `ach` hydrates into a workspace and never launches anything,
+so it imports `pkg/` and nothing else. That boundary is the same Layer 1 / Layer
+2 split this roadmap already had — the reframe only moves where the line is
+written down.
+
+`internal/agent` moves to `pkg/agentreg` because `ach` needs exactly that table:
+it maintains its own copy today in `internal/cli/adapter/globalpath.go`, and two
+copies of "what does `GEMINI_CLI_HOME` mean" is how they drift.
+
+### "Unix only" narrows to "the LAUNCHER is unix only"
+
+`ach-cli` ships for windows — verified in `ach/.goreleaser.yml`: `goos: [linux,
+darwin, windows]` × `[amd64, arm64]`, with `internal/cli/lock/lock_windows.go`
+using `LockFileEx` for exactly that build. If `ach` imports `pkg/`, then `pkg/`
+cannot carry `//go:build unix`.
+
+This does not reopen the Windows non-goal in `CLAUDE.md`, which is about the
+launcher: "a second execution model and a second sharing mechanism". Both live in
+`internal/`. `pkg/` has neither — it parses, merges and writes files.
+
+- `pkg/**` carries **no build tag** and must compile for `windows/amd64`.
+- `internal/**` and `cmd/ap/**` keep `//go:build unix`, unchanged.
+- CI gains a `GOOS=windows go build ./pkg/...` gate. Build only; `ap` is still
+  not shipped for windows and nothing there is tested on it.
+- The one platform-specific thing `pkg/` needs is the §37 file lock, and `ach`
+  already has both halves — copy `lock_unix.go` *and* `lock_windows.go`.
+
+### The schema is a product, not an implementation detail
+
+Three repositories will agree on one manifest format, one of them from Python.
+That makes the format a versioned contract and adds deliverables the CLI-only
+plan did not have:
+
+- `ap validate <manifest>` — the contract check any producer runs.
+- `ap schema` — emit the manifest's JSON Schema, so `ach-agent` can validate in
+  Python without reimplementing the rules.
+- `ap apply --manifest -` — read a manifest from stdin, so `ach` can pipe a
+  generated one with no temp file.
+- `version: "1"` becomes a compatibility promise across three repositories.
+  Breaking it is a coordinated release, not a commit.
+
+---
+
+## 0.1 SPEC v0.5 unfreezes — decisions and open items
+
+The spec's status line says "further changes require implementation evidence".
+Making `ach`, `ach-agent` and `ach-runtime` consumers supplies it.
+
+**Settled** (2026-08-26): `archive` returns as a source family with mandatory
+checksum verification, because it is how ACH serves every context item and §18
+records that exact reintroduction trigger. `model` and `prompt` stay **singular** —
+ACH is plural because it describes capabilities, and the selection happens in the
+ACH→agent-profile translator, which lives in `ach`. `a2aAgents` need no new type;
+they are converted into MCP servers by that same translator. `guardrails` is
+dropped: LiteLLM applies it server-side and no adapter projects it.
+
+One consequence worth stating: **the ACH→agent-profile translator is a real
+component with real logic**, owned by `ach`. It selects one model, selects one
+prompt, and rewrites A2A agents as MCP servers. This repository's schema stays
+narrow because that translator absorbs the width.
+
+**Open, and blocking.** Six decisions are recorded in
+`2026-08-26-open-decisions.md`, three of which contradict SPEC v0.5 directly and
+would force a plan rewrite if guessed at:
+
+| # | Item | Blocks |
+|---|---|---|
+| D1 | the common vocabulary — is `plugins` a common resource type? | Phase 6 |
+| D2 | uninstall and convergence vs §33 "apply never deletes" and decision #41 "no ownership state file" | Phase 4 |
+| D3 | project scope vs §26.1 "workspace destinations are v1 non-goals" | Phase 4 |
+| D4 | gemini-cli as a fifth runtime | Phase 4 |
+| D5 | the imperative surface (`plugin install`, `outdated`) | Phase 7 |
+| D6 | `ach-runtime`'s `ach-hydrator` image as a fourth consumer | release artifacts |
+
+Phases 1 and 2 depend on none of them. Phase 3 depends only on the settled
+`archive` decision. **Do not plan Phases 4–7 until D1–D6 are answered.**
+
+---
+
+## Global Constraints
+
+Copied verbatim from `CLAUDE.md` and the spec; every phase's requirements
+implicitly include this section.
+
+- **Go 1.25 floor is a security floor.** `go.mod` stays at `1.25.8` or above.
+  GO-2026-4602 (`os.Root` escape — `Link` depends on it) and GO-2025-3956
+  (`LookPath` — `Exec` depends on it). Never lower it, never acknowledge either.
+- **Build tags split by layer.** `pkg/**` carries **no** build tag and must
+  compile for `windows/amd64` (`ach-cli` ships windows). `internal/**` and
+  `cmd/ap/**` carry `//go:build unix`, unchanged. A `pkg/` file that needs a
+  platform split ships both halves, the way `ach/internal/cli/lock` does.
+- **No host toolchain.** Every Go/lint/vuln command goes through `scripts/dev.sh`
+  via a `make` target. Add both halves (`name` + `_name`) for any new gate.
+- **Standard library only, except `github.com/BurntSushi/toml` from Phase 5.**
+  No cobra, no yaml library, no other additions. `pkg/` is imported by another
+  module now, so every dependency added here is added to `ach` too.
+- **`pkg/` is a published API.** An exported symbol is a compatibility promise
+  across three repositories. Do not export what a consumer does not need; do not
+  rename what one already uses without a coordinated release.
+- **`pkg/` never reads `$HOME` implicitly and never writes outside the root it is
+  given.** `ach` hydrates into a workspace, `ap` into a profile namespace. Every
+  root arrives as a parameter.
+- **Copied ach code keeps attribution.** Every file copied from `ackstorm/ach`
+  starts with a comment naming the source path and commit, and keeps its
+  `// SPDX-License-Identifier: Apache-2.0` header.
+- **Three tests must never fail or be adjusted:**
+  `TestDeleteDoesNotFollowTheConfigShim`, `TestDeleteDoesNotFollowSymlinks` /
+  `TestDeleteDoesNotFollowNestedSymlinks`, `TestEnvOnlySetsPathsInsideTheProfile`.
+- **Anything turning user input into a path calls `profile.ValidName`.**
+  `--from` once skipped it and became a path traversal.
+- **Guards get mutation-tested.** After adding a guard: revert it, run its test,
+  confirm the test fails, restore. A guard whose test still passes without it is
+  worse than no guard.
+- **`run` parses no flags after its reference.** New commands with no
+  passthrough use `parseAroundRef`; never extend flag parsing into `run`.
+- **Before claiming a phase done:** `make verify`, `make secrets`, `make sandbox`,
+  `make smoke`, `make crossbuild` (`GOOS=windows GOARCH=amd64 go build ./pkg/...`),
+  and `make fuzz` for any phase touching path validation.
+- **Commits are frequent and conventional.** Short imperative subject, <72 chars.
+
+---
+
+## Phase map
+
+Each phase ships working, independently testable software. Spec sections in
+brackets.
+
+### Phase 1 — Manifest and composition *(no I/O, no network)*
+`[§2 §3 §4 §5 §6 §7 §31 §36-profile/composition]`
+
+Typed YAML subset parser (evolved from `internal/manifest/yaml.go`: `null`,
+booleans, numbers, block scalars, quoted-vs-plain style). Document tree.
+The three merge rules plus branch-keyed unions, exclusive groups and `null`
+reset — driven by a schema-supplied union oracle, never hardcoded per type.
+`extends` chain with cycle detection. Runtime overlay selection. Typed
+`Profile` + validation. Base profiles (no `targets`).
+
+Lands in `pkg/schema`, which compiles for windows and carries no build tag.
+Also moves `internal/agent` to `pkg/agentreg` unchanged — `ach` needs that table
+and maintains a second copy of it today in `internal/cli/adapter/globalpath.go`.
+
+**Ships:** `ap render <path> --target claude` prints the effective profile with
+secrets redacted; `ap validate <path>` is the contract check other repositories
+run. Zero network, zero mutation.
+**Exit:** every §3 composition example in the spec is a passing table test, and
+`GOOS=windows go build ./pkg/...` succeeds.
+**Plan file:** `2026-08-26-phase-1-manifest-and-composition.md`
+
+### Phase 2 — Inputs, secrets, preflight, `--dry-run`
+`[§11 §12 §13 §14 §28 §37-resolution]`
+
+Input binding (`env` | `file`), required-input calculation over *active* effective
+resources only, header `value`/`value_from`/`prefix`, the `Authorization` bans
+(§9 in `model.headers`, §14 literal in MCP headers). Derived preflight: runtime
+CLI executable, every active stdio MCP `transport.command` resolves. Redaction
+everywhere.
+
+Also ships `ap schema`, emitting the manifest's JSON Schema, so `ach-agent`
+validates in Python without reimplementing these rules; and
+`ap apply --manifest -`, so `ach` pipes a generated manifest with no temp file.
+
+**Ships:** `ap apply --dry-run` — full resolution phase, nothing touched.
+**Exit:** a manifest referencing an undeclared secret fails naming both the
+resource and the input; a disabled resource's secret is not required; the emitted
+JSON Schema accepts SPEC §35's full example and rejects each §36 violation.
+
+### Phase 3 — Sources, cache, lockfile *(reintroduces `archive`)*
+`[§16 §17 §18-reintroduced §19 §20 §32 §37-lock-commit]`
+
+**Blocked on spec delta #1** (§0.1): `source.archive` returns, because ACH serves
+every context item as a `downloadUrl` and that is exactly the reintroduction
+trigger §18 records. Checksum verification is mandatory, not optional — an
+archive is not content-addressed the way a git SHA is, so it is the one source
+family whose lock entry must carry a digest.
+
+Copy `ach/internal/gitfetch`, `ach/internal/cachefs`, `ach/internal/cli/extract`
+(all dependency-free). Workspace discovery + `agent-profile.lock`. Append-only
+consumption: entry pins, missing entry resolves and appends, existing entry is
+never modified. Minimal git URL normalization. Local sources unlocked. Atomic
+lock commit between resolution and materialization. `--frozen`.
+
+**Ships:** sources resolve into a cache, the lockfile is written once atomically,
+`--frozen` fails on an unlocked ref.
+**Exit:** given (manifest, lockfile, cache) a second run performs no network I/O.
+
+### Phase 4 — Materialization: skills, artifacts, prompt
+`[§10 §23 §26 §33 §37-materialization]`
+
+Copy `ach/internal/cli/lock` (unix half) for two-level locking: workspace lock
+plus a target-namespace lock per materialization root, acquired in fixed order.
+Adapter interface. `SKILL.md` contract check (copy `contentkit.VerifySkillContents`).
+`artifacts.destination` relative to the materialization root with `subpath` path
+rules. Prompt `append`/`replace`. Merge-overwrite-never-delete, every overwritten
+path logged. The §4 warning when a disabled resource's materialized path remains.
+
+**Ships:** `ap apply` materializes skills, artifacts and the prompt into a named
+profile namespace.
+**Exit:** sandbox test — a hand-added file in the namespace survives apply; a
+declared file overwrites and is logged.
+
+### Phase 5 — MCP, model, secret references *(adds the TOML dependency)*
+`[§9 §25 §34]`
+
+Copy `ach/internal/cli/merge` (brings `github.com/BurntSushi/toml`). Per-runtime
+MCP materialization and the §34 expansion table, ported from
+`ach/internal/cli/adapter/{codex,opencode}`: claude `${VAR}`, opencode
+`{env:VAR}`, pi `{env:VAR}`, codex `bearer_token_env_var` + `env_http_headers`.
+`model` → adapter-managed environment variables, with §15.1 precedence and the
+override notice. `AP_SECRET_<NAME>` launcher export for `file`-sourced secrets,
+wired into `internal/run`. Plaintext is an error; `--allow-plaintext-secrets` is
+the only opt-in and has no manifest field.
+
+**Ships:** MCP servers and model configuration land natively per runtime with
+secrets as references, never values.
+**Exit:** mutation test — remove the plaintext guard, confirm the test goes red.
+Smoke test asserts each of the four binaries reads what was written.
+
+### Phase 6 — Marketplaces and plugins
+`[§21 §22 §24]` — **blocked on the §0.2 vocabulary decision**
+
+If the answer is (a), this phase also ports `ach/internal/cli/adapter/route` and
+its five adapter rule tables, and `plugins` becomes a common resource type. That
+is the difference between this repository replacing ACH's hydration and merely
+sitting beside it. Plan this phase only after the decision.
+
+Copy `contentkit.ParseClaudeCodeMarketplace` and `SliceSubtree`. Typed
+marketplaces (`plugins` | `skills`), `<item>@<marketplace>` refs, type matching.
+The `skills` contract (item `<name>` → directory `<name>` under root/subpath, must
+carry `SKILL.md`). The `plugins` catalog contract is adapter-owned and its second
+hop stays outside the lockfile (§32.8).
+
+**Ships:** `ref: pdf@anthropic-skills` resolves; claude/opencode native plugins
+materialize.
+**Exit:** a ref whose marketplace type mismatches is a validation error.
+
+### Phase 7 — `default` namespace, and `ap sync` dies
+`[§6 §33-default §38]`
+
+`name: default` targets the real config with the resolved absolute path displayed
+and named as the real config, in `--dry-run` and in the prompt; the single `--yes`
+gate; off a terminal it refuses (`stdinIsTerminal`, never `answered()`). Emphasized
+plaintext warning in `default`. Delete `cmd/ap/sync.go` and `internal/manifest`;
+migrate `examples/`; update `CLAUDE.md`, `docs/specs/`, `README`.
+
+**Ships:** one apply model for every profile. `ap sync` is gone.
+**Exit:** `TestSyncDefaultNeverCreatesLinksOrShims`'s successor holds — nothing is
+created for the sentinel. `make smoke` green on all four agents.
+
+### Phase 8 — Downstream adoption *(other repositories)*
+
+Not work in this repository, listed so the contract handoff is not forgotten.
+
+- **`ach`**: `env hydrate` and `plugin/skill install` stop calling
+  `route.Project` and call `pkg/hydrate` instead; `internal/cli/adapter`,
+  `hydrate`, `localpkg`, `gitfetch`, `contentkit` and `cachefs` are deleted or
+  reduced to the platform-API client. `ach` gains an exporter: Environment →
+  this repository's manifest format. Its windows build is why `pkg/` is portable.
+- **`ach-agent`**: `src/ach_agent/engine/hydrate.py` stops projecting and instead
+  writes a manifest and runs `ap apply --manifest -`. It validates against
+  `ap schema` output. Python keeps owning the harness (channels, limits, memory,
+  cost) — none of that is in SPEC v0.5 and none of it should be.
+
+**Exit:** one implementation of "install these capabilities into this agent",
+imported by `ach`, driven by `ach-agent`, and shipped as `ap`.
+
+---
+
+## Explicitly out of scope for v1
+
+Carried from §38 so no phase quietly grows one: universal runtime semantics, a
+universal plugin format, multiple inheritance, remote `extends`, generic
+patch/merge operators, `${...}` in the manifest, placeholder expansion in MCP
+args, `requires`, `--clean` (v2, named profiles only), archive and OCI sources,
+`dependencies`, prompt/artifact marketplaces, `extends` search paths, an
+`abstract` flag, absolute or workspace artifact destinations, lock
+signatures, an ownership state file, Windows.
+
+Two limits are stated, not fixed: ap cannot tell whether a resolved source
+honoured the namespace (§8.5), and a manifest is only as reproducible as its
+sources — `@latest` is whatever it was that day (§14).
