@@ -2,6 +2,7 @@ package schema
 
 import (
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -17,7 +18,11 @@ func mergeYAML(t *testing.T, base, overlay string) *Node {
 	if err != nil {
 		t.Fatalf("overlay: %v", err)
 	}
-	return Merge(b, o, V1Schema())
+	got, err := Merge(b, o, V1Schema())
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	return got
 }
 
 func TestMergeRecursesIntoMappingsAndReplacesEverythingElse(t *testing.T) {
@@ -113,5 +118,23 @@ func TestMergeDiscardsTheOtherLocatorWhenAnOverlayPicksOne(t *testing.T) {
 	}
 	if p.Map["mode"].Str != "replace" {
 		t.Error("mode lost; it is outside the content|source group")
+	}
+}
+
+func TestNullOnACollectionEntryIsRefusedAndNamesEnabledFalse(t *testing.T) {
+	b, _ := ParseYAML([]byte("skills:\n  x:\n    ref: x@m\n"))
+	o, _ := ParseYAML([]byte("skills:\n  x: null\n"))
+	_, err := Merge(b, o, V1Schema())
+	if err == nil {
+		t.Fatal("`skills.x: null` accepted; §3.7 makes it a validation error")
+	}
+	if !strings.Contains(err.Error(), "skills.x") || !strings.Contains(err.Error(), "enabled: false") {
+		t.Errorf("error %q must name the path and point at `enabled: false`", err)
+	}
+	// A singular still resets.
+	b, _ = ParseYAML([]byte("model:\n  type: anthropic\n"))
+	o, _ = ParseYAML([]byte("model: null\n"))
+	if _, err := Merge(b, o, V1Schema()); err != nil {
+		t.Errorf("`model: null` refused: %v — §3.7 allows it on singulars", err)
 	}
 }

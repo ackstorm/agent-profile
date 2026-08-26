@@ -81,3 +81,23 @@ func matchPath(pattern, path []string) bool {
 	}
 	return true
 }
+
+// collections are the named-resource collections: their ENTRIES are the things
+// `null` may not reset. §3.7.
+var collections = [][]string{
+	{"skills", "*"}, {"mcps", "*"}, {"artifacts", "*"}, {"marketplaces", "*"},
+	{"runtimes", "*", "skills", "*"}, {"runtimes", "*", "mcps", "*"},
+	{"runtimes", "*", "artifacts", "*"}, {"runtimes", "*", "marketplaces", "*"},
+	{"runtimes", "*", "plugins", "*"}, {"runtimes", "*", "variants", "*"},
+}
+
+// IsCollectionEntry reports whether path names an entry of a named resource
+// collection.
+func (s Schema) IsCollectionEntry(path []string) bool {
+	for _, p := range collections {
+		if matchPath(p, path) {
+			return true
+		}
+	}
+	return false
+}
