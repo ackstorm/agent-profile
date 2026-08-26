@@ -69,6 +69,36 @@ func TestEffectiveIgnoresAnInheritedNonTargetBlockAndWarnsOnALocalOne(t *testing
 	}
 }
 
+// TestTheSpecsFullExampleComposesForBothOfItsTargets is the acceptance test
+// for Phase 1: SPEC §35's full example, adapted for three constructs this
+// phase does not implement — see docs/references/DECLARATIVE.md.
+func TestTheSpecsFullExampleComposesForBothOfItsTargets(t *testing.T) {
+	for _, rt := range []string{"claude", "opencode"} {
+		t.Run(rt, func(t *testing.T) {
+			p, warns, err := Effective("testdata/spec-35-execute.yaml", rt)
+			if err != nil {
+				t.Fatalf("effective: %v", err)
+			}
+			for _, w := range warns {
+				t.Logf("warning: %s", w.Text)
+			}
+			if p.Name != "execute" {
+				t.Errorf("name = %q", p.Name)
+			}
+			if _, ok := p.Skills["pdf"]; !ok {
+				t.Error("marketplace-backed skill missing")
+			}
+			// §35's closing note: for opencode company-review is inactive, so
+			// gitlab-token is not required. Phase 2 asserts the requirement
+			// calculation; here we assert the state it reads.
+			cr := p.Skills["company-review"]
+			if want := rt != "opencode"; cr.Enabled != want {
+				t.Errorf("company-review enabled = %v, want %v for %s", cr.Enabled, want, rt)
+			}
+		})
+	}
+}
+
 func TestEffectiveRefusesABaseProfileAndNamesWhy(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "base.yaml", "version: \"1\"\nname: coding-base\n")

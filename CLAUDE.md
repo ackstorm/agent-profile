@@ -47,6 +47,7 @@ Read the file before touching the code. Not suggestions.
 | `Dockerfile.smoke`, `Dockerfile.devtools`, `scripts/smoke.sh`   | `docs/references/SMOKE.md`       |
 | `internal/profile/share.go`, share conflicts, promotion         | `docs/references/CREDENTIALS.md` |
 | "the profile behaves oddly", `Agent.FirstRun`, onboarding flags | `docs/references/CLAUDE-JSON.md` |
+| `pkg/schema/*`, composition, the YAML subset                    | `docs/references/DECLARATIVE.md` |
 
 Everything else in this file is a standing rule: it applies before you know
 which file you are about to touch.
