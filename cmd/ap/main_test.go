@@ -120,24 +120,31 @@ func TestDispatchManifestRenderComposesEveryTargetNotJustTheFirst(t *testing.T) 
 	}
 }
 
-// apply takes a REFERENCE, not --target: the reference already names the agent
-// and the root. A bare manifest path with no reference is a usage error, never
-// a guess at which agent was meant.
-func TestDispatchManifestApplyRequiresAReference(t *testing.T) {
+// apply takes the MANIFEST as its subject: a manifest is a profile's
+// definition, so its own `name` and `targets` address it. Naming nothing at all
+// is still a usage error, never a guess at which manifest was meant.
+func TestDispatchManifestApplyRequiresAManifest(t *testing.T) {
 	err := dispatch([]string{"manifest", "apply", "--dry-run"})
 	if err == nil {
-		t.Fatal("manifest apply with no reference succeeded")
+		t.Fatal("manifest apply with no manifest succeeded")
 	}
 	if !strings.Contains(err.Error(), "usage") {
 		t.Errorf("error %q is not a usage error", err)
 	}
-	// A variant is a set of launch arguments over a profile, not a root.
-	err = dispatch([]string{"manifest", "apply", "claude:plan:brainstorm", "./p.yaml", "--dry-run"})
-	if err == nil {
-		t.Fatal("manifest apply accepted a variant reference")
+	// A --target the manifest does not declare is an error naming both lists.
+	// Materializing nothing for it would look like success, and a typo in a
+	// runtime name is the overwhelmingly likely cause.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(path, []byte("version: \"1\"\nname: plan\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "brainstorm") {
-		t.Errorf("error %q does not name the variant it rejected", err)
+	err = dispatch([]string{"manifest", "apply", path, "--target", "codex", "--dry-run"})
+	if err == nil {
+		t.Fatal("manifest apply accepted a target the manifest does not declare")
+	}
+	if !strings.Contains(err.Error(), "codex") || !strings.Contains(err.Error(), "claude") {
+		t.Errorf("error %q does not name both the asked-for and the declared targets", err)
 	}
 }
 
@@ -190,7 +197,7 @@ func TestDispatchManifestApplyDryRunWritesNothing(t *testing.T) {
 	t.Setenv("PATH", binDir)
 
 	before := dirSnapshot(t, dir)
-	err := dispatch([]string{"manifest", "apply", "claude:plan", filepath.Join(dir, "p.yaml"), "--dry-run"})
+	err := dispatch([]string{"manifest", "apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
 	if err != nil {
 		t.Fatalf("apply --dry-run: %v", err)
 	}
@@ -245,7 +252,7 @@ model:
 	}
 	os.Stdout, os.Stderr = wOut, wErr
 
-	dispatchErr := dispatch([]string{"manifest", "apply", "claude:plan", filepath.Join(dir, "p.yaml"), "--dry-run"})
+	dispatchErr := dispatch([]string{"manifest", "apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
 
 	_ = wOut.Close()
 	_ = wErr.Close()
@@ -291,7 +298,7 @@ func TestDispatchManifestApplyDashReadsStdin(t *testing.T) {
 		_ = w.Close()
 	}()
 
-	err = dispatch([]string{"manifest", "apply", "claude:plan", "--manifest", "-", "--dry-run"})
+	err = dispatch([]string{"manifest", "apply", "--manifest", "-", "--target", "claude", "--dry-run"})
 	if err != nil {
 		t.Fatalf("apply --manifest -: %v", err)
 	}
@@ -300,7 +307,7 @@ func TestDispatchManifestApplyDashReadsStdin(t *testing.T) {
 // A path and --manifest name the same thing twice; that must be rejected
 // rather than silently preferring one.
 func TestDispatchManifestApplyRejectsBothAPathAndManifestFlag(t *testing.T) {
-	err := dispatch([]string{"manifest", "apply", "claude:plan", "./p.yaml", "--manifest", "-", "--dry-run"})
+	err := dispatch([]string{"manifest", "apply", "./p.yaml", "--manifest", "-", "--target", "claude", "--dry-run"})
 	if err == nil {
 		t.Fatal("apply with both a path and --manifest succeeded, want it to refuse")
 	}
@@ -2004,12 +2011,15 @@ func TestListMarksDefaultAsNotAProfile(t *testing.T) {
 	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
 
 	line := listLineFor(t, out, "claude:"+agentreg.Default)
-	if !strings.Contains(line, "read-only") {
+	// Asserted against defaultNote itself rather than a substring of it: the
+	// note said "read-only" until the ledger made that false, and a test
+	// matching a fragment would not have noticed the claim going stale.
+	if !strings.Contains(line, defaultNote) {
 		t.Errorf("%q is printed like any other profile: %q", agentreg.Default, line)
 	}
 	// And no ordinary profile carries it, which is what makes it a marking rather
 	// than a banner every row repeats.
-	if other := listLineFor(t, out, "claude:review"); strings.Contains(other, "read-only") {
+	if other := listLineFor(t, out, "claude:review"); strings.Contains(other, defaultNote) {
 		t.Errorf("an ordinary profile carries the marking too: %q", other)
 	}
 }
@@ -2083,7 +2093,7 @@ func TestListRawIsOneTabSeparatedLinePerReference(t *testing.T) {
 		if line != strings.TrimLeft(line, treeGlyphs+"\t") {
 			t.Errorf("a raw line is decorated: %q", line)
 		}
-		if strings.Contains(line, "read-only") {
+		if strings.Contains(line, defaultNote) {
 			t.Errorf("a raw line carries a human note: %q", line)
 		}
 		fields := strings.Split(line, "\t")
@@ -2599,7 +2609,7 @@ func TestManifestApplyDryRunResolvesRealSourcesAndWritesNothing(t *testing.T) {
 	}
 
 	out, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude:plan", path, "--dry-run"})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--dry-run"})
 	})
 	if err != nil {
 		t.Fatalf("dry run: %v\n%s", err, out)
@@ -2649,7 +2659,7 @@ func TestManifestApplyMaterializesIntoAProfile(t *testing.T) {
 	}
 
 	out, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude:plan", path})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude"})
 	})
 	if err != nil {
 		t.Fatalf("apply: %v\n%s", err, out)
@@ -2666,7 +2676,7 @@ func TestManifestApplyMaterializesIntoAProfile(t *testing.T) {
 	// A second apply reports every file as an overwrite, and the ledger does
 	// not grow a duplicate.
 	out2, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude:plan", path})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude"})
 	})
 	if err != nil {
 		t.Fatalf("second apply: %v\n%s", err, out2)
@@ -2702,7 +2712,7 @@ func TestAContractViolationFailsTheDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude:plan", path, "--dry-run"})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--dry-run"})
 	})
 	if err == nil {
 		t.Fatal("a skill with no SKILL.md passed --dry-run")
@@ -2712,10 +2722,11 @@ func TestAContractViolationFailsTheDryRun(t *testing.T) {
 	}
 }
 
-// claude:default is the configuration the developer's own agent reads, and ap
-// cannot undo a write there by deleting a profile. Off a terminal it refuses:
-// a pipe is not consent.
-func TestApplyIntoTheRealConfigRefusesOffATerminal(t *testing.T) {
+// A manifest NAMED "default" reaches the configuration the developer's own
+// agent reads, and ap cannot undo a write there by deleting a profile. That
+// field is what decides it, and the manifest may have come from a repository
+// somebody else wrote — so off a terminal it refuses: a pipe is not consent.
+func TestAManifestNamedDefaultRefusesOffATerminal(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	binDir := t.TempDir()
@@ -2723,13 +2734,13 @@ func TestApplyIntoTheRealConfigRefusesOffATerminal(t *testing.T) {
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "p.yaml")
-	if err := os.WriteFile(path, []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("version: \"1\"\nname: default\ntargets:\n  - claude\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// A pipe is not a terminal, and it is not consent. go test's own stdin is
-	// a character device, so without this the gate would find a "terminal",
-	// ask, read nothing, and cancel — which passes for the wrong reason.
+	// A pipe is not a terminal, and it is not consent. Substituted explicitly
+	// rather than relying on whatever `go test` was given: this test asserts
+	// what happens off a terminal, so it must be off one by construction.
 	oldStdin := os.Stdin
 	r, w, perr := os.Pipe()
 	if perr != nil {
@@ -2739,7 +2750,7 @@ func TestApplyIntoTheRealConfigRefusesOffATerminal(t *testing.T) {
 	os.Stdin = r
 	defer func() { os.Stdin = oldStdin }()
 
-	err := dispatch([]string{"manifest", "apply", "claude:default", path})
+	err := dispatch([]string{"manifest", "apply", path, "--target", "claude"})
 	if err == nil {
 		t.Fatal("apply into the real config succeeded with no terminal and no --yes")
 	}
@@ -2752,7 +2763,7 @@ func TestApplyIntoTheRealConfigRefusesOffATerminal(t *testing.T) {
 	}
 	// --dry-run needs no gate: it writes nothing to the root.
 	if _, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude:default", path, "--dry-run"})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--dry-run"})
 	}); err != nil {
 		t.Errorf("--dry-run against default was gated: %v", err)
 	}

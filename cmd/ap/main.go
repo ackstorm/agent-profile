@@ -309,46 +309,69 @@ Examples:
 
 Usage:
   ap manifest render [--target <runtime>] [--quiet] <manifest.yaml>
-  ap manifest apply  <root> [--dry-run] [--strict] [--yes] <manifest.yaml>
-  ap manifest apply  <root> [--manifest -] < manifest.yaml
-  ap manifest export <root> [--name <name>]
+  ap manifest apply  <manifest.yaml> (--target <runtime>... | --all-targets)
+  ap manifest apply  --manifest - [...]   < manifest.yaml
+  ap manifest export <agent>:<profile> [--name <name>]
 
 render answers what a manifest MEANS, before any root is chosen. With no
 --target it composes EVERY target the manifest declares and prints nothing —
 the exit status is the answer, and that is the contract check a producer runs
 against a manifest it generated. There is no separate "validate".
 
-apply materialises it. It is ADDITIVE: a manifest that stops mentioning a
-resource does not remove it, and "ap uninstall" is how things are removed. A
-file you added by hand survives, and so does a key you added by hand to a file
-this profile only merged into.
+apply materialises it, and the manifest is the only argument it needs. A
+manifest IS a profile's definition: its "name" is that profile's name and its
+"targets" are the runtimes it CAN be materialised for. The name is not restated
+on the command line; --profile overrides it when you want the manifest to land
+somewhere else.
+
+Which of those runtimes to actually materialise for is yours to say, and saying
+it is REQUIRED: --target, repeatable, or --all-targets for every one declared.
+That holds even for a manifest declaring a single target, which is the case
+that would otherwise drift — a manifest can gain three tomorrow, and a script
+that never named its runtime would quietly start creating four profiles.
+
+It is ADDITIVE: a manifest that stops mentioning a resource does not remove it,
+and "ap uninstall" is how things are removed. A file you added by hand
+survives, and so does a key you added by hand to a file this profile only
+merged into.
+
+A manifest named "default" materialises into the configuration your agents
+already use. That is displayed with its resolved absolute path and asked about
+once; off a terminal it refuses, because a manifest can come from a repository
+somebody else wrote and that field is what decides this.
 
 export turns the profile's ledger back into a manifest, so an environment
 assembled one "ap install" at a time becomes portable. It emits binding names,
 never secret values, and writes the auth scheme it actually resolved.
 
-<root> is one of:
-  <agent>:<profile>   a profile, or <agent>:default for the real configuration
-  <agent> --root <d>  that directory, named outright — for a container, where
-                      there is no $HOME to derive a profile namespace from
+export reads a ledger, so it names a profile rather than a manifest.
 
 Flags:
-  --target <runtime>  render for one runtime and print it
+  --target <runtime>  render: compose for one runtime and print it
+                      apply:  materialise for this runtime; repeatable, and
+                              required unless --all-targets
+  --all-targets       apply: materialise for every target declared
   --quiet             render: compose and print nothing
+  --profile <name>    apply: use this profile name instead of the manifest's
   --dry-run           apply: resolve, authenticate and fetch, then stop. It
                       does NOT do nothing: that is the only way to check a
                       source contract
   --strict            promote every degradation warning to an error
-  --yes               apply into <agent>:default without asking
+  --yes               apply a manifest named "default" without asking
   --manifest -        read the manifest from stdin, for a caller that
                       generated one and has no temp file
-  --root <dir>        materialise into that directory (see <root> above)
+  --root <dir>        apply: materialise into that directory outright, for a
+                      container where there is no $HOME to derive a profile
+                      namespace from. Needs exactly one --target
   --name <name>       export: the manifest's name; defaults to the profile's
 
 Examples:
   ap manifest render ./agent-profile.yaml
-  ap manifest apply claude:plan ./agent-profile.yaml --dry-run
-  ap manifest apply claude --root /config ./agent-profile.yaml
+  ap manifest apply ./agent-profile.yaml --target claude --dry-run
+  ap manifest apply ./agent-profile.yaml --target claude --target codex
+  ap manifest apply ./agent-profile.yaml --all-targets
+  ap manifest apply ./agent-profile.yaml --target claude --profile experiment
+  ap manifest apply ./agent-profile.yaml --target claude --root /config
   ap manifest export claude:plan > team-plan.yaml
 `,
 
@@ -1011,7 +1034,21 @@ func cmdList(args []string) error {
 	// one. The second parse is that helper's trick all the same: it is what lets
 	// `ap list claude --raw` work as well as `ap list --raw claude`. list has no
 	// passthrough, so there is nothing for either order to be ambiguous about.
+	//
+	// It happens BEFORE either flag is read, and that ordering is the whole
+	// point. Reading them first and re-parsing afterwards left both stale:
+	// `ap list claude:plan --raw` printed the padded listing, and
+	// `ap list claude --root /config` did not even reach the ledger — the
+	// branch below tested a --root that had not been parsed yet, so it fell
+	// through to the ordinary agent tree and ignored the directory entirely.
 	if rest := fs.Args(); len(rest) > 0 {
+		subject := rest[0]
+		if stop, err := parse(fs, rest[1:]); stop {
+			return err
+		}
+		if extra := fs.Args(); len(extra) > 0 {
+			return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [--root <dir>] [<agent>[:<profile>]]", extra[0])
+		}
 		// A qualified reference asks the same question one level deeper: not
 		// "which profiles exist" but "what does this one hold". It is the same
 		// command because it is the same tree, and `ap status` as a second
@@ -1019,19 +1056,13 @@ func cmdList(args []string) error {
 		//
 		// It reads the LEDGER, never a manifest: a manifest is an input and
 		// says nothing about what is installed (§1.1).
-		if strings.Contains(rest[0], ":") || *rootFlag != "" {
-			return listResources(rest[0], *rootFlag, fs, *raw)
+		if strings.Contains(subject, ":") || *rootFlag != "" {
+			return listResources(subject, *rootFlag, *raw)
 		}
-		if _, ok := agentreg.Lookup(rest[0]); !ok {
-			return fmt.Errorf("unknown agent %q: supported are %s", rest[0], strings.Join(agentreg.Names(), ", "))
+		if _, ok := agentreg.Lookup(subject); !ok {
+			return fmt.Errorf("unknown agent %q: supported are %s", subject, strings.Join(agentreg.Names(), ", "))
 		}
-		names = []string{rest[0]}
-		if stop, err := parse(fs, rest[1:]); stop {
-			return err
-		}
-		if extra := fs.Args(); len(extra) > 0 {
-			return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [agent]", extra[0])
-		}
+		names = []string{subject}
 	}
 	rows, err := listRows(names)
 	if err != nil {
@@ -1053,7 +1084,13 @@ func cmdList(args []string) error {
 // agentreg.ValidName exists to refuse. It replaced a bracketed name plus a
 // footnote explaining the brackets: the note says the same thing in the place
 // you are already looking, and a reference nothing decorates stays pasteable.
-const defaultNote = "(the agent's own config: read-only)"
+//
+// It used to say "read-only", and that stopped being true when the ledger
+// landed: `ap manifest apply`, `ap install` and `ap uninstall` all reach this
+// root, gated. What is still true is the thing the note exists to prevent —
+// ap did not create it and cannot delete it — so the note says THAT instead of
+// a blanket claim the program no longer honours.
+const defaultNote = "(the agent's own config — not a profile)"
 
 // listRow is one line of the listing.
 //

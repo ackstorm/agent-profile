@@ -297,6 +297,47 @@ the catalogue name against. It is refused BY NAME — without that refusal the r
 is treated as a literal resource name and the user gets a contract error naming
 a cache directory.
 
+## A manifest addresses its own profile
+
+`ap manifest apply <manifest>` takes the manifest and nothing else. A manifest
+IS a profile's definition: `name` is that profile's name and `targets` are the
+runtimes it can be materialized for, so neither is restated on the command line.
+`--profile` overrides the name.
+
+**Naming the runtimes is REQUIRED** — `--target`, repeatable, or `--all-targets`
+— and that holds even when the manifest declares exactly one. It is not
+ceremony: `targets` says what a manifest CAN be materialized for, not what the
+caller wants today, and a manifest that targets claude now can gain three later.
+A script that never named its runtime would quietly start building four profiles
+on somebody's laptop. Do not add a default here.
+
+An earlier version took `<agent>:<profile>` here and ignored both fields. Do not
+restore it. The justification was §33.2's "a root is a parameter, never inferred
+from the environment" — misapplied, because a manifest is the INPUT the user
+named, not the environment, and `ap sync` addressed profiles exactly this way
+before it (`name` was "the logical profile name"; `platforms` chose the
+runtimes). What §33.2 still forbids is intact: no active profile, no default
+manifest location, nothing reading a root out of the environment.
+
+Two guards come with it, and both are load-bearing:
+
+- **`agentreg.ValidNameAllowDefault` runs on the manifest's `name`.** A manifest
+  can come from a repository somebody else wrote, so `name: ../../../.ssh` is a
+  path traversal with an author behind it — the same class as the `--from` bug.
+  The sentinel is permitted here and only here, because a manifest legitimately
+  provisions the configuration the agent already uses.
+- **`name: default` is gated ONCE for the whole run**, naming each agent with
+  its resolved absolute path, and refuses off a terminal. Per-target gating
+  would ask four times for one decision.
+
+`--root` still names a directory outright, and on apply it needs exactly one
+`--target`: one directory holds one runtime's configuration, and writing two
+into it would have them overwrite each other with no way to say so.
+
+`install`, `uninstall`, `list` and `export` keep `<agent>:<profile>`. They have
+no manifest to read a name from — that asymmetry is the reason, not an
+inconsistency to tidy away.
+
 ## A root may be named literally, and then nothing is inferred
 
 `--root <dir>` names the materialization directory outright, and the subject is
@@ -475,11 +516,28 @@ build failure instead of a silent toolchain download.
 ## Before claiming done
 
 ```bash
-make verify        # fmt-check, shellcheck, vet, lint, test (race + shuffle), vulncheck
+make verify        # fmt-check, shellcheck, vet, lint, test (race + shuffle), examples, vulncheck
 make secrets       # gitleaks over the full history
 make sandbox       # ap's own side, against a throwaway home, with stub agents
+make walkthrough   # the two sequences a person types, newcomer and expert
 make smoke         # the four real agents, in their own image
+make hydrate       # the hydrator image, headless: no TTY, no $HOME, non-root
 ```
+
+`walkthrough` is not a second sandbox. `sandbox` asserts properties one at a
+time; `walkthrough` runs a SEQUENCE in the order somebody meets it and prints
+what they would see. It exists because three defects shipped past a green
+sandbox and were found by typing commands by hand — `ap list <ref> --raw`
+ignoring `--raw`, `ap list <agent> --root <dir>` ignoring `--root` entirely, and
+`ap list` calling `default` read-only long after the ledger made that false.
+None of those is visible to a per-property assertion; all three are obvious in a
+transcript. Read its output when you change a command's surface, do not just
+check that it is green.
+
+`examples` composes every shipped example manifest for every target it declares,
+and it is inside `verify` because it costs milliseconds and because a shipped
+example that does not parse has already happened — the README's own example
+manifest used flow syntax this subset refuses.
 
 `make doctor` is the fast preflight when something looks wrong with the
 container itself rather than the code.

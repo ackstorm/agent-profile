@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/ackstorm/agent-profile/internal/profile"
@@ -19,65 +20,53 @@ import (
 	"github.com/ackstorm/agent-profile/pkg/source"
 )
 
-// manifestApply is the CLI's window onto the resolution phase: `--dry-run`
-// runs exactly schema.Resolve and prints its result with secrets redacted,
-// then stops. Materialization — actually applying a manifest — is Phase 4 and
-// does not exist yet; without `--dry-run` this says so and exits non-zero
-// rather than stubbing a fake success.
+// manifestApply materializes a manifest into the profile the manifest names.
 //
-// The first argument is a REFERENCE, like every other command that changes or
-// inspects a root, and there is no --target: the reference already names the
-// agent. `ach-cli` needs that flag because its verbs address a tool; here
-// `claude:plan` states the runtime and the root in one token. render is the
-// exception that keeps --target, because a file has no root to read it from.
+// The manifest is the SUBJECT, and it is the only argument. A manifest is a
+// profile's definition: `name` is that profile's name and `targets` are the
+// runtimes it can be materialized for, so restating either on the command line
+// asks the author to repeat their own document.
 //
-// The manifest is the second positional, or `--manifest -` to read it from
-// stdin so a caller (ach, ach-agent) can pipe a generated one with no temp
-// file of its own. Exactly one of the two.
+// An earlier version took `<agent>:<profile>` here and ignored both fields. It
+// was justified with §33.2's "a root is a parameter, never inferred from the
+// environment" — but a manifest is the INPUT the user named, not the
+// environment, and this repository's own `ap sync` addressed profiles exactly
+// this way before it. What §33.2 still forbids is intact: there is no active
+// profile, no default manifest location, and nothing here reads a root out of
+// the environment.
+//
+// Which runtimes to materialize for is the user's choice, because a manifest
+// may declare four and you may want one — that is `--target`, repeatable,
+// defaulting to every target declared. `--profile` overrides the name, and
+// `--root` names a directory outright for a container.
 func manifestApply(args []string) error {
-	const use = "manifest apply <agent>:<profile>|<agent> --root <dir> [--dry-run] [--strict] [--yes] [--manifest -] <manifest.yaml>"
+	const use = "manifest apply <manifest.yaml> (--target <runtime>... | --all-targets) [--profile <name>] [--root <dir>] [--dry-run] [--strict] [--yes]"
 	fs := flagSet("manifest")
 	dryRun := fs.Bool("dry-run", false, "run the resolution phase and print it; touch nothing")
 	strict := fs.Bool("strict", false, "promote every degradation warning (§7.2, §8) to an error")
 	yes := fs.Bool("yes", false, "materialize into the agent's real configuration without asking")
 	fs.BoolVar(yes, "y", false, "shorthand for --yes")
 	manifestFlag := fs.String("manifest", "", `manifest path, or "-" to read it from stdin`)
-	rootFlag := fs.String("root", "", "materialize into this directory instead of a profile's (§33.2)")
+	profileFlag := fs.String("profile", "", "materialize into this profile instead of the manifest's own name")
+	rootFlag := fs.String("root", "", "materialize into this directory outright; needs exactly one --target (§33.2)")
+	allTargets := fs.Bool("all-targets", false, "materialize for every target the manifest declares")
+	var targets stringList
+	fs.Var(&targets, "target", "runtime to materialize for; repeatable, and required unless --all-targets")
 
-	stop, pos, err := parsePositionals(fs, args, use, 2)
+	stop, pos, err := parsePositionals(fs, args, use, 1)
 	if stop {
-		return err
-	}
-	if len(pos) == 0 {
-		return fmt.Errorf("usage: ap %s", use)
-	}
-
-	// Default is allowed here and gated at materialization, not now: the
-	// resolution phase writes nothing to gate.
-	tgt, err := resolveTarget(pos[0], *rootFlag, "apply")
-	if err != nil {
 		return err
 	}
 
 	var ref string
-	if len(pos) > 1 {
-		ref = pos[1]
+	if len(pos) > 0 {
+		ref = pos[0]
 	}
 	switch {
 	case ref == "" && *manifestFlag == "":
 		return fmt.Errorf("usage: ap %s", use)
 	case ref != "" && *manifestFlag != "":
 		return fmt.Errorf("name the manifest once: a path or --manifest, not both")
-	}
-
-	// Ask BEFORE doing any work. The question is whether ap may touch this
-	// root at all, and it does not depend on the manifest resolving — asking
-	// after a long fetch would spend the user's time on a run they were about
-	// to decline.
-	if !*dryRun {
-		if err := tgt.gate(*yes); err != nil {
-			return err
-		}
 	}
 
 	path := ref
@@ -90,11 +79,48 @@ func manifestApply(args []string) error {
 		path = p
 	}
 
-	res, resolved, fetched, reports, err := resolvePhase(path, tgt.Agent.Name, *strict, tgt.Name != "")
+	name, declared, err := schema.Identity(path)
 	if err != nil {
 		return err
 	}
-	if *dryRun {
+	if *profileFlag != "" {
+		name = *profileFlag
+	}
+	chosen, err := chooseTargets(declared, targets, *allTargets)
+	if err != nil {
+		return err
+	}
+
+	roots, err := applyRoots(chosen, name, *rootFlag)
+	if err != nil {
+		return err
+	}
+
+	// Ask BEFORE doing any work, and ONCE for the whole run. The question is
+	// whether ap may touch these roots at all; it does not depend on the
+	// manifest resolving, and asking after a long fetch would spend the user's
+	// time on a run they were about to decline.
+	if !*dryRun {
+		if err := gateRoots(roots, *yes); err != nil {
+			return err
+		}
+	}
+
+	for _, tgt := range roots {
+		if err := applyOne(path, tgt, *strict, *dryRun); err != nil {
+			return fmt.Errorf("%s: %w", tgt.Label(), err)
+		}
+	}
+	return nil
+}
+
+// applyOne is one target's whole pass: resolve, fetch, materialize, report.
+func applyOne(path string, tgt target, strict, dryRun bool) error {
+	res, resolved, fetched, reports, err := resolvePhase(path, tgt.Agent.Name, strict, tgt.Name != "")
+	if err != nil {
+		return err
+	}
+	if dryRun {
 		return printResolution(os.Stdout, res, resolved, tgt.Label(), fetched, reports)
 	}
 
@@ -109,6 +135,132 @@ func manifestApply(args []string) error {
 		return err
 	}
 	return printApplied(os.Stdout, res, tgt, applied, reports)
+}
+
+// chooseTargets narrows the manifest's declared targets to what was asked for,
+// and one of the two ways of asking is REQUIRED.
+//
+// Applying a four-target manifest builds four profiles and fetches for each.
+// Doing that because the flag was omitted is the kind of implicit multiplication
+// this program refuses everywhere else — there is no active profile, and every
+// command names what it acts on.
+//
+// Requiring it even when the manifest declares only ONE target is deliberate,
+// and it is not ceremony. A manifest that targets claude today can gain three
+// tomorrow, and a script that never named its runtime would quietly start
+// creating four profiles on somebody's laptop. The flag is what makes that
+// change visible instead of silent.
+func chooseTargets(declared []string, want stringList, all bool) ([]string, error) {
+	switch {
+	case all && len(want) > 0:
+		return nil, fmt.Errorf("--all-targets already names every target; drop --target %s", strings.Join(want, " --target "))
+	case all:
+		return declared, nil
+	case len(want) == 0:
+		return nil, fmt.Errorf(
+			"name the runtimes to materialize for: --target %s, or --all-targets for all %d",
+			strings.Join(declared, " | --target "), len(declared))
+	}
+	// A --target the manifest does not declare is an ERROR naming both lists.
+	// Silently materializing nothing for it would look like success, and the
+	// overwhelmingly likely cause is a typo in a runtime name.
+	for _, w := range want {
+		if !slices.Contains(declared, w) {
+			return nil, fmt.Errorf("the manifest does not target %q; it targets %s",
+				w, strings.Join(declared, ", "))
+		}
+	}
+	return want, nil
+}
+
+// applyRoots pairs each chosen runtime with the directory it materializes into.
+func applyRoots(chosen []string, name, rootFlag string) ([]target, error) {
+	if rootFlag != "" {
+		// One directory holds one runtime's configuration. Writing two into it
+		// would have them overwrite each other's files with no way to say so.
+		if len(chosen) != 1 {
+			return nil, fmt.Errorf(
+				"--root names one directory, and one directory holds one runtime's configuration; "+
+					"this run has %d (%s), so name one with --target",
+				len(chosen), strings.Join(chosen, ", "))
+		}
+		tgt, err := resolveTarget(chosen[0], rootFlag, "apply")
+		if err != nil {
+			return nil, err
+		}
+		return []target{tgt}, nil
+	}
+
+	out := make([]target, 0, len(chosen))
+	for _, runtime := range chosen {
+		agent, ok := agentreg.Lookup(runtime)
+		if !ok {
+			return nil, fmt.Errorf("the manifest targets %q, which is not a runtime ap supports: %s",
+				runtime, strings.Join(agentreg.Names(), ", "))
+		}
+		if err := agentreg.ValidNameAllowDefault(name); err != nil {
+			return nil, fmt.Errorf("the manifest's name %q cannot be a profile: %w", name, err)
+		}
+		out = append(out, target{Agent: agent, Name: name, Root: profile.Dir(agent, name)})
+	}
+	return out, nil
+}
+
+// gateRoots asks once for the whole run.
+//
+// `name: default` reaches the configuration the agent already uses, and ap
+// cannot undo a write there by deleting a profile — the manifest may have come
+// from a repository somebody else wrote, and it is the field that decides this.
+// Asking per target would ask four times for one decision.
+func gateRoots(roots []target, yes bool) error {
+	var real []target
+	for _, t := range roots {
+		if t.Name == agentreg.Default {
+			real = append(real, t)
+		}
+	}
+	if len(real) == 0 || yes {
+		return nil
+	}
+	if !stdinIsTerminal() {
+		return fmt.Errorf(
+			"this manifest is named %q, so it materializes into the real configuration these agents already use (%s), "+
+				"and there is no terminal to confirm on; pass --yes",
+			agentreg.Default, realRootList(real))
+	}
+	fmt.Fprintf(os.Stderr, "\nThis manifest is named %q, so it materializes into the real configuration these agents already use:\n",
+		agentreg.Default)
+	for _, t := range real {
+		fmt.Fprintf(os.Stderr, "  %-9s %s\n", t.Agent.Name, t.Root)
+	}
+	fmt.Fprintln(os.Stderr, "These are not profiles. ap cannot undo it.")
+	if !askYes("materialize into them?") {
+		return errors.New("cancelled — nothing was written")
+	}
+	return nil
+}
+
+// realRootList names each agent with its RESOLVED absolute path. The path is
+// the only thing distinguishing the two blast radii on one screen, and the
+// agent name is what makes a four-target run legible.
+func realRootList(real []target) string {
+	parts := make([]string, 0, len(real))
+	for _, t := range real {
+		parts = append(parts, t.Agent.Name+" "+t.Root)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// stringList is a repeatable string flag. flag has no such type, and the
+// alternative — a comma-separated value — would make a runtime name containing
+// a comma unrepresentable and silently split it.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ",") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
 }
 
 // resolvePhase is §37.1 steps 1-14: compose, resolve inputs, preflight, fetch

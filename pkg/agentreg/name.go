@@ -48,3 +48,21 @@ func ValidName(s string) error {
 	}
 	return nil
 }
+
+// ValidNameAllowDefault is ValidName with the sentinel permitted.
+//
+// It exists for one caller: a manifest's own `name`, which addresses the
+// profile it defines and may legitimately be "default" — that is how a manifest
+// provisions the configuration the agent already uses. Everything a write needs
+// to refuse about the sentinel is enforced where it matters instead, by the
+// gate that displays the resolved absolute path and asks.
+//
+// Every OTHER rule still runs, and one of them is why this function is not
+// simply skipped: a manifest may come from a repository somebody else wrote,
+// so `name: ../../../.ssh` is a path traversal with an author behind it.
+func ValidNameAllowDefault(s string) error {
+	if s == Default {
+		return nil
+	}
+	return ValidName(s)
+}

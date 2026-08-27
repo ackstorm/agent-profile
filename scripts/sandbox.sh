@@ -344,7 +344,7 @@ if quiet "$AP" install claude:plan skill pdf --local "$SRC"; then
         bad export "the exported manifest does not mention the installed skill"
     elif ! quiet "$AP" manifest render "$SANDBOX/exported.yaml"; then
         bad export "the exported manifest does not compose for its own targets"
-    elif quiet "$AP" manifest apply claude:copy "$SANDBOX/exported.yaml" &&
+    elif quiet "$AP" manifest apply "$SANDBOX/exported.yaml" --target claude --profile copy &&
          cmp -s "$PROF/skills/pdf/SKILL.md" \
                 "$HOME/.local/share/agent-profile/profiles/claude/copy/skills/pdf/SKILL.md"; then
         pass export "a hand-built root exports to a manifest that re-applies"
@@ -355,12 +355,13 @@ else
     bad export "ap install failed before export"
 fi
 
-# A pipe is not consent. `<agent>:default` is the real configuration and ap
-# cannot undo a write there, so off a terminal it refuses — checked with
-# stdinIsTerminal, never with the answer to a question nobody was asked. And
-# NOTHING is created for the sentinel: no profile directory, no shim, no
-# wrapper. Link especially must never run there, since the shared credential IS
-# the file in that directory.
+# A pipe is not consent. A manifest NAMED "default" reaches the real
+# configuration and ap cannot undo a write there — and that field is decided by
+# whoever wrote the manifest, which may not be you. Off a terminal it refuses,
+# checked with stdinIsTerminal, never with the answer to a question nobody was
+# asked. And NOTHING is created for the sentinel: no profile directory, no shim,
+# no wrapper. Link especially must never run there, since the shared credential
+# IS the file in that directory.
 cat >"$SANDBOX/default.yaml" <<YAML
 version: "1"
 name: default
@@ -373,7 +374,7 @@ skills:
         path: $SRC
 YAML
 rm -rf "$HOME/.claude/skills/pdf"
-out=$(echo y | "$AP" manifest apply claude:default "$SANDBOX/default.yaml" 2>&1) && rc=0 || rc=1
+out=$(echo y | "$AP" manifest apply "$SANDBOX/default.yaml" --target claude 2>&1) && rc=0 || rc=1
 # The refusal must be THE GATE's, not any other failure. A check that accepts
 # a non-zero exit would stay green if the manifest simply stopped parsing.
 if [ "$rc" = 0 ]; then

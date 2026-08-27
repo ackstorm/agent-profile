@@ -3,7 +3,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -19,13 +18,7 @@ import (
 // file plus the contributed keys for a merged one. A user asking "what is in
 // this profile" and a user asking "what happens if I remove this" are looking
 // at the same line.
-func listResources(ref, rootFlag string, fs *flag.FlagSet, raw bool) error {
-	if stop, err := parse(fs, fs.Args()[1:]); stop {
-		return err
-	}
-	if extra := fs.Args(); len(extra) > 0 {
-		return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [--root <dir>] [<agent>[:<profile>]]", extra[0])
-	}
+func listResources(ref, rootFlag string, raw bool) error {
 	tgt, err := resolveTarget(ref, rootFlag, "list")
 	if err != nil {
 		return err

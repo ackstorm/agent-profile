@@ -97,16 +97,34 @@ func commonKeysOnly(block *Node) *Node {
 // target a manifest declares, and that requires reading the list before any
 // one runtime is chosen.
 func Targets(path string) ([]string, error) {
+	_, targets, err := Identity(path)
+	return targets, err
+}
+
+// Identity reads what a manifest calls ITSELF: its profile name and the
+// runtimes it declares.
+//
+// Both are addressing information, and reading them here is what lets apply
+// take a manifest alone. A manifest is a profile's definition — `name` is that
+// profile's name, `targets` are the runtimes it can be materialized for — so
+// restating either on the command line is asking the author to repeat their own
+// document.
+//
+// This is NOT the root being inferred from the environment, which §33.2
+// forbids: it comes from the input the user named. What the environment still
+// cannot supply is which profiles exist or which one is "current" — there is
+// no active profile, and there is no default manifest location.
+func Identity(path string) (name string, targets []string, err error) {
 	tree, _, err := Load(path)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	p, err := Decode(tree)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if p.IsBase() {
-		return nil, fmt.Errorf("profile %q declares no targets — it is a base profile", p.Name)
+		return "", nil, fmt.Errorf("profile %q declares no targets — it is a base profile, so it is extended rather than applied", p.Name)
 	}
-	return p.Targets, nil
+	return p.Name, p.Targets, nil
 }

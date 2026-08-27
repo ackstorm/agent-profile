@@ -55,6 +55,17 @@ func resolveTarget(subject, rootFlag, verb string) (target, error) {
 
 	if rootFlag == "" {
 		if !qualified {
+			// Handing one of these a manifest path is the obvious slip, and it
+			// used to be answered with "needs a root" while staring at
+			// something plainly a path. These verbs have no manifest to read a
+			// profile name out of — that is why they take a reference and
+			// `ap manifest apply` does not — so say exactly that.
+			if looksLikeAPath(subject) {
+				return target{}, fmt.Errorf(
+					"%q looks like a manifest, and %s takes the root first: `ap %s <agent>:<profile> ...`"+
+						"\n(to apply a whole manifest, that is `ap manifest apply %s`, which reads the profile name from the manifest itself)",
+					subject, verb, verb, subject)
+			}
 			return target{}, fmt.Errorf(
 				"%s needs a root: either <agent>:<profile>, or an agent name with --root <dir>", verb)
 		}
@@ -98,4 +109,16 @@ func (t target) gate(yes bool) error {
 		return nil
 	}
 	return gateRealConfig(t.Agent, t.Name, t.Root, yes)
+}
+
+// looksLikeAPath is a guess used ONLY to improve an error that has already been
+// decided. It never admits anything: an agent name carries no separator and no
+// extension, so a false positive costs a differently-worded refusal and never a
+// wrong root.
+func looksLikeAPath(s string) bool {
+	if strings.ContainsAny(s, "/\\") || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "~") {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(s))
+	return ext == ".yaml" || ext == ".yml"
 }

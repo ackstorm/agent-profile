@@ -75,7 +75,7 @@ mcps:
 	// Way in #1: the binary.
 	viaCLI := filepath.Join(t.TempDir(), "cli-root")
 	out, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude", "--root", viaCLI, path})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--root", viaCLI})
 	})
 	if err != nil {
 		t.Fatalf("the CLI failed: %v\n%s", err, out)
@@ -173,25 +173,24 @@ func treeOf(t *testing.T, root string) map[string]string {
 	return out
 }
 
-// §33.2: a root is a parameter. Two spellings answering the same question with
-// a silent precedence rule is how the wrong directory gets written.
-func TestARootIsNamedOnce(t *testing.T) {
+// §33.2 with the manifest addressing its own profile: --root still names a
+// directory outright, and one directory holds ONE runtime's configuration.
+// Writing two into it would have them overwrite each other with no way to say
+// so, and a silent pick would be the wrong one half the time.
+func TestARootHoldsExactlyOneRuntime(t *testing.T) {
 	dir := t.TempDir()
-	err := dispatch([]string{"manifest", "apply", "claude:plan", "--root", dir, "/nonexistent.yaml"})
-	if err == nil {
-		t.Fatal("a reference and --root were both accepted")
+	path := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(path, []byte("version: \"1\"\nname: plan\ntargets:\n  - claude\n  - codex\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range []string{"claude:plan", dir} {
+	err := dispatch([]string{"manifest", "apply", path, "--root", t.TempDir()})
+	if err == nil {
+		t.Fatal("--root accepted a manifest with two targets")
+	}
+	for _, want := range []string{"--target", "claude", "codex"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not name %q: %v", want, err)
 		}
-	}
-
-	// And neither is not a default: nothing may fall back to a directory
-	// nobody named.
-	err = dispatch([]string{"manifest", "apply", "claude", "/nonexistent.yaml"})
-	if err == nil || !strings.Contains(err.Error(), "--root") {
-		t.Fatalf("a bare agent name with no --root was not refused with a way forward: %v", err)
 	}
 }
 
@@ -219,7 +218,7 @@ func TestApplyWorksWithNoHomeAndNoProfileNamespace(t *testing.T) {
 
 	root := filepath.Join(t.TempDir(), "config")
 	out, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude", "--root", root, path})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--root", root})
 	})
 	if err != nil {
 		t.Fatalf("apply with no HOME failed: %v\n%s", err, out)
@@ -265,5 +264,96 @@ func TestStdinIsNotATerminalJustBecauseItIsACharacterDevice(t *testing.T) {
 		if got {
 			t.Errorf("%s was reported as a terminal", dev)
 		}
+	}
+}
+
+// install and uninstall have no manifest to read a name from, so they still
+// take <agent>:<profile>. Handing one a manifest path is the obvious slip, and
+// "needs a root" answered it while staring at something plainly a path.
+func TestNamingAManifestWhereAProfileGoesSaysWhatToType(t *testing.T) {
+	err := dispatch([]string{"install", "./examples/agent-profiles/plan.yaml", "skill", "x"})
+	if err == nil {
+		t.Fatal("a manifest was accepted where the profile reference goes")
+	}
+	for _, want := range []string{"takes the root first", "<agent>:<profile>"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not say %q: %v", want, err)
+		}
+	}
+}
+
+// `ap list claude:plan --raw` printed the padded listing, and
+// `ap list claude --root <dir>` did not reach the ledger at all: both flags
+// were read BEFORE the re-parse that picks them up after the subject.
+func TestListReadsItsFlagsOnEitherSideOfTheSubject(t *testing.T) {
+	repo := seedRepo(t, map[string]string{"skills/pdf/SKILL.md": "# pdf"})
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if out, err := captureStdout(t, func() error {
+		return dispatch([]string{"install", "claude:plan", "skill", "pdf", "--git", repo, "--subpath", "skills/pdf"})
+	}); err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	root := filepath.Join(data, "agent-profile", "profiles", "claude", "plan")
+
+	// --raw AFTER the reference must be honoured, exactly as before it.
+	for _, args := range [][]string{
+		{"list", "claude:plan", "--raw"},
+		{"list", "--raw", "claude:plan"},
+	} {
+		out, err := captureStdout(t, func() error { return dispatch(args) })
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if strings.Contains(out, "root ") || !strings.Contains(out, "skill\tpdf") {
+			t.Errorf("%v printed the human listing:\n%s", args, out)
+		}
+	}
+
+	// --root AFTER the agent name must reach the ledger rather than falling
+	// through to the ordinary agent tree.
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"list", "claude", "--root", root})
+	})
+	if err != nil {
+		t.Fatalf("list --root: %v", err)
+	}
+	if !strings.Contains(out, "pdf") {
+		t.Errorf("--root after the agent name was ignored:\n%s", out)
+	}
+}
+
+// A manifest that targets claude today can gain three tomorrow. A script that
+// never named its runtime would quietly start creating four profiles, so
+// naming them is required — even when the manifest declares only one, which is
+// exactly the case that would drift.
+func TestApplyRequiresTheRuntimesToBeNamed(t *testing.T) {
+	dir := t.TempDir()
+	one := filepath.Join(dir, "one.yaml")
+	if err := os.WriteFile(one, []byte("version: \"1\"\nname: plan\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := dispatch([]string{"manifest", "apply", one, "--dry-run"})
+	if err == nil {
+		t.Fatal("apply ran without naming a runtime")
+	}
+	// The refusal has to carry both ways forward, and the declared target, or
+	// the user has to go read the manifest to answer it.
+	for _, want := range []string{"--target claude", "--all-targets"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not offer %q: %v", want, err)
+		}
+	}
+
+	// Both at once is a contradiction, not a precedence puzzle.
+	err = dispatch([]string{"manifest", "apply", one, "--all-targets", "--target", "claude", "--dry-run"})
+	if err == nil || !strings.Contains(err.Error(), "--all-targets") {
+		t.Fatalf("--all-targets and --target together were not refused: %v", err)
 	}
 }

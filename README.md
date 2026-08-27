@@ -31,8 +31,6 @@ inside an `exec` profile that never installed the tools it used.
 
 ```bash
 ap create claude:plan                               # new, empty profile
-ap run claude:plan plugin marketplace add owner/repo # a marketplace of its own
-ap run claude:plan plugin install caveman@caveman   # populate it
 ap run claude:plan                                  # work in it
 claude:plan                                         # same thing, typed directly
 ap create claude:review --from plan                 # clone it
@@ -41,45 +39,94 @@ ap variant claude:review:opus -- --model='claude-opus-5[1m]' --effort=xhigh
 ap run claude:review:opus                           # those arguments, then yours
 ap variant claude:review:on -- '/code-review {}'    # {} = your argument, at run time
 ap run claude:review:on src/auth.go                 # runs "/code-review src/auth.go"
-ap env claude:plan npx skills add <src> --skill <s> -g -a claude-code
-ap env codex:plan env | grep CODEX                  # what a command inherits
 ap list                                             # everything, as a tree
 ap list --raw | cut -f1                             # the same, for scripts
+```
+
+Filling a profile is **declared**, not scripted — one declaration works on all
+four agents, and `ap` records every file it wrote so it can take it back:
+
+```bash
+ap install claude:plan skill brainstorming \
+  --git https://github.com/obra/superpowers.git --subpath skills/brainstorming
+ap manifest apply ./agent-profile.yaml --target claude   # a whole profile at once
+ap list claude:plan                                 # what this profile holds
+ap uninstall claude:plan skill brainstorming --dry-run
+ap manifest export claude:plan > team-plan.yaml     # hand it to someone else
+```
+
+Anything that installs itself still works through `ap env`, which sets the
+profile's variable for one command and nothing else:
+
+```bash
+ap env claude:plan npx skills add <src> --skill <s> -g -a claude-code
+ap run claude:plan plugin install ponytail@ponytail  # passthrough to the agent
+ap env codex:plan env | grep CODEX                   # what a command inherits
 ```
 
 There is **no active profile**. Every command names one. A bare `claude` in any
 shell still uses your normal `~/.claude` — that boundary is the point: you can
 never install something into a profile you only thought you were in.
-`<agent>:default` is the one deliberate exception, and it stays read-only for
-exactly that reason — see "`default`" below.
+`<agent>:default` is the one deliberate exception: it names the config you
+already had, and every command that writes to it says so and asks first — see
+"`default`" below.
 
 ## Commands
+
+Two groups, and the split is the architecture's: some commands manage
+**profiles** — create one, launch it, throw it away — and some manage what is
+**inside** one.
+
+### Profiles
 
 | Command | What it does |
 |---|---|
 | `ap list [--raw] [agent]` | your profiles and their variants, as a tree — always includes `default`, and every supported agent. `--raw` prints the same listing tab-separated, for scripts |
-| `ap sessions [--max N] [--here] [agent[:profile]]` | list recent sessions across all agents and profiles, ordered newest first |
-| `ap resume [<id>] [args...]` | resume a session by full ID or prefix, changing to its directory first; when no ID is given on a terminal, prompts with a numbered list |
 | `ap create [--from <profile>] [--only-settings <key>]... [--copy-instructions] <agent>:<profile>` | create it and a wrapper so it is a command you can type, optionally cloning one (`--from default` clones your real config, `--only-settings` narrows that to a few keys of one file) and seeding it with your global instructions file |
 | `ap variant [--yes] <agent>:<profile>:<variant> -- <args...>` | name a set of launch arguments over an existing profile — same configuration, a different way to start it. May leave `{}` where your run-time arguments should be substituted, which is how a variant becomes a prompt prefix. Over a variant that exists it asks first, showing both argument lists; `--yes` answers |
-| `ap list [--raw] <agent>:<profile>` | what that profile has INSTALLED, read from its ledger — kind, name and what each resource wrote. Not what a manifest says: a manifest is an input, and applying one is what put these here |
-| `ap install <agent>:<profile> <kind> <name> [locator]` | install one skill, plugin or artifact with no manifest at all, from `--git`, `--local` or `--url` (with `--digest`). A private source takes `--auth-secret-env VAR` or `--auth-secret-file <path>`; only the binding is recorded, never the value |
-| `ap uninstall [--dry-run] <agent>:<profile> <kind> <name>` | remove one capability, bounded by the ledger. A file you edited is kept and reported; a file this profile only merged into loses exactly the keys it contributed. Safe against `default` for that reason. `--dry-run` prints the same verdicts the real run acts on |
-| `ap manifest render [--target <runtime>] <manifest>` | what a manifest MEANS. With no target it composes every target it declares and prints nothing; the exit status is the contract check |
-| `ap manifest apply [--dry-run] [--strict] [--yes] <agent>:<profile> <manifest>` | materialise a whole manifest into that profile. Additive: a manifest that stops mentioning something does not remove it. `--manifest -` reads it from stdin |
-| `ap manifest export <agent>:<profile>` | the profile's ledger, back as a manifest, so an environment assembled by hand becomes portable |
-| `<agent> --root <dir>` | wherever a command takes `<agent>:<profile>`, this names the directory outright instead — for a container, where there is no `$HOME` to derive a profile namespace from. Naming both is an error |
+| `ap run <agent>:<profile>[:<variant>] [args...]` | run it; a variant's arguments come first, then yours, both passed through verbatim |
 | `ap which <agent>:<profile>[:<variant>]` | the profile directory, for editing by hand — a variant has none of its own, so it answers for the parent |
 | `ap env <agent>:<profile>[:<variant>]` | exactly which variable would be set (for reading, not for `eval`) |
 | `ap env <agent>:<profile>[:<variant>] <cmd> [args...]` | set it and run `cmd` — `env(1)`, for tools that install into the agent's config directory. `cmd` never receives a variant's arguments: those are the agent's flags |
-| `ap run <agent>:<profile>[:<variant>] [args...]` | run it; a variant's arguments come first, then yours, both passed through verbatim |
+| `ap sessions [--max N] [--here] [agent[:profile]]` | list recent sessions across all agents and profiles, ordered newest first |
+| `ap resume [<id>] [args...]` | resume a session by full ID or prefix, changing to its directory first; when no ID is given on a terminal, prompts with a numbered list |
 | `ap delete [--yes] <agent>:<profile>[:<variant>]` | remove the profile, its variants and their wrappers — including its own session history; see "What every profile shares" below. Asks first, and `--yes` is how a script answers. A variant on its own is removed without asking: it is two lines of text |
 | `ap unlink <agent>:<profile>[:<variant>]` | remove the wrapper, keep the profile or variant |
 | `ap link <agent>:<profile>[:<variant>]` | write the wrapper back |
 
+### What is inside one
+
+A capability is **declared** and `ap` materialises it natively for whichever
+agent the reference names — so one declaration works on all four. Everything it
+writes goes into a ledger in the profile, which is what makes removal possible
+at all.
+
+| Command | What it does |
+|---|---|
+| `ap list [--raw] <agent>:<profile>` | what that profile has INSTALLED, read from its ledger — kind, name, and what each resource wrote. Not what a manifest says: a manifest is an input, and applying one is what put these here |
+| `ap install <agent>:<profile> <kind> <name> [locator]` | install one skill, plugin or artifact with no manifest at all, from `--git`, `--local` or `--url` (with `--digest`). A private source takes `--auth-secret-env VAR` or `--auth-secret-file <path>`; only the binding is recorded, never the value |
+| `ap uninstall [--dry-run] <agent>:<profile> <kind> <name>` | remove one capability, bounded by the ledger. A file you edited is kept and reported; a file this profile only merged into loses exactly the keys it contributed. Safe against `default` for that reason. `--dry-run` prints the same verdicts the real run acts on |
+| `ap manifest render [--target <runtime>] <manifest>` | what a manifest MEANS, before any profile is chosen. With no target it composes every target it declares and prints nothing; the exit status is the contract check |
+| `ap manifest apply <manifest> (--target <runtime>... \| --all-targets) [--profile <name>] [--dry-run] [--strict] [--yes]` | materialise it. A manifest **is** a profile's definition, so its `name` is the profile it creates — you never restate that. Which of its declared runtimes to materialise for is **required**: `--target`, repeatable, or `--all-targets`. `--profile` lands it under a different name. Additive: a manifest that stops mentioning something does not remove it. `--manifest -` reads it from stdin |
+| `ap manifest export <agent>:<profile>` | the profile's ledger, back as a manifest, so an environment assembled by hand becomes portable |
+
+`install`, `uninstall`, `list` and `export` take `<agent>:<profile>` because
+they have no manifest to read a name from. `apply` does, which is why it does
+not ask you to repeat it — but it still makes you name the runtimes.
+
+`--root <dir>` names the directory outright instead — for a container, where
+there is no `$HOME` to derive a profile namespace from. On `apply` it needs
+exactly one `--target`, since one directory holds one runtime's configuration.
+
 Profiles live in `${XDG_DATA_HOME:-~/.local/share}/agent-profile/profiles/<agent>/<profile>/`.
 
-### Installing into a profile with something that is not the agent
+### When something wants to install itself
+
+`ap install` and `ap manifest apply` cover what can be *declared*: a skill, a
+plugin, an MCP server, a model, a file at a destination. A tool that ships its
+own installer is not that, and `ap` does not run shell commands on your behalf —
+so the escape hatch is the profile's environment, and it is the same one those
+installers already look for.
 
 Plugins go in through the agent itself, marketplace first, and both steps are
 ordinary passthrough — `ap run` hands everything after the reference to the
@@ -145,7 +192,7 @@ $ ap env claude:default env | grep -c CLAUDE_CONFIG_DIR
 
 Three things in one view: codex gets its own private variable; opencode gets the
 shim directory rather than the profile itself, which is what keeps `git` and
-`npm` out of it (see "The opencode asymmetry"); and `default` sets nothing at
+`npm` out of it (see "opencode needs a config shim"); and `default` sets nothing at
 all, because your real config is already where the agent looks.
 
 Piping works the same way, since `ap` execs rather than wrapping:
@@ -154,7 +201,7 @@ Piping works the same way, since `ap` execs rather than wrapping:
 npx skills use vercel-labs/agent-skills@web-design-guidelines | claude:plan
 ```
 
-### `default` — your real config, read-only
+### `default` — your real config, and the one root with no undo
 
 `<agent>:default` is not a profile `ap` made; it names whatever config the agent
 already uses when `ap` is not involved (`~/.claude`, `~/.codex`, `~/.pi/agent`,
@@ -166,9 +213,26 @@ It exists for two things: reaching your normal setup through the same command as
 every profile (`ap run codex:default mcp`), and starting a new profile from the
 configuration you already have (`ap create codex:work --from default`).
 
-**Read-only, always.** `ap create claude:default`, `ap delete claude:default`,
-and `ap link claude:default` all refuse — the last because there is nothing to
-link, `ap run codex:default` already reaches the real thing directly.
+**Nothing is ever created for it.** `ap create claude:default`,
+`ap delete claude:default` and `ap link claude:default` all refuse — the last
+because there is nothing to link, `ap run codex:default` already reaches the
+real thing directly.
+
+**It is no longer read-only.** `ap manifest apply`, `ap install` and
+`ap uninstall` all reach this root, because refusing them meant you could not
+manage the configuration you actually use every day. What guards it instead is
+narrower and stronger than a blanket ban:
+
+- a write **displays the resolved absolute path**, names it as your real
+  configuration, and asks once. Off a terminal it refuses — a pipe is not
+  consent, and `--yes` is how a script answers deliberately;
+- a **removal needs no gate at all**, because the ledger records every file
+  `ap` wrote and its hash. It cannot remove a file you edited and cannot touch
+  a key you added by hand, so "uninstall from my real config" is bounded by a
+  record rather than by a promise.
+
+`ap delete` still cannot undo an apply here, which is exactly why the gate
+exists and why `ap uninstall` does not need one.
 
 ### A profile is a command you can type
 
@@ -231,18 +295,18 @@ name that disables every permission prompt never becomes invisible:
 
 ```
 claude
-├─ claude:default             (the agent's own config: read-only)
+├─ claude:default             (the agent's own config — not a profile)
 ├─ claude:finops
 ├─ claude:plan
 └─ claude:review
    ├─ claude:review:ci        --dangerously-skip-permissions --model=claude-opus-5[1m] -p
    └─ claude:review:opus      --dangerously-skip-permissions --model=claude-opus-5[1m] --effort=xhigh
 codex
-└─ codex:default              (the agent's own config: read-only)
+└─ codex:default              (the agent's own config — not a profile)
 opencode
-└─ opencode:default           (the agent's own config: read-only)
+└─ opencode:default           (the agent's own config — not a profile)
 pi
-└─ pi:default                 (the agent's own config: read-only)
+└─ pi:default                 (the agent's own config — not a profile)
 ```
 
 Every reference is qualified, including a variant's, so any line is exactly what
@@ -395,23 +459,41 @@ Keep the declaration in Git and materialise it with one command:
 
 ```bash
 git clone git@github.com:company/agent-profiles.git
-ap manifest render ./agent-profiles/execute.yaml                  # does it compose?
-ap manifest apply claude:execute ./agent-profiles/execute.yaml --dry-run
-ap manifest apply claude:execute ./agent-profiles/execute.yaml
+ap manifest render ./agent-profiles/execute.yaml                    # does it compose?
+ap manifest apply ./agent-profiles/execute.yaml --target claude --dry-run
+ap manifest apply ./agent-profiles/execute.yaml --target claude    # just this one
+ap manifest apply ./agent-profiles/execute.yaml --all-targets      # all four
 ```
+
+You never name the profile: a manifest **is** a profile's definition, and its
+`name` is that profile. The file below creates `claude:execute` — or, with
+`--all-targets`, `claude:execute`, `codex:execute`, `opencode:execute` and
+`pi:execute` from one command. `--profile` renames the result.
+
+Which runtimes it goes to is the one thing you **must** say. `targets` is what a
+manifest *can* be materialised for, not what you want today — and requiring the
+flag even for a single-target manifest is what stops a script drifting when that
+manifest later gains three more.
 
 A manifest declares capabilities; ap materialises them natively per runtime:
 
 ```yaml
 version: "1"
 name: execute
-targets: [claude, codex, opencode, pi]
+targets:
+  - claude
+  - codex
+  - opencode
+  - pi
 
 marketplaces:
   superpowers:
     type: skills
     source:
-      git: { url: https://github.com/obra/superpowers.git, ref: main, subpath: skills }
+      git:
+        url: https://github.com/obra/superpowers.git
+        ref: main
+        subpath: skills
 
 skills:
   executing-plans:
@@ -425,12 +507,19 @@ mcps:
       headers:
         Authorization:
           prefix: "Bearer "
-          value_from: { secret: memory-token }
+          value_from:
+            secret: memory-token
 
 inputs:
   secrets:
-    memory-token: { env: MEMORY_TOKEN }
+    memory-token:
+      env: MEMORY_TOKEN
 ```
+
+Block mappings and block sequences only. Flow syntax (`[a, b]`, `{k: v}`),
+anchors and multi-document files are **refused by name**, not quietly
+mishandled: the subset is small so that four repositories — one of them Python —
+can agree on what a manifest means without agreeing on a YAML library.
 
 One declaration, four runtimes: the same MCP server lands in claude's
 `.claude.json`, codex's `config.toml`, opencode's `opencode.json` and pi's
@@ -471,14 +560,25 @@ how things are removed. A variant of the same name is overwritten.
 is no `$HOME` at all:
 
 ```bash
-docker run --rm -v "$PWD/config:/config" -v "$PWD:/manifest:ro" \
-  ghcr.io/ackstorm/agent-profile-hydrate \
-  manifest apply claude --root /config /manifest/agent-profile.yaml
+ap manifest apply ./agent-profile.yaml --target claude --root ./config
 ```
 
-That is the init-container shape: hydrate the volume, exit, and let the
-container that actually runs the agent read what was left behind. `make hydrate`
-builds and exercises the image.
+That is the init-container shape: hydrate a volume, exit, and let the container
+that actually runs the agent read what was left behind. It is why the executable
+checks are conditional — the agent binary, and the `npx` an stdio MCP server
+needs, live in that other container and must not be required here.
+
+`Dockerfile.hydrate` is the image for it: one binary, plus git and CA
+certificates, running as a non-root user with no `$HOME`. **It is not published
+anywhere yet** — build it yourself, and `make hydrate` exercises it headlessly:
+
+```bash
+make hydrate-image                      # agent-profile-hydrate:latest, locally
+docker run --rm --user "$(id -u):$(id -g)" -e HOME= \
+  -v "$PWD/config:/config" -v "$PWD:/manifest:ro" \
+  agent-profile-hydrate:latest \
+  manifest apply /manifest/agent-profile.yaml --target claude --root /config
+```
 
 Two limits worth knowing before you write a manifest:
 
@@ -771,8 +871,11 @@ floor, which is a security floor, not a language requirement. See CLAUDE.md.
 make verify   # fmt-check, shellcheck, vet, lint (incl. gosec), test -race, vulncheck
 make secrets  # gitleaks over the full history
 make sandbox  # home-safety checks against a throwaway home, with stub agents
+make walkthrough  # the two sequences a person types, newcomer and expert
+make examples # compose every shipped example manifest (also inside verify)
 make smoke    # the four real agents, in their own image
-make fuzz     # 60s against the path validation
+make hydrate  # the hydrator image, headless: no TTY, no $HOME, non-root
+make fuzz     # 30s each against six parsing and path-validation surfaces
 make hooks    # install a pre-push hook that runs verify
 make shell    # a shell inside the devtools image
 ```
@@ -870,10 +973,18 @@ a dead end, not a to-do: stop there rather than reaching for a wrapper.
 
 ## Deliberately out of scope
 
-- **Windows.** A non-goal, not a gap: `syscall.Exec` has no equivalent there and
-  symlinks need privileges, so supporting it would mean a second execution model
-  and a second sharing mechanism to keep correct. The `//go:build unix` tags say
-  so at compile time.
+- **Windows binaries.** Not a flat non-goal any more, and not shipped either.
+  The portable half (`pkg/`) carries no build tag and is built and vetted for
+  windows on every `make verify`, because `ackstorm/ach` imports it and ships
+  there. `ap run` on windows would use **spawn semantics** — start the child,
+  proxy its exit code — since `syscall.Exec` exists there only as a stub that
+  always fails; `internal/run/handoff_windows.go` is that path.
+
+  What keeps the binaries unpublished is four specific defects rather than a
+  general reluctance, and the first is silent: a wrapper named `claude:plan` on
+  NTFS creates an alternate data stream on a file called `claude` and reports
+  success. Full command surface or nothing — a hydration-only windows binary is
+  explicitly not the answer. See `docs/references/WINDOWS.md`.
 - **`ap use` / `ap shell` / an active profile.** A "current profile" that a bare
   `claude` would ignore is hidden state that lies to you.
 - **A separate `--from-base` flag.** `--from default` covers the same ground

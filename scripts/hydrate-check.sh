@@ -30,6 +30,13 @@ git -C "$WORK/src" \
     -c user.name=t -c user.email=t@e -c commit.gpgsign=false \
     commit --quiet -m seed
 
+sed 's/^name: hydrated$/name: default/' > "$WORK/manifest/default.yaml" <<'YAML'
+version: "1"
+name: hydrated
+targets:
+  - claude
+YAML
+
 cat > "$WORK/manifest/agent-profile.yaml" <<'YAML'
 version: "1"
 name: hydrated
@@ -98,7 +105,7 @@ else
     pass image "runs as a non-root uid ($uid) by default"
 fi
 
-if out=$(run manifest apply claude --root /config /manifest/agent-profile.yaml 2>&1); then
+if out=$(run manifest apply /manifest/agent-profile.yaml --target claude --root /config 2>&1); then
     if [ ! -f "$WORK/config/skills/pdf/SKILL.md" ] ||
        [ ! -f "$WORK/config/skills/pdf/scripts/convert.py" ]; then
         bad hydrate "the skill was not materialized: $out"
@@ -117,19 +124,20 @@ else
     bad hydrate "ap manifest apply failed in the image: $out"
 fi
 
-# The root is a parameter (§33.2). With no --root and no way to infer one, the
-# image must refuse rather than write somewhere it invented.
-if out=$(run manifest apply claude /manifest/agent-profile.yaml 2>&1); then
-    bad root "apply with no root succeeded; it wrote somewhere nobody named"
-elif printf '%s' "$out" | grep -q -- '--root'; then
-    pass root "no root named, refused with a way forward"
+# One directory holds ONE runtime's configuration. The manifest declares one
+# target here, but --root with several must refuse rather than have them
+# overwrite each other.
+if out=$(run manifest apply /manifest/agent-profile.yaml --root /config 2>&1); then
+    bad root "apply ran without naming a runtime"
+elif printf '%s' "$out" | grep -q -- '--all-targets'; then
+    pass root "the runtimes must be named, even for a one-target manifest"
 else
-    bad root "refused for some other reason than the missing root: $out"
+    bad root "refused for some other reason: $out"
 fi
 
 # Off a terminal a pipe is not consent, and that must still hold where there is
 # no terminal at all.
-if out=$(echo y | run manifest apply claude:default /manifest/agent-profile.yaml 2>&1); then
+if out=$(echo y | run manifest apply /manifest/default.yaml --target claude 2>&1); then
     bad gate "the real-config gate passed with an answer read off a pipe"
 elif printf '%s' "$out" | grep -q 'no terminal to confirm on'; then
     pass gate "no terminal, no consent"

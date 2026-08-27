@@ -178,7 +178,7 @@ func TestManifestExportOfAHandBuiltRootReApplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := captureStdout(t, func() error {
-		return dispatch([]string{"manifest", "apply", "claude:copy", path})
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--profile", "copy"})
 	})
 	if err != nil {
 		t.Fatalf("re-applying the export failed: %v\n%s\n%s", err, out, exported)

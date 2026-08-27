@@ -262,6 +262,20 @@ smoke: ## Drive the four real agent binaries inside their own container.
 	@$(MAKE) --no-print-directory build GOOS=linux GOARCH=$(SMOKE_ARCH) BIN=.gocache/smoke/ap
 	AP_SMOKE_IMAGE=$(SMOKE_IMAGE) ./scripts/smoke.sh
 
+.PHONY: walkthrough
+walkthrough: ## Run the two sequences a real person types, newcomer and expert.
+	./scripts/walkthrough.sh $(WALK)
+
+.PHONY: examples
+examples: ## Compose every shipped example manifest for every target it declares.
+	$(call in_container,_examples)
+_examples:
+	@for f in examples/agent-profiles/*.yaml; do \
+		printf '  %s ' "$$f"; \
+		go run ./cmd/ap manifest render "$$f" || exit 1; \
+		echo OK; \
+	done
+
 HYDRATE_IMAGE ?= agent-profile-hydrate:latest
 
 .PHONY: hydrate
@@ -360,9 +374,9 @@ _secrets:
 .PHONY: verify
 verify: ## Everything CI runs, in one container hop.
 	$(call in_container,_verify)
-_verify: _fmt-check _shellcheck _vet _lint _test _vulncheck _crossbuild
+_verify: _fmt-check _shellcheck _vet _lint _test _examples _vulncheck _crossbuild
 	@echo
-	@echo "verify OK — and before pushing a public change, also: make secrets smoke"
+	@echo "verify OK — and before pushing a public change, also: make secrets walkthrough smoke"
 
 ##@ Housekeeping
 
