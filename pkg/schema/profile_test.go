@@ -655,3 +655,81 @@ runtimes:
 		t.Errorf("the native declaration was lost: %+v", p.Runtimes["opencode"])
 	}
 }
+
+// mustLoad parses src and returns whatever node resulted, error or not — same
+// as every other fixture in this file, which passes a parse failure straight
+// through to Decode rather than stopping the test early. "ponytail: {}" is a
+// flow mapping this subset refuses at the parser, one line before decode ever
+// sees it; the test only needs SOME error to come back.
+func mustLoad(t *testing.T, src string) *Node {
+	t.Helper()
+	n, _ := ParseYAML([]byte(src))
+	return n
+}
+
+func decodeOrFail(t *testing.T, src string) Profile {
+	t.Helper()
+	p, err := Decode(mustLoad(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestARuntimeNativePluginDecodesItsPackage(t *testing.T) {
+	src := `version: "1"
+name: p
+targets:
+  - pi
+runtimes:
+  pi:
+    plugins:
+      ponytail:
+        package: "git:github.com/DietrichGebert/ponytail"
+`
+	p := decodeOrFail(t, src)
+	got := p.Runtimes["pi"].Plugins["ponytail"]
+	if got.Package != "git:github.com/DietrichGebert/ponytail" {
+		t.Errorf("package = %q", got.Package)
+	}
+	if !got.Enabled {
+		t.Error("a native plugin defaults to disabled; every other resource defaults to enabled")
+	}
+}
+
+// enabled: false is how one runtime opts OUT of a plugin the root declares.
+// It needs no package, because nothing is materialized for it.
+func TestADisabledNativePluginNeedsNoPackage(t *testing.T) {
+	src := `version: "1"
+name: p
+targets:
+  - pi
+runtimes:
+  pi:
+    plugins:
+      ponytail:
+        enabled: false
+`
+	p := decodeOrFail(t, src)
+	if got := p.Runtimes["pi"].Plugins["ponytail"]; got.Enabled {
+		t.Error("enabled: false was not read")
+	}
+}
+
+// An enabled entry with no locator is refused, exactly as §22 refuses one for a
+// common resource. Materializing nothing while reporting success is the failure
+// this prevents.
+func TestAnEnabledNativePluginNeedsAPackage(t *testing.T) {
+	src := `version: "1"
+name: p
+targets:
+  - pi
+runtimes:
+  pi:
+    plugins:
+      ponytail: {}
+`
+	if _, err := Decode(mustLoad(t, src)); err == nil {
+		t.Fatal("an enabled native plugin with no package was accepted")
+	}
+}

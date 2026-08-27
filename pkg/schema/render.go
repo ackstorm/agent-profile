@@ -357,7 +357,13 @@ func (w *yw) runtimeBlock(indent int, r Runtime) {
 		w.key(indent, "plugins")
 		for _, k := range sortedKeys(r.Plugins) {
 			w.key(indent+1, k)
-			w.node(indent+2, r.Plugins[k])
+			np := r.Plugins[k]
+			if !np.Enabled {
+				w.boolField(indent+2, np.Enabled)
+			}
+			if np.Package != "" {
+				w.scalar(indent+2, "package", np.Package)
+			}
 		}
 	}
 	if len(r.Environment) > 0 {
@@ -369,43 +375,6 @@ func (w *yw) runtimeBlock(indent int, r Runtime) {
 			w.list(indent+1, k, r.Variants[k])
 		}
 	}
-}
-
-// node walks a raw *Node — used only for runtimes.*.plugins, which §24 keeps
-// adapter-owned and unvalidated. It has no schema to key off, so a mapping's
-// keys are sorted rather than trusted for determinism, same as everywhere
-// else in Render.
-func (w *yw) node(indent int, n *Node) {
-	if n == nil {
-		return
-	}
-	switch n.Kind {
-	case Mapping:
-		keys := append([]string(nil), n.Keys...)
-		sort.Strings(keys)
-		for _, k := range keys {
-			c := n.Map[k]
-			if c.Kind == Mapping || c.Kind == Sequence {
-				w.key(indent, k)
-				w.node(indent+1, c)
-				continue
-			}
-			w.scalar(indent, k, scalarText(c))
-		}
-	case Sequence:
-		for _, e := range n.Seq {
-			w.writeln(indent, "- "+quoteIfNeeded(scalarText(e)))
-		}
-	default:
-		w.writeln(indent, quoteIfNeeded(scalarText(n)))
-	}
-}
-
-func scalarText(n *Node) string {
-	if n.Kind == Null {
-		return "null"
-	}
-	return n.Str
 }
 
 // quoteIfNeeded quotes a value that would otherwise be misread on a later
