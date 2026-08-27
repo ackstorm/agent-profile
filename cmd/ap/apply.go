@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -124,6 +125,14 @@ func applyOne(path string, tgt target, strict, dryRun bool) error {
 		return printResolution(os.Stdout, res, resolved, tgt.Label(), fetched, reports)
 	}
 
+	rc := &receipt{}
+	if err := tgt.provision(rc); err != nil {
+		return err
+	}
+	if err := applyVariants(tgt, res.Profile, rc); err != nil {
+		return err
+	}
+
 	adapter, err := hydrate.AdapterFor(tgt.Agent)
 	if err != nil {
 		return err
@@ -134,7 +143,41 @@ func applyOne(path string, tgt target, strict, dryRun bool) error {
 	if err != nil {
 		return err
 	}
-	return printApplied(os.Stdout, res, tgt, applied, reports)
+	return printApplied(os.Stdout, res, tgt, applied, reports, rc)
+}
+
+// applyVariants records the manifest's launch variants and links a wrapper for
+// each, so `claude:plan:brainstorm` is a command the moment the manifest that
+// declared one is applied. Without this, `runtimes.<rt>.variants` parsed,
+// rendered, and then did nothing — the §8 silent drop, in ap's own hand.
+//
+// Not hydrate's work, deliberately. The variant store is a SIBLING of the
+// profiles root and lives outside the configuration directory, because a
+// profile directory belongs to the agent and ap's own metadata is a foreign
+// file in someone else's house. A literal --root therefore has nothing to write
+// to: its variants would land in whatever data directory the container happened
+// to have, and an init container has no launcher to read them back.
+//
+// Replaces without asking. A manifest is a declaration the user named on the
+// command line, applying it twice has to converge, and --all-targets would
+// otherwise stop to ask once per variant per runtime. `ap variant` keeps its
+// confirmation because there the arguments are typed, and the thing being
+// overwritten is not on screen.
+func applyVariants(tgt target, p schema.Profile, rc *receipt) error {
+	if tgt.Name == "" {
+		return nil
+	}
+	rt, ok := p.Runtimes[tgt.Agent.Name]
+	if !ok || len(rt.Variants) == 0 {
+		return nil
+	}
+	for _, v := range slices.Sorted(maps.Keys(rt.Variants)) {
+		if err := profile.WriteVariant(tgt.Agent, tgt.Name, v, rt.Variants[v], true); err != nil {
+			return fmt.Errorf("variant %q: %w", v, err)
+		}
+		linkWrapper(tgt.Agent.Name+":"+tgt.Name+":"+v, rc)
+	}
+	return nil
 }
 
 // chooseTargets narrows the manifest's declared targets to what was asked for,
@@ -355,11 +398,18 @@ func gateRealConfig(agent agentreg.Agent, name, root string, yes bool) error {
 // label. Every overwrite appears, because §33 requires it and because the
 // user's evidence that apply did not quietly eat something is this list.
 func printApplied(w io.Writer, res *schema.Resolution, tgt target,
-	applied hydrate.Result, reports []source.Report,
+	applied hydrate.Result, reports []source.Report, rc *receipt,
 ) error {
 	var b strings.Builder
 	fmt.Fprintln(&b, tgt.Label())
 	fmt.Fprintf(&b, "  %-10s %s\n", "root", tgt.Root)
+	// What provisioning did, in the same column as root: the shared credential
+	// and the wrapper are the two things a user goes looking for when the
+	// profile turns out not to be usable, so they belong above the file list
+	// rather than after it.
+	for _, row := range rc.rows {
+		fmt.Fprintf(&b, "  %-10s %s\n", row[0], row[1])
+	}
 	for _, rep := range reports {
 		fmt.Fprintf(&b, "  ✓ %-10s %s\n", rep.Resource, rep.Text)
 	}
@@ -374,6 +424,11 @@ func printApplied(w io.Writer, res *schema.Resolution, tgt target,
 		fmt.Fprintln(&b, "  ! warning:", warn.Text)
 	}
 	for _, warn := range applied.Warnings {
+		fmt.Fprintln(&b, "  ! warning:", warn)
+	}
+	// A share that could not be linked is exactly the case where the profile
+	// looks finished and cannot log in. Reported here, never swallowed.
+	for _, warn := range rc.warns {
 		fmt.Fprintln(&b, "  ! warning:", warn)
 	}
 	fmt.Fprintf(&b, "\n  %d file(s) written; the ledger records what landed.\n", len(applied.Changes))

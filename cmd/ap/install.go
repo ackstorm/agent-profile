@@ -84,6 +84,11 @@ func cmdInstall(args []string) error {
 		return err
 	}
 
+	rc := &receipt{}
+	if err := tgt.provision(rc); err != nil {
+		return err
+	}
+
 	adapter, err := hydrate.AdapterFor(tgt.Agent)
 	if err != nil {
 		return err
@@ -94,7 +99,7 @@ func cmdInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	return printApplied(os.Stdout, res, tgt, applied, reports)
+	return printApplied(os.Stdout, res, tgt, applied, reports, rc)
 }
 
 // checkInstallKind refuses, by name, the two things v1 deliberately does not do

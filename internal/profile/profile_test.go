@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ackstorm/agent-profile/pkg/agentreg"
@@ -105,8 +106,15 @@ func TestCreateRejectsExisting(t *testing.T) {
 	if _, err := Create(a, "plan"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Create(a, "plan"); err == nil {
-		t.Error("second Create = nil error, want already-exists error")
+	_, err := Create(a, "plan")
+	if err == nil {
+		t.Fatal("second Create = nil error, want already-exists error")
+	}
+	// And it names the way forward. `ap create` on an existing profile is
+	// usually someone after its wrapper — a profile `ap manifest apply` built
+	// before apply provisioned one — and a bare refusal stranded them.
+	if !strings.Contains(err.Error(), "ap link claude:plan") {
+		t.Errorf("the refusal does not name `ap link`: %v", err)
 	}
 }
 
