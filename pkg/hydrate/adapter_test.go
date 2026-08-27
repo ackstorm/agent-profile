@@ -63,6 +63,31 @@ func TestCodexSkillsLandInsideItsConfigDir(t *testing.T) {
 	}
 }
 
+// Measured, not read: `pi install git:github.com/DietrichGebert/ponytail`
+// against a throwaway PI_CODING_AGENT_DIR left settings.json holding exactly
+// {"packages":["git:github.com/DietrichGebert/ponytail"]}.
+func TestPiDeclaresPackagesInItsSettings(t *testing.T) {
+	a, _ := agentreg.Lookup("pi")
+	ad, _ := AdapterFor(a)
+	rel, key, ok := ad.PackageTarget()
+	if !ok || rel != "settings.json" || key != "packages" {
+		t.Errorf("pi PackageTarget = %q %q %v", rel, key, ok)
+	}
+}
+
+// claude and codex declare plugins through a marketplace, not a package list.
+// Inventing a key for them would write a file neither reads (§8: warn, never
+// invent).
+func TestClaudeAndCodexHaveNoNativePackageList(t *testing.T) {
+	for _, name := range []string{"claude", "codex"} {
+		a, _ := agentreg.Lookup(name)
+		ad, _ := AdapterFor(a)
+		if _, _, ok := ad.PackageTarget(); ok {
+			t.Errorf("%s reports a native package list; it uses a marketplace", name)
+		}
+	}
+}
+
 // §26.1: relative to the root, never escaping, checked after cleaning.
 func TestArtifactDestinationsStayInsideTheRoot(t *testing.T) {
 	a, _ := agentreg.Lookup("claude")

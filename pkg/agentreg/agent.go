@@ -258,6 +258,21 @@ type Agent struct {
 	MCPFile string
 	MCPKey  string
 
+	// PackageFile is the configuration file this agent reads its OWN plugin
+	// packages from (§24.3), relative to its CONFIG directory, and PackageKey
+	// is the top-level key holding the list. Both empty means this agent has
+	// no native package list — claude and codex declare plugins through a
+	// marketplace instead — which is a §8 degradation, not something to
+	// invent.
+	PackageFile string
+	PackageKey  string
+	// PackageReconcile is the command, with one %s verb for the package
+	// locator, that materializes a declared package. Empty means either there
+	// is nothing to run (opencode resolves its npm plugin at start-up) or
+	// PackageFile is empty and the question does not arise. ap prints this
+	// rather than running it: ap does not run other people's installers.
+	PackageReconcile string
+
 	// Skills is where this agent reads Agent Skill directories (§23), relative
 	// to its CONFIG directory — so it is a path inside whatever ap points
 	// ConfigEnv at, and a per-profile skill is isolated by construction.
@@ -496,6 +511,14 @@ func registry() map[string]Agent {
 			Unshared:   []string{"sessions"},
 			State:      []string{"sessions", "models-store.json"},
 			CloneAllow: []string{"settings.json"},
+			// Measured: `pi install git:github.com/DietrichGebert/ponytail` against a
+			// throwaway PI_CODING_AGENT_DIR appends the source string here and clones into
+			// <dir>/git/<host>/<owner>/<repo>. ap writes only the declaration — `pi update
+			// <source>` materializes it from that alone, verified against a settings.json
+			// with no clone on disk.
+			PackageFile:      "settings.json",
+			PackageKey:       "packages",
+			PackageReconcile: "pi update %s",
 			Sessions: &SessionStore{
 				Rel:        "sessions",
 				Layout:     LayoutPiSessions,
@@ -541,6 +564,12 @@ func registry() map[string]Agent {
 			CloneAllow:     []string{"opencode.json", "agents", "command", "skills"},
 			Settings:       "opencode.json",
 			SettingsFormat: JSON,
+			// SPEC §24.3's own example: `package: "@dietrichgebert/ponytail"`, an
+			// npm package name under the top-level "plugin" key. No reconcile
+			// command: opencode resolves its npm plugin at start-up, unlike pi's
+			// separate `pi update`.
+			PackageFile: "opencode.json",
+			PackageKey:  "plugin",
 			// Sessions AND auth live under XDG_DATA_HOME and XDG_STATE_HOME, which ap
 			// never redirects — redirecting them is exactly what the shim exists to
 			// avoid doing to every other program in the tree. So opencode cannot honour

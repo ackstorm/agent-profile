@@ -37,17 +37,92 @@ func MergeInto(path string, contribution map[string]any) ([]string, error) {
 	mergeMap(doc, contribution, "", &keys)
 	sort.Strings(keys)
 
-	out, err := encodeDoc(doc, isTOML)
-	if err != nil {
-		return nil, fmt.Errorf("encoding %s: %w", path, err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(path, out, 0o600); err != nil {
+	if err := writeDocTo(path, doc, isTOML); err != nil {
 		return nil, err
 	}
 	return keys, nil
+}
+
+// writeDocTo encodes doc and writes it to path, creating parent directories
+// as needed. It is MergeInto's write tail, factored out so AppendInto and
+// RemoveFrom share it instead of duplicating the encode-and-write sequence.
+func writeDocTo(path string, doc map[string]any, isTOML bool) error {
+	out, err := encodeDoc(doc, isTOML)
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", path, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o600)
+}
+
+// AppendInto adds element to the string list at key in the structured document
+// at path, creating the file and the list if absent, and reports whether it
+// added anything.
+//
+// MergeInto is deliberately not used here. It descends into MAPS and records
+// dotted keys; a list is neither, so mergeMap would replace the whole array and
+// record the container key — and uninstall, bounded by recorded keys, would
+// then delete every package in the file including the user's. That is the exact
+// failure mergeMap's own comment describes for mcpServers.
+//
+// Idempotent, because apply must converge: an element already present is left
+// where it is rather than appended again.
+func AppendInto(path, key, element string) (bool, error) {
+	isTOML := strings.EqualFold(filepath.Ext(path), ".toml")
+	doc, err := readDoc(path, isTOML)
+	if err != nil {
+		return false, err
+	}
+	var list []any
+	switch v := doc[key].(type) {
+	case nil:
+		if _, present := doc[key]; present {
+			return false, fmt.Errorf("%s: %q is null, not a list", path, key)
+		}
+	case []any:
+		list = v
+	default:
+		// The user's data, in the place ours goes. Replacing it would destroy
+		// work this program did not create.
+		return false, fmt.Errorf("%s: %q is not a list", path, key)
+	}
+	for _, e := range list {
+		if s, ok := e.(string); ok && s == element {
+			return false, nil
+		}
+	}
+	doc[key] = append(list, element)
+	return true, writeDocTo(path, doc, isTOML)
+}
+
+// RemoveFrom deletes exactly one element from the string list at key, and
+// nothing else. It is AppendInto's inverse, and the bound is the same one
+// MergeOut applies to keys: a list holding four packages, three of them the
+// user's, loses one.
+//
+// An emptied list is LEFT in place, like an emptied container in MergeOut: the
+// user may have created it, and an empty list costs them nothing.
+func RemoveFrom(path, key, element string) error {
+	isTOML := strings.EqualFold(filepath.Ext(path), ".toml")
+	doc, err := readDoc(path, isTOML)
+	if err != nil {
+		return err
+	}
+	list, ok := doc[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]any, 0, len(list))
+	for _, e := range list {
+		if s, ok := e.(string); ok && s == element {
+			continue
+		}
+		out = append(out, e)
+	}
+	doc[key] = out
+	return writeDocTo(path, doc, isTOML)
 }
 
 // readDoc parses the document, or returns an empty one when the file is absent.

@@ -216,6 +216,89 @@ func TestANonMappingAtAContainerKeyIsReplacedAndRecordedWhole(t *testing.T) {
 	}
 }
 
+// A package list is a list, and it is SHARED: the user put entries in it by
+// hand and expects them to survive both our install and our uninstall. A whole
+// -array write would take them with it, which is why MergeInto is wrong here.
+func TestAppendIntoAddsOnceAndLeavesTheUsersEntriesAlone(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"packages":["git:example.com/theirs"],"other":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	added, err := AppendInto(path, "packages", "git:example.com/ours")
+	if err != nil || !added {
+		t.Fatalf("AppendInto = %v %v, want true nil", added, err)
+	}
+	// Idempotent: applying twice must converge, never duplicate.
+	added, err = AppendInto(path, "packages", "git:example.com/ours")
+	if err != nil || added {
+		t.Fatalf("second AppendInto = %v %v, want false nil", added, err)
+	}
+
+	var doc map[string]any
+	raw, _ := os.ReadFile(path)
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	got := doc["packages"].([]any)
+	if len(got) != 2 || got[0] != "git:example.com/theirs" || got[1] != "git:example.com/ours" {
+		t.Errorf("packages = %v", got)
+	}
+	if doc["other"] != float64(1) {
+		t.Errorf("an unrelated key was disturbed: %v", doc["other"])
+	}
+
+	// And removal takes exactly ours.
+	if err := RemoveFrom(path, "packages", "git:example.com/ours"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(path)
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	got = doc["packages"].([]any)
+	if len(got) != 1 || got[0] != "git:example.com/theirs" {
+		t.Errorf("removal took the user's entry: %v", got)
+	}
+}
+
+// An absent file is created, and an emptied array is LEFT in place — the same
+// rule MergeOut applies to an emptied container, for the same reason: the user
+// may have created it and an empty list costs them nothing.
+func TestAppendIntoCreatesTheFileAndRemovalLeavesAnEmptyList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if _, err := AppendInto(path, "packages", "p"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveFrom(path, "packages", "p"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := doc["packages"].([]any); !ok || len(got) != 0 {
+		t.Errorf("packages = %v, want an empty list left in place", doc["packages"])
+	}
+}
+
+// A non-list where the list belongs is the user's data. Refuse rather than
+// overwrite: readDoc already refuses a file that does not parse, for the same
+// reason.
+func TestAppendIntoRefusesANonListAtTheKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"packages":"not-a-list"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AppendInto(path, "packages", "p"); err == nil {
+		t.Fatal("a non-list at the key was overwritten")
+	}
+}
+
 func dump(v any) string {
 	out, _ := json.MarshalIndent(v, "", "  ")
 	return string(out)
