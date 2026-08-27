@@ -45,7 +45,7 @@ func Export(root, name string, targets []string) (schema.Profile, error) {
 		if err := collectSecrets(rec, secrets, owner); err != nil {
 			return schema.Profile{}, err
 		}
-		if err := emit(&p, rec); err != nil {
+		if err := emit(&p, rec, targets); err != nil {
 			return schema.Profile{}, err
 		}
 	}
@@ -89,12 +89,25 @@ func describe(b schema.Binding) string {
 	return "env " + b.Env
 }
 
-func emit(p *schema.Profile, rec ResourceRec) error {
+func emit(p *schema.Profile, rec ResourceRec, targets []string) error {
 	switch rec.Kind {
 	case "skill":
 		set(&p.Skills, rec.Name, schema.Resource{Enabled: true, Ref: rec.Ref, Source: exportSource(rec.Source)})
 	case "plugin":
 		set(&p.Plugins, rec.Name, schema.Resource{Enabled: true, Ref: rec.Ref, Source: exportSource(rec.Source)})
+	case "native-plugin":
+		// Back under the runtime block it came from: a native plugin is not a
+		// common one and round-tripping it to the root would change what the
+		// manifest means. A root is materialized for exactly one runtime, so
+		// targets — always that runtime here (§33.2) — names it.
+		if len(targets) == 0 {
+			return fmt.Errorf("native-plugin %q has no runtime to export under", rec.Name)
+		}
+		pkg, err := packageOf(rec)
+		if err != nil {
+			return err
+		}
+		setNativePlugin(&p.Runtimes, targets[0], rec.Name, schema.NativePlugin{Enabled: true, Package: pkg})
 	case "artifact":
 		set(&p.Artifacts, rec.Name, schema.Artifact{
 			Enabled: true, Source: exportSource(rec.Source), Destination: rec.Destination,
@@ -128,6 +141,32 @@ func set[V any](m *map[string]V, k string, v V) {
 		*m = map[string]V{}
 	}
 	(*m)[k] = v
+}
+
+// setNativePlugin writes one runtime's plugin, creating both maps as needed —
+// Runtime is a struct, not a pointer, so the entry has to be read, mutated and
+// written back rather than reached into directly.
+func setNativePlugin(m *map[string]schema.Runtime, runtime, name string, np schema.NativePlugin) {
+	if *m == nil {
+		*m = map[string]schema.Runtime{}
+	}
+	rt := (*m)[runtime]
+	set(&rt.Plugins, name, np)
+	(*m)[runtime] = rt
+}
+
+// packageOf reads the package locator back out of a native-plugin record's
+// single recorded key — the same key splitListKey parses when execute removes
+// it — so there is one parser for that string and not two.
+func packageOf(rec ResourceRec) (string, error) {
+	if len(rec.Files) != 1 || len(rec.Files[0].Keys) != 1 {
+		return "", fmt.Errorf("native-plugin %q was recorded with an unexpected shape and cannot be exported", rec.Name)
+	}
+	_, pkg, ok := splitListKey(rec.Files[0].Keys[0])
+	if !ok {
+		return "", fmt.Errorf("native-plugin %q's recorded key %q has no container.element form", rec.Name, rec.Files[0].Keys[0])
+	}
+	return pkg, nil
 }
 
 // exportSource emits the RESOLVED auth scheme (§35.2).

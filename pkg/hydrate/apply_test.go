@@ -581,3 +581,112 @@ func TestAPluginRoutesPerRuntimeAndReportsWhatItCannot(t *testing.T) {
 		})
 	}
 }
+
+// §24.3: a runtime block's plugins entry OVERRIDES the common one for that
+// runtime. Before this, the native entry was parsed, rendered, and dropped in
+// silence while the common plugin materialized anyway — so `runtimes.pi` could
+// not express "not this one, mine instead".
+func TestANativePluginOverridesTheCommonOneOfTheSameName(t *testing.T) {
+	a, _ := agentreg.Lookup("pi")
+	ad, _ := AdapterFor(a)
+	src := writeTree(t, t.TempDir(), map[string]string{"skills/ponytail/SKILL.md": "# common"})
+	root := t.TempDir()
+
+	res, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: ad, Now: fixedNow,
+		Profile: schema.Profile{
+			Plugins: map[string]schema.Resource{"ponytail": {Enabled: true, Source: &schema.Source{}}},
+			Runtimes: map[string]schema.Runtime{"pi": {Plugins: map[string]schema.NativePlugin{
+				"ponytail": {Enabled: true, Package: "git:github.com/DietrichGebert/ponytail"},
+			}}},
+		},
+		Fetched: map[string]source.Resolved{"plugin ponytail": {Dir: src, ResolvedRef: "abc"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The common plugin's files are NOT there.
+	if _, err := os.Stat(filepath.Join(root, "skills", "ponytail", "SKILL.md")); !os.IsNotExist(err) {
+		t.Error("the common plugin materialized despite the runtime-native override")
+	}
+	// The declaration IS.
+	raw, err := os.ReadFile(filepath.Join(root, "settings.json"))
+	if err != nil {
+		t.Fatalf("settings.json was not written: %v", err)
+	}
+	if !strings.Contains(string(raw), "git:github.com/DietrichGebert/ponytail") {
+		t.Errorf("the package was not declared:\n%s", raw)
+	}
+	// And the user is told the one command that reconciles it, because ap does
+	// not run other people's installers.
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "pi update") {
+		t.Errorf("the reconcile command was not reported: %v", res.Warnings)
+	}
+
+	// The ledger bounds removal by the ELEMENT, never by the container key: a
+	// recorded "packages" would take the user's packages with ours.
+	l, _ := LoadLedger(root)
+	rec, ok := l.Resource("native-plugin", "ponytail")
+	if !ok {
+		t.Fatalf("not recorded: %+v", l)
+	}
+	if len(rec.Files) != 1 || len(rec.Files[0].Keys) != 1 ||
+		rec.Files[0].Keys[0] == "packages" {
+		t.Errorf("record is not bounded by the element: %+v", rec.Files)
+	}
+}
+
+// enabled: false on a native entry is how ONE runtime opts out entirely. The
+// override still applies — the common plugin does not come back — which is what
+// makes "ponytail everywhere except pi" expressible.
+func TestADisabledNativePluginSuppressesTheCommonOneAndWritesNothing(t *testing.T) {
+	a, _ := agentreg.Lookup("pi")
+	ad, _ := AdapterFor(a)
+	src := writeTree(t, t.TempDir(), map[string]string{"skills/ponytail/SKILL.md": "# common"})
+	root := t.TempDir()
+
+	if _, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: ad, Now: fixedNow,
+		Profile: schema.Profile{
+			Plugins: map[string]schema.Resource{"ponytail": {Enabled: true, Source: &schema.Source{}}},
+			Runtimes: map[string]schema.Runtime{"pi": {Plugins: map[string]schema.NativePlugin{
+				"ponytail": {Enabled: false},
+			}}},
+		},
+		Fetched: map[string]source.Resolved{"plugin ponytail": {Dir: src, ResolvedRef: "abc"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "ponytail", "SKILL.md")); !os.IsNotExist(err) {
+		t.Error("the common plugin materialized for a runtime that opted out")
+	}
+	if _, err := os.Stat(filepath.Join(root, "settings.json")); !os.IsNotExist(err) {
+		t.Error("a disabled native plugin still wrote a declaration")
+	}
+}
+
+// §8: a runtime with no native package list says so. claude declares plugins
+// through a marketplace, and writing a packages array into its config would
+// produce a file nothing reads.
+func TestARuntimeWithNoPackageListWarnsRatherThanInventingOne(t *testing.T) {
+	a, _ := agentreg.Lookup("claude")
+	ad, _ := AdapterFor(a)
+	root := t.TempDir()
+
+	res, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: ad, Now: fixedNow,
+		Profile: schema.Profile{Runtimes: map[string]schema.Runtime{"claude": {
+			Plugins: map[string]schema.NativePlugin{"ponytail": {Enabled: true, Package: "x"}},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{"claude", "ponytail"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("warning does not name %q: %s", want, joined)
+		}
+	}
+}

@@ -75,6 +75,12 @@ func Apply(ctx context.Context, p Plan) (Result, error) {
 	if err := applyArtifacts(ctx, p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
+	// Before applyPlugins, and load-bearing: the suppression set has to exist
+	// before the common plugins are walked, or a native override could never
+	// take effect.
+	if err := applyNativePlugins(p, ledger, &res, stamp); err != nil {
+		return res, err
+	}
 	if err := applyPlugins(ctx, p, ledger, &res, stamp); err != nil {
 		return res, err
 	}
@@ -129,6 +135,67 @@ func applySkills(ctx context.Context, p Plan, l *Ledger, res *Result, stamp stri
 	return nil
 }
 
+// nativePlugins is the selected runtime's own plugin block. Effective narrows
+// Runtimes to one entry, so there is at most one to read.
+func nativePlugins(p Plan) map[string]schema.NativePlugin {
+	return p.Profile.Runtimes[p.Adapter.Name()].Plugins
+}
+
+// applyNativePlugins writes each declared native package into the runtime's own
+// settings list (§24.3), and reports the command that materializes it.
+//
+// ap writes the DECLARATION and nothing else. Running the runtime's installer
+// is what `ap sync` did and why it was removed; the honest replacement is to
+// name the command, exactly as the clone path names `codex plugin add`.
+// Measured: `pi update <source>` clones a package that exists only in
+// settings.json, so the declaration alone is enough to act on.
+func applyNativePlugins(p Plan, l *Ledger, res *Result, stamp string) error {
+	native := nativePlugins(p)
+	names := sortedKeys(native)
+	active := make([]string, 0, len(names))
+	for _, n := range names {
+		if native[n].Enabled {
+			active = append(active, n)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	rel, key, ok := p.Adapter.PackageTarget()
+	if !ok {
+		for _, n := range active {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"runtime %q has no native package list; skipping plugin %q — it declares plugins through a marketplace",
+				p.Adapter.Name(), n))
+		}
+		return nil
+	}
+	path := filepath.Join(p.Root, rel)
+	for _, name := range active {
+		pkg := native[name].Package
+		if _, err := AppendInto(path, key, pkg); err != nil {
+			return fmt.Errorf("plugin %q: %w", name, err)
+		}
+		hash, err := hashFile(path)
+		if err != nil {
+			return err
+		}
+		l.Put(ResourceRec{
+			Name: name, Kind: "native-plugin", InstalledAt: stamp,
+			// Bounded by the ELEMENT. Recording the container key would have
+			// uninstall delete every package in the list, the user's included —
+			// the same rule a merged MCP record follows.
+			Files: []FileRec{{RelPath: filepath.ToSlash(rel), Hash: hash, Merge: "list", Keys: []string{key + "." + pkg}}},
+		})
+		res.Changes = append(res.Changes, Change{Path: filepath.Join(rel, key+"."+pkg), Op: "merge"})
+		if cmd := p.Adapter.ReconcileCommand(pkg); cmd != "" {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"plugin %q is declared but not materialized; ap does not run a runtime's installer — run: %s", name, cmd))
+		}
+	}
+	return nil
+}
+
 // applyPlugins routes each component kind of a plugin tree to this runtime's
 // destination (§24.2).
 //
@@ -143,9 +210,17 @@ func applySkills(ctx context.Context, p Plan, l *Ledger, res *Result, stamp stri
 // forbids the silent drop, and "why is my hook missing" has exactly one useful
 // answer.
 func applyPlugins(ctx context.Context, p Plan, l *Ledger, res *Result, stamp string) error {
+	native := nativePlugins(p)
 	for _, name := range sortedKeys(p.Profile.Plugins) {
 		r := p.Profile.Plugins[name]
 		if !r.Enabled {
+			continue
+		}
+		// §24.3: a runtime-native entry of the same name OVERRIDES the common
+		// one for this runtime — including a disabled one, which is how a
+		// single runtime opts out of a plugin the root declares. Materializing
+		// both would install ponytail twice by two mechanisms.
+		if _, overridden := native[name]; overridden {
 			continue
 		}
 		fetched, ok := p.Fetched["plugin "+name]

@@ -19,8 +19,12 @@ import (
 //	skip    the file changed since install; it stays, and Reason says why
 //	gone    the file is already absent; nothing to do
 type Verdict struct {
-	Path   string
-	Op     string
+	Path string
+	Op   string
+	// Merge carries the source FileRec's merge kind ("deep" or "list") for an
+	// Op of "keys", so execute knows how to remove the recorded keys without
+	// re-reading the ledger record classify already consumed.
+	Merge  string
 	Keys   []string
 	Reason string
 }
@@ -149,14 +153,17 @@ func classifyFile(root string, f FileRec) Verdict {
 		}
 		return Verdict{Path: f.RelPath, Op: "remove"}
 
-	case "deep":
+	case "deep", "list":
+		// "list" is a package array (Task 1's AppendInto/RemoveFrom), not a
+		// map — but it is bounded by recorded KEYS exactly the same way, for
+		// the same reason: the file is shared and only ours goes.
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return Verdict{Path: f.RelPath, Op: "gone"}
 		}
 		if len(f.Keys) == 0 {
 			return Verdict{Path: f.RelPath, Op: "skip", Reason: "recorded as merged but with no keys"}
 		}
-		return Verdict{Path: f.RelPath, Op: "keys", Keys: f.Keys}
+		return Verdict{Path: f.RelPath, Op: "keys", Keys: f.Keys, Merge: f.Merge}
 
 	default:
 		// "composite" is declared in the ledger's vocabulary and nothing
@@ -165,6 +172,17 @@ func classifyFile(root string, f FileRec) Verdict {
 		return Verdict{Path: f.RelPath, Op: "skip",
 			Reason: fmt.Sprintf("merge mode %q has no removal rule", f.Merge)}
 	}
+}
+
+// splitListKey splits a "list"-merge record's recorded key into the container
+// (e.g. "packages") and the element it holds (a package locator). The split is
+// on the FIRST dot only — applyNativePlugins wrote the key as key + "." + pkg,
+// and a pi package string like "git:github.com/DietrichGebert/ponytail"
+// contains dots of its own, so only the first one is the boundary. execute and
+// export.packageOf both parse this string, and this is the one place that
+// knows its shape.
+func splitListKey(key string) (container, element string, ok bool) {
+	return strings.Cut(key, ".")
 }
 
 func execute(root string, rm Removal) error {
@@ -177,6 +195,18 @@ func execute(root string, rm Removal) error {
 			}
 			pruneEmptyDirs(root, filepath.Dir(path))
 		case "keys":
+			if v.Merge == "list" {
+				for _, k := range v.Keys {
+					container, element, ok := splitListKey(k)
+					if !ok {
+						return fmt.Errorf("%s: recorded key %q has no container.element form", v.Path, k)
+					}
+					if err := RemoveFrom(path, container, element); err != nil {
+						return fmt.Errorf("%s: %w", v.Path, err)
+					}
+				}
+				continue
+			}
 			if err := MergeOut(path, v.Keys); err != nil {
 				return fmt.Errorf("%s: %w", v.Path, err)
 			}
