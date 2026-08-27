@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 func TestLinkRemovesAnUnsharedSymlink(t *testing.T) {
@@ -20,7 +20,7 @@ func TestLinkRemovesAnUnsharedSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
+	a := agentreg.Agent{Name: "test", Unshared: []string{".claude.json"}}
 	_, _, unshared, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestLinkLeavesARealFileAtAnUnsharedPath(t *testing.T) {
 	if err := os.WriteFile(p, []byte(`{"mine":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
+	a := agentreg.Agent{Name: "test", Unshared: []string{".claude.json"}}
 	_, _, unshared, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestLinkLeavesARealFileAtAnUnsharedPath(t *testing.T) {
 
 func TestLinkIsQuietWhenNothingIsUnshared(t *testing.T) {
 	dir := t.TempDir()
-	a := agent.Agent{Name: "test", Unshared: []string{".claude.json"}}
+	a := agentreg.Agent{Name: "test", Unshared: []string{".claude.json"}}
 	_, _, unshared, _, err := Link(a, dir, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +77,7 @@ func TestLinkIsQuietWhenNothingIsUnshared(t *testing.T) {
 // pins the other half: nothing is written into the real home either.
 func TestLinkSkipsMissingTargets(t *testing.T) {
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "auth.json", From: filepath.Join(t.TempDir(), "nope.json")},
 	}}
 	linked, skipped, _, _, err := Link(a, dir, nil)
@@ -108,7 +108,7 @@ func TestLinkCreatesSymlinks(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "sessions", From: sessions},
 		{Rel: "auth.json", From: authFile},
 	}}
@@ -139,7 +139,7 @@ func TestLinkCreatesParentDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "plugins/cache", From: cache},
 	}}
 	if _, _, _, _, err := Link(a, dir, nil); err != nil {
@@ -162,7 +162,7 @@ func TestLinkIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "sessions", From: sessions},
 	}}
 	if _, _, _, _, err := Link(a, dir, nil); err != nil {
@@ -184,7 +184,7 @@ func TestLinkRepointsStaleSymlink(t *testing.T) {
 	if err := os.Symlink(filepath.Join(src, "old"), filepath.Join(dir, "sessions")); err != nil {
 		t.Fatal(err)
 	}
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "sessions", From: want},
 	}}
 	if _, _, _, _, err := Link(a, dir, nil); err != nil {
@@ -222,7 +222,7 @@ func TestLinkMovesRealDataAsideAndRelinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{
 		{Rel: "sessions", From: sessions},
 	}}
 	_, _, _, orphaned, err := Link(a, dir, nil)
@@ -256,7 +256,7 @@ func TestLinkOverwritesAPreviousOrphan(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "cred", From: cred}}}
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{{Rel: "cred", From: cred}}}
 
 	for _, content := range []string{"first", "second"} {
 		if err := os.Remove(filepath.Join(dir, "cred")); err != nil && !os.IsNotExist(err) {
@@ -293,7 +293,7 @@ func TestDeleteDoesNotFollowSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := agent.Agent{Name: "claude", Shared: []agent.Share{
+	a := agentreg.Agent{Name: "claude", Shared: []agentreg.Share{
 		{Rel: "projects", From: realSessions},
 	}}
 	dir, err := Create(a, "plan")
@@ -322,7 +322,7 @@ func TestDeleteDoesNotFollowSymlinks(t *testing.T) {
 // takes a /login inside a profile: its temp-file-plus-rename has replaced the
 // symlink, so the profile holds a real credential and the shared one still has
 // the old token.
-func conflicted(t *testing.T, shared, mine string) (agent.Agent, string, string) {
+func conflicted(t *testing.T, shared, mine string) (agentreg.Agent, string, string) {
 	t.Helper()
 	src := t.TempDir()
 	from := filepath.Join(src, "cred")
@@ -333,7 +333,7 @@ func conflicted(t *testing.T, shared, mine string) (agent.Agent, string, string)
 	if err := os.WriteFile(filepath.Join(dir, "cred"), []byte(mine), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "cred", From: from}}}, dir, from
+	return agentreg.Agent{Name: "fake", Shared: []agentreg.Share{{Rel: "cred", From: from}}}, dir, from
 }
 
 // Promotion is the only thing in this program that writes outside a profile, and
@@ -433,7 +433,7 @@ func TestLinkDoesNotOfferToPromoteADirectory(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "sessions"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "sessions", From: from}}}
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{{Rel: "sessions", From: from}}}
 
 	asked := 0
 	_, _, _, orphaned, err := Link(a, dir, func(Conflict) Resolution {
@@ -471,7 +471,7 @@ func TestPromoteRefusesASymlinkedSharedPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cred"), []byte("new-from-the-profile"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a := agent.Agent{Name: "fake", Shared: []agent.Share{{Rel: "cred", From: from}}}
+	a := agentreg.Agent{Name: "fake", Shared: []agentreg.Share{{Rel: "cred", From: from}}}
 
 	if _, _, _, _, err := Link(a, dir, func(Conflict) Resolution { return Promote }); err == nil {
 		t.Fatal("Link promoted onto a symlinked shared path, want a refusal")
@@ -497,13 +497,13 @@ func TestDeleteMissingProfileErrors(t *testing.T) {
 
 // Belt as well as braces, the same defense in depth as
 // TestDeleteDoesNotFollowSymlinks and TestDeleteDoesNotFollowTheConfigShim:
-// Delete must refuse Default on its own, not only because ParseRef rejects it
-// upstream. Dir(a, Default) is the user's real config directory, and Delete is
+// Delete must refuse agentreg.Default on its own, not only because ParseRef rejects it
+// upstream. Dir(a, agentreg.Default) is the user's real config directory, and Delete is
 // os.RemoveAll — the guard must not depend on a validator having been called
 // correctly somewhere else.
 func TestDeleteRefusesDefaultDirectly(t *testing.T) {
 	a := agentOrFail(t, "claude")
-	if err := Delete(a, Default); err == nil {
-		t.Error("Delete(a, Default) = nil error, want refusal")
+	if err := Delete(a, agentreg.Default); err == nil {
+		t.Error("Delete(a, agentreg.Default) = nil error, want refusal")
 	}
 }

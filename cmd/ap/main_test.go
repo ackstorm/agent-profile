@@ -4,8 +4,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -13,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/session"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // dispatch is where user input becomes a filesystem path, and it had no tests at
@@ -43,6 +45,283 @@ func TestMain(m *testing.M) {
 func TestDispatchUnknownCommand(t *testing.T) {
 	if err := dispatch([]string{"frobnicate"}); err == nil {
 		t.Error("unknown command = nil error, want error")
+	}
+}
+
+// The manifest operations live under one group verb, and the bare verbs are
+// gone. `ap manifest render` is the contract check other repositories call, so
+// its spelling is an interface, not a preference.
+func TestDispatchManifestRendersEveryTargetWithoutOne(t *testing.T) {
+	dir := t.TempDir()
+	ok := filepath.Join(dir, "ok.yaml")
+	if err := os.WriteFile(ok, []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n  - codex\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// No --target: compose every declared target and print nothing. The exit
+	// status is the whole answer.
+	if err := dispatch([]string{"manifest", "render", ok}); err != nil {
+		t.Errorf("manifest render without --target: %v", err)
+	}
+	if err := dispatch([]string{"manifest", "render", ok, "--target", "claude"}); err != nil {
+		t.Errorf("manifest render --target claude: %v", err)
+	}
+
+	// The bare verbs must not dispatch. `validate` was folded into render's
+	// no-target mode rather than kept as a second name for one pipeline.
+	for _, bare := range []string{"render", "validate", "apply"} {
+		if err := dispatch([]string{bare, ok}); err == nil {
+			t.Errorf("bare `ap %s` still dispatches; it must be under `ap manifest`", bare)
+		}
+	}
+}
+
+// A manifest that composes for one target and not another is broken, and the
+// no-target mode is what makes a producer hear that in a single call. Without
+// this, the mode could be composing only the first target and nothing would
+// say so.
+//
+// The proof is §7.2's warning, which Effective emits once per composition: a
+// manifest targeting claude and codex while declaring runtimes.opencode must
+// produce that warning twice, tagged with each target. A stronger-looking test
+// built on a validation error would prove less — most validation happens in
+// Decode, which runs before a runtime is chosen, so such a manifest fails for
+// every target including the first and the loop could still be broken.
+func TestDispatchManifestRenderComposesEveryTargetNotJustTheFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	body := "version: \"1\"\nname: p\ntargets:\n  - claude\n  - codex\n" +
+		"runtimes:\n  opencode:\n    environment:\n      X: \"1\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	dispatchErr := dispatch([]string{"manifest", "render", path})
+	_ = w.Close()
+	os.Stderr = oldStderr
+
+	stderr, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatchErr != nil {
+		t.Fatalf("manifest render: %v\nstderr:\n%s", dispatchErr, stderr)
+	}
+	for _, target := range []string{"claude", "codex"} {
+		if !strings.Contains(string(stderr), "warning: "+target+": ") {
+			t.Errorf("target %q was never composed; stderr:\n%s", target, stderr)
+		}
+	}
+}
+
+// apply takes the MANIFEST as its subject: a manifest is a profile's
+// definition, so its own `name` and `targets` address it. Naming nothing at all
+// is still a usage error, never a guess at which manifest was meant.
+func TestDispatchManifestApplyRequiresAManifest(t *testing.T) {
+	err := dispatch([]string{"manifest", "apply", "--dry-run"})
+	if err == nil {
+		t.Fatal("manifest apply with no manifest succeeded")
+	}
+	if !strings.Contains(err.Error(), "usage") {
+		t.Errorf("error %q is not a usage error", err)
+	}
+	// A --target the manifest does not declare is an error naming both lists.
+	// Materializing nothing for it would look like success, and a typo in a
+	// runtime name is the overwhelmingly likely cause.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(path, []byte("version: \"1\"\nname: plan\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = dispatch([]string{"manifest", "apply", path, "--target", "codex", "--dry-run"})
+	if err == nil {
+		t.Fatal("manifest apply accepted a target the manifest does not declare")
+	}
+	if !strings.Contains(err.Error(), "codex") || !strings.Contains(err.Error(), "claude") {
+		t.Errorf("error %q does not name both the asked-for and the declared targets", err)
+	}
+}
+
+// stubExecutable drops an executable file named "claude" into dir, so a PATH
+// pointed at dir resolves it via exec.LookPath — the same technique
+// pkg/schema/preflight_test.go uses, reimplemented here because cmd/ap is a
+// different package. Every caller in this file resolves for claude; a name
+// parameter with one literal at every call site is unparam-flagged dead
+// flexibility, not real reuse.
+func stubExecutable(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dirSnapshot hashes a directory's file list — name, size and mode, not
+// content — so a test can prove a call touched nothing by comparing a
+// snapshot taken before against one taken after.
+func dirSnapshot(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s %d %s\n", rel, info.Size(), info.Mode())
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+// TestDispatchManifestApplyDryRunWritesNothing is F7: --dry-run runs exactly the
+// resolution phase and stops. Snapshotting the manifest's directory before
+// and after is the literal proof, not a claim taken on faith.
+func TestDispatchManifestApplyDryRunWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte("version: \"1\"\nname: p\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir)
+
+	before := dirSnapshot(t, dir)
+	err := dispatch([]string{"manifest", "apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
+	if err != nil {
+		t.Fatalf("apply --dry-run: %v", err)
+	}
+	after := dirSnapshot(t, dir)
+	if before != after {
+		t.Errorf("--dry-run changed the manifest directory:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+// TestDispatchApplyDryRunRedactsSecretValues is the CLI-level guard on top of
+// pkg/schema's: TestDispatchManifestApplyDryRunWritesNothing's manifest declares no
+// inputs: at all, so printResolution's redaction path never runs and this
+// test path went unexercised. This manifest binds an env secret and
+// references it from an active resource (model.auth), so --dry-run's
+// resolution phase actually resolves it, and asserts the distinctive value
+// never reaches stdout/stderr while the binding NAME does.
+func TestDispatchManifestApplyDryRunRedactsSecretValues(t *testing.T) {
+	const secretValue = "sk-do-not-print-me-either"
+	t.Setenv("AP_TEST_DRYRUN_SECRET", secretValue)
+
+	dir := t.TempDir()
+	manifest := `version: "1"
+name: p
+targets:
+  - claude
+inputs:
+  secrets:
+    llm-token:
+      env: AP_TEST_DRYRUN_SECRET
+model:
+  type: anthropic
+  auth:
+    type: bearer
+    value_from:
+      secret: llm-token
+`
+	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir)
+
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = wOut, wErr
+
+	dispatchErr := dispatch([]string{"manifest", "apply", filepath.Join(dir, "p.yaml"), "--target", "claude", "--dry-run"})
+
+	_ = wOut.Close()
+	_ = wErr.Close()
+	os.Stdout, os.Stderr = oldStdout, oldStderr
+
+	stdout, err := io.ReadAll(rOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := io.ReadAll(rErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dispatchErr != nil {
+		t.Fatalf("apply --dry-run: %v", dispatchErr)
+	}
+
+	if strings.Contains(string(stdout), secretValue) || strings.Contains(string(stderr), secretValue) {
+		t.Errorf("--dry-run leaked the secret value\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	if !strings.Contains(string(stdout), "llm-token") {
+		t.Errorf("--dry-run dropped the binding NAME (llm-token), which is structure, not a secret\nstdout:\n%s", stdout)
+	}
+}
+
+// TestDispatchManifestApplyDashReadsStdin is design point 5: --manifest -
+// reads the manifest from a temp file this command owns and cleans up, so a
+// caller can pipe a generated manifest with no temp file of its own.
+func TestDispatchManifestApplyDashReadsStdin(t *testing.T) {
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir)
+
+	oldStdin := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+	go func() {
+		_, _ = w.Write([]byte("version: \"1\"\nname: piped\ntargets:\n  - claude\n"))
+		_ = w.Close()
+	}()
+
+	err = dispatch([]string{"manifest", "apply", "--manifest", "-", "--target", "claude", "--dry-run"})
+	if err != nil {
+		t.Fatalf("apply --manifest -: %v", err)
+	}
+}
+
+// A path and --manifest name the same thing twice; that must be rejected
+// rather than silently preferring one.
+func TestDispatchManifestApplyRejectsBothAPathAndManifestFlag(t *testing.T) {
+	err := dispatch([]string{"manifest", "apply", "./p.yaml", "--manifest", "-", "--target", "claude", "--dry-run"})
+	if err == nil {
+		t.Fatal("apply with both a path and --manifest succeeded, want it to refuse")
+	}
+}
+
+// The manifest's shape has exactly one machine-readable description: the
+// decoder in pkg/schema, reachable as `ap manifest render`'s exit status. A
+// JSON Schema document was built and removed — a second, hand-written
+// description of the same contract that nothing forces to agree with the
+// first. This test fails if the command comes back without that decision
+// being revisited.
+func TestDispatchHasNoSchemaCommand(t *testing.T) {
+	if err := dispatch([]string{"schema"}); err == nil {
+		t.Error("`ap schema` dispatches; the JSON Schema emitter is out of v1 (SPEC §38)")
 	}
 }
 
@@ -91,7 +370,7 @@ func TestResumeArgvPutsTheIDAtThePlaceholder(t *testing.T) {
 		{"pi", "abc", []string{"--session", "abc"}},
 		{"opencode", "abc", []string{"-s", "abc"}},
 	} {
-		a, _ := agent.Lookup(tc.agent)
+		a, _ := agentreg.Lookup(tc.agent)
 		got := resumeArgs(a, tc.id, nil)
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("%s: got %v, want %v", tc.agent, got, tc.want)
@@ -102,7 +381,7 @@ func TestResumeArgvPutsTheIDAtThePlaceholder(t *testing.T) {
 // Extra arguments follow the resume flag, so `ap resume <id> --model opus`
 // reaches the agent. Same passthrough rule as `ap run`.
 func TestResumePassesExtraArgsThrough(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got := resumeArgs(a, "abc", []string{"--model", "opus"})
 	want := []string{"--resume", "abc", "--model", "opus"}
 	if !slices.Equal(got, want) {
@@ -358,14 +637,14 @@ func TestDispatchRunOnMissingDefaultNamesTheRealPathNotACreateCommand(t *testing
 // catches the regression that testing the pipe would.
 func TestSetupHintComesFromTheAgent(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "opencode", "pi"} {
-		a, _ := agent.Lookup(name)
+		a, _ := agentreg.Lookup(name)
 		got := setupHint(a, "x")
 		if !strings.Contains(got, name+":x") {
 			t.Errorf("%s: hint %q does not name the profile", name, got)
 		}
 	}
-	claude, _ := agent.Lookup("claude")
-	opencode, _ := agent.Lookup("opencode")
+	claude, _ := agentreg.Lookup("claude")
+	opencode, _ := agentreg.Lookup("opencode")
 	if setupHint(claude, "x") == setupHint(opencode, "x") {
 		t.Error("claude and opencode print the same hint: it is hardcoded again")
 	}
@@ -379,7 +658,7 @@ func TestCopyInstructionsFailsBeforeCreatingAnythingWhenUnknown(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "codex") {
 		t.Fatalf("want an error naming the agent, got %v", err)
 	}
-	a, _ := agent.Lookup("codex")
+	a, _ := agentreg.Lookup("codex")
 	if profile.Exists(a, "nomd") {
 		t.Error("a profile was created despite the flag being unusable")
 	}
@@ -401,7 +680,7 @@ func TestDefaultIsRejectedByEverythingThatWrites(t *testing.T) {
 }
 
 func TestDeleteDefaultLeavesTheRealConfigAlone(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	before, err := os.Stat(a.Config)
 	if err != nil {
 		t.Skip("no real claude config on this machine")
@@ -441,7 +720,7 @@ func TestDispatchCreateFromDefaultIsNeverRejectedAsInvalid(t *testing.T) {
 	if err := dispatch([]string{"create", "claude:fromdefault", "--from", "default"}); err != nil {
 		t.Fatalf("--from default = %v, want nil", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got, err := os.ReadFile(filepath.Join(profile.Dir(a, "fromdefault"), "settings.json"))
 	if err != nil {
 		t.Fatalf("settings.json was not cloned: %v", err)
@@ -466,7 +745,7 @@ func TestCreateSeedsTheFirstRunFlags(t *testing.T) {
 	if err := dispatch([]string{"create", "claude:seeded"}); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	b, err := os.ReadFile(filepath.Join(profile.Dir(a, "seeded"), ".claude.json"))
 	if err != nil {
 		t.Fatalf("create seeded nothing: %v", err)
@@ -500,7 +779,7 @@ func TestSeedFirstRunNeverRewritesAnExistingFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".claude.json"), mine, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	keys, err := seedFirstRun(a, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -675,7 +954,7 @@ func TestUnlinkToleratesAMissingLinkDir(t *testing.T) {
 func TestDeleteToleratesAMissingLinkDir(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", filepath.Join(t.TempDir(), "does-not-exist"))
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:nolinkdir"}); err != nil {
 		t.Fatal(err)
 	}
@@ -704,7 +983,7 @@ func TestDeleteRemovesTheWrapper(t *testing.T) {
 
 func TestCopyInstructionsWritesARealFileNotALink(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := os.Stat(a.Instructions.Source); err != nil {
 		// Not a pass: this asserts nothing about --copy-instructions when it skips.
 		// It only runs on a machine (or container) that has ~/.claude/CLAUDE.md;
@@ -771,7 +1050,7 @@ func TestDeleteWithoutYesAndWithNoAnswerKeepsTheProfile(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	noStdin(t)
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:keepme"}); err != nil {
 		t.Fatal(err)
 	}
@@ -807,7 +1086,7 @@ func firstVariant(t *testing.T, args ...string) {
 func TestVariantOverwriteWithNoAnswerKeepsTheOldArguments(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -829,7 +1108,7 @@ func TestVariantOverwriteWithNoAnswerKeepsTheOldArguments(t *testing.T) {
 func TestVariantAnsweringNoLeavesTheArgumentsAlone(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -881,7 +1160,7 @@ func TestVariantOverwritePromptShowsBothArgumentLists(t *testing.T) {
 func TestVariantYesOverwritesFromEitherSideOfTheReference(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -931,7 +1210,7 @@ func TestVariantYesOnANewVariantJustCreatesIt(t *testing.T) {
 func TestVariantDoesNotParseFlagsAfterTheSeparator(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:execute"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1016,7 +1295,7 @@ func stderrOf(t *testing.T, f func() error) (string, error) {
 func TestWhichAndEnvPrintOneBareConsumableLine(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if err := dispatch([]string{"create", "claude:bare"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1065,7 +1344,7 @@ func TestVariantWritesTheStoreAndTheWrapper(t *testing.T) {
 	if err := dispatch(append([]string{"variant", "claude:review:opus", "--"}, args...)); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got, err := profile.VariantArgs(a, "review", "opus")
 	if err != nil {
 		t.Fatalf("the store has no entry: %v", err)
@@ -1100,7 +1379,7 @@ func TestVariantRefusesAMissingParent(t *testing.T) {
 	if !strings.Contains(err.Error(), "claude:nope") {
 		t.Errorf("error %q does not name the missing parent", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if profile.Exists(a, "nope") {
 		t.Error("the parent profile was created implicitly")
 	}
@@ -1142,7 +1421,7 @@ func TestVariantStoresFlagsApItselfOwns(t *testing.T) {
 	if err := dispatch(append([]string{"variant", "claude:review:literal", "--"}, payload...)); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got, err := profile.VariantArgs(a, "review", "literal")
 	if err != nil {
 		t.Fatal(err)
@@ -1268,7 +1547,7 @@ func TestLinkRendersTheSameWrapperBytesAsBefore(t *testing.T) {
 // testing the function catches the regression that testing the exec would.
 func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "review"); err != nil {
 		t.Fatal(err)
 	}
@@ -1304,7 +1583,7 @@ func TestRunArgsPutsTheVariantFirstAndTheCallerSecond(t *testing.T) {
 // to make one element out of two.
 func TestRunArgsFillsThePlaceholderInsteadOfAppending(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "execute"); err != nil {
 		t.Fatal(err)
 	}
@@ -1335,7 +1614,7 @@ func TestRunArgsFillsThePlaceholderInsteadOfAppending(t *testing.T) {
 // with no argument, so the agent asks, is a legitimate use of the same name.
 func TestRunArgsFillsEveryPlaceholderAndJoinsTheCaller(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "execute"); err != nil {
 		t.Fatal(err)
 	}
@@ -1376,7 +1655,7 @@ func TestRunArgsFillsEveryPlaceholderAndJoinsTheCaller(t *testing.T) {
 // mentions it is not a variant with an empty placeholder.
 func TestRunArgsWithoutAPlaceholderStillAppends(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if _, err := profile.Create(a, "review"); err != nil {
 		t.Fatal(err)
 	}
@@ -1501,7 +1780,7 @@ func TestWhichAndEnvOnAVariantAnswerForTheParent(t *testing.T) {
 	if err := dispatch([]string{"variant", "claude:review:opus", "--", "-p"}); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	dir := profile.Dir(a, "review")
 
 	if got := stdoutOf(t, func() error { return dispatch([]string{"which", "claude:review:opus"}) }); got != dir+"\n" {
@@ -1533,7 +1812,7 @@ func TestDeleteAVariantAsksNothingAndLeavesTheProfile(t *testing.T) {
 			t.Fatalf("ap %v: %v", args, err)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if !profile.Exists(a, "review") {
 		t.Fatal("deleting a variant removed the profile")
 	}
@@ -1565,7 +1844,7 @@ func TestDeleteAProfileRemovesItsVariantsAndTheirWrappers(t *testing.T) {
 			t.Fatalf("ap %v: %v", args, err)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
 		t.Errorf("the variants outlived their profile: %v", got)
 	}
@@ -1600,7 +1879,7 @@ func TestDeleteAProfileNamesItsVariantsInTheConfirmation(t *testing.T) {
 			t.Errorf("the prompt %q does not mention %q", out, want)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if !profile.Exists(a, "review") {
 		t.Error("delete removed the profile without an answer")
 	}
@@ -1716,7 +1995,7 @@ func TestListNestsEachVariantUnderItsProfile(t *testing.T) {
 // Default is the one row ap did not create and cannot remove: profile.Dir
 // resolves it to the agent's real config directory, so `ap delete
 // claude:default` would erase the configuration of the agent itself, and
-// profile.ValidName refuses it. Printing it like any other profile is what
+// agentreg.ValidName refuses it. Printing it like any other profile is what
 // invites that command in the first place.
 //
 // The marking is on Default's own line, and this reads that line rather than the
@@ -1731,13 +2010,16 @@ func TestListMarksDefaultAsNotAProfile(t *testing.T) {
 	}
 	out := stdoutOf(t, func() error { return dispatch([]string{"list", "claude"}) })
 
-	line := listLineFor(t, out, "claude:"+profile.Default)
-	if !strings.Contains(line, "read-only") {
-		t.Errorf("%q is printed like any other profile: %q", profile.Default, line)
+	line := listLineFor(t, out, "claude:"+agentreg.Default)
+	// Asserted against defaultNote itself rather than a substring of it: the
+	// note said "read-only" until the ledger made that false, and a test
+	// matching a fragment would not have noticed the claim going stale.
+	if !strings.Contains(line, defaultNote) {
+		t.Errorf("%q is printed like any other profile: %q", agentreg.Default, line)
 	}
 	// And no ordinary profile carries it, which is what makes it a marking rather
 	// than a banner every row repeats.
-	if other := listLineFor(t, out, "claude:review"); strings.Contains(other, "read-only") {
+	if other := listLineFor(t, out, "claude:review"); strings.Contains(other, defaultNote) {
 		t.Errorf("an ordinary profile carries the marking too: %q", other)
 	}
 }
@@ -1776,8 +2058,8 @@ func TestListRawIsWhatScriptsSmokeParses(t *testing.T) {
 		got = append(got, name)
 	}
 	sort.Strings(got)
-	if strings.Join(got, " ") != strings.Join(agent.Names(), " ") {
-		t.Errorf("smoke.sh's filter over `ap list --raw` yields %v, want exactly the agents %v", got, agent.Names())
+	if strings.Join(got, " ") != strings.Join(agentreg.Names(), " ") {
+		t.Errorf("smoke.sh's filter over `ap list --raw` yields %v, want exactly the agents %v", got, agentreg.Names())
 	}
 }
 
@@ -1811,7 +2093,7 @@ func TestListRawIsOneTabSeparatedLinePerReference(t *testing.T) {
 		if line != strings.TrimLeft(line, treeGlyphs+"\t") {
 			t.Errorf("a raw line is decorated: %q", line)
 		}
-		if strings.Contains(line, "read-only") {
+		if strings.Contains(line, defaultNote) {
 			t.Errorf("a raw line carries a human note: %q", line)
 		}
 		fields := strings.Split(line, "\t")
@@ -1931,7 +2213,7 @@ func TestDeleteReportsTheProfileEvenWhenAWrapperIsRefused(t *testing.T) {
 	if _, err := os.Stat(foreign); err != nil {
 		t.Errorf("ap removed a file it did not write: %v", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if got, _ := profile.Variants(a, "review"); len(got) != 0 {
 		t.Errorf("the store outlived the profile: %v", got)
 	}
@@ -1954,7 +2236,7 @@ func TestListReportsAnUnreadableVariantWithoutAbandoningTheRest(t *testing.T) {
 			t.Fatalf("ap %v: %v", args, err)
 		}
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	// A zero-byte entry: what an interrupted write used to be able to leave.
 	empty := filepath.Join(profile.VariantsRoot(), a.Name, "review", "broken")
 	if err := os.WriteFile(empty, nil, 0o600); err != nil {
@@ -1969,7 +2251,7 @@ func TestListReportsAnUnreadableVariantWithoutAbandoningTheRest(t *testing.T) {
 		t.Errorf("a readable variant was lost:\n%s", out)
 	}
 	// Every agent still gets its line, which is what smoke.sh's agents() reads.
-	for _, name := range agent.Names() {
+	for _, name := range agentreg.Names() {
 		if !strings.Contains(out, name+":") {
 			t.Errorf("agent %q vanished from the listing:\n%s", name, out)
 		}
@@ -1988,7 +2270,7 @@ func TestCreateOnlySettingsRequiresFrom(t *testing.T) {
 	if !strings.Contains(err.Error(), "--from") {
 		t.Errorf("error = %v, want it to name --from", err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if profile.Exists(a, "nofrom") {
 		t.Error("the profile was created before the flags were validated")
 	}
@@ -2019,7 +2301,7 @@ func TestCreateOnlySettingsSkipsEveryOtherCloneAllowEntry(t *testing.T) {
 		"--only-settings", "statusLine", "--only-settings", "theme"}); err != nil {
 		t.Fatal(err)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	dir := profile.Dir(a, "slim")
 	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
 	if err != nil {
@@ -2064,7 +2346,7 @@ func TestCreateOnlySettingsWarnsAboutAMissingKeyAndStillCreates(t *testing.T) {
 	if !strings.Contains(stderr, "statuLine") || !strings.Contains(stderr, "settings.json") {
 		t.Errorf("stderr = %q, want it to name the missing key and the file it was looked for in", stderr)
 	}
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	if !profile.Exists(a, "typo") {
 		t.Error("the profile was not created")
 	}
@@ -2134,7 +2416,7 @@ func TestShimWarningNamesTheMatchingBase(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, "dat"))
 
-	a, _ := agent.Lookup("opencode")
+	a, _ := agentreg.Lookup("opencode")
 	for _, tc := range []struct{ found, wantBase string }{
 		{filepath.Join("xdg", "git"), filepath.Join(home, "cfg")},
 		{filepath.Join("xdg-data", "fonts"), filepath.Join(home, "dat")},
@@ -2176,7 +2458,23 @@ func TestFmtTimeIgnoresTheIncomingZone(t *testing.T) {
 // whole manual. A single shared usage string did the latter and made the help
 // unusable.
 func TestEachCommandHasItsOwnHelp(t *testing.T) {
-	for _, name := range []string{"list", "sessions", "resume", "create", "variant", "run", "env", "which", "delete", "link", "unlink"} {
+	// Derived from commandTable, not hand-listed: a hand-listed set does not
+	// notice a new command, which is the only way this can actually fail.
+	// Aliases share their canonical command's help, and the help verbs print
+	// the global usage on purpose.
+	skip := map[string]bool{
+		"help": true, "-h": true, "--help": true,
+		"version": true, "--version": true, "-v": true,
+		"ls": true, "rm": true,
+	}
+	var names []string
+	for name := range commandTable {
+		if !skip[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
 		h := helpFor(name)
 		if h == usage {
 			t.Errorf("ap %s --help prints the global usage instead of its own", name)
@@ -2231,5 +2529,242 @@ func TestSessionsAndResumeHelpPointAtEachOther(t *testing.T) {
 		if !strings.Contains(h, other) {
 			t.Errorf("ap %s --help shows no example of %q", tc.cmd, other)
 		}
+	}
+}
+
+// seedRepo builds a real git repository in a temp dir. cmd/ap's tests cannot
+// reach pkg/source's helper, and duplicating twenty lines is cheaper than
+// exporting a test fixture from a published package.
+func seedRepo(t *testing.T, files map[string]string) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not on PATH")
+	}
+	work := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = work
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+			"GIT_CONFIG_NOSYSTEM=1", "HOME="+work)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	run("init", "--quiet", "--initial-branch=main")
+	for rel, body := range files {
+		p := filepath.Join(work, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("add", "-A")
+	run("commit", "--quiet", "-m", "seed")
+	return work
+}
+
+// captureStdout runs fn with os.Stdout redirected and returns what it wrote.
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fnErr := fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out), fnErr
+}
+
+// Phase 3's payoff: --dry-run runs the whole resolution phase, fetches real
+// bytes, and touches no root.
+func TestManifestApplyDryRunResolvesRealSourcesAndWritesNothing(t *testing.T) {
+	repo := seedRepo(t, map[string]string{"skills/pdf/SKILL.md": "# pdf"})
+	data, cache := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	// Prepend rather than replace: the resolution phase shells out to git, and
+	// binDir first still means the stub claude wins preflight.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	manifest := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
+	path := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(path, []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--dry-run"})
+	})
+	if err != nil {
+		t.Fatalf("dry run: %v\n%s", err, out)
+	}
+	for _, want := range []string{"claude:plan", "skill pdf"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+	// §37.1 makes this line mandatory: "dry run" reads as "does nothing", and
+	// this one resolves secrets, authenticates and fetches.
+	if !strings.Contains(out, "--dry-run authenticated and fetched; nothing was written.") {
+		t.Errorf("the mandatory §37.1 disclosure is missing:\n%s", out)
+	}
+
+	// Non-mutating is the other half. Apply overwrites, so a dry run that
+	// half-created a root would be worse than no dry run at all.
+	if _, err := os.Stat(filepath.Join(data, "agent-profile", "profiles", "claude", "plan")); !os.IsNotExist(err) {
+		t.Errorf("--dry-run created the profile namespace: %v", err)
+	}
+	// The cache IS written: §37.1 says source acquisition during resolution is
+	// not mutation, and a cache is not a materialization root.
+	if ents, err := os.ReadDir(filepath.Join(cache, "agent-profile", "sources", "objects")); err != nil || len(ents) == 0 {
+		t.Errorf("nothing was cached, so nothing was really fetched: %v %v", ents, err)
+	}
+}
+
+// Phase 4's payoff: apply writes into a root and records what it wrote.
+func TestManifestApplyMaterializesIntoAProfile(t *testing.T) {
+	repo := seedRepo(t, map[string]string{
+		"skills/pdf/SKILL.md":  "# pdf",
+		"skills/pdf/notes.txt": "n",
+	})
+	data, cache := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	t.Setenv("XDG_CACHE_HOME", cache)
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude"})
+	})
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+
+	root := filepath.Join(data, "agent-profile", "profiles", "claude", "plan")
+	if b, err := os.ReadFile(filepath.Join(root, "skills", "pdf", "SKILL.md")); err != nil || string(b) != "# pdf" {
+		t.Errorf("SKILL.md = %q %v\n%s", b, err, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".ap-ledger.json")); err != nil {
+		t.Errorf("no ledger: %v", err)
+	}
+
+	// A second apply reports every file as an overwrite, and the ledger does
+	// not grow a duplicate.
+	out2, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude"})
+	})
+	if err != nil {
+		t.Fatalf("second apply: %v\n%s", err, out2)
+	}
+	if strings.Contains(out2, "+ skills/pdf/SKILL.md") {
+		t.Errorf("a second apply reported a create:\n%s", out2)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".ap-ledger.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(raw), `"name": "pdf"`); n != 1 {
+		t.Errorf("the ledger holds %d records for pdf, want 1:\n%s", n, raw)
+	}
+}
+
+// A SKILL.md violation must fail in the RESOLUTION phase, so --dry-run reports
+// it and an overwriting apply never starts. Asserting it through --dry-run is
+// what proves the check is not in the materialization half.
+func TestAContractViolationFailsTheDryRun(t *testing.T) {
+	repo := seedRepo(t, map[string]string{"skills/pdf/README.md": "no skill file here"})
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--dry-run"})
+	})
+	if err == nil {
+		t.Fatal("a skill with no SKILL.md passed --dry-run")
+	}
+	if !strings.Contains(err.Error(), "SKILL.md") || !strings.Contains(err.Error(), "pdf") {
+		t.Errorf("error %q does not name the contract and the skill", err)
+	}
+}
+
+// A manifest NAMED "default" reaches the configuration the developer's own
+// agent reads, and ap cannot undo a write there by deleting a profile. That
+// field is what decides it, and the manifest may have come from a repository
+// somebody else wrote — so off a terminal it refuses: a pipe is not consent.
+func TestAManifestNamedDefaultRefusesOffATerminal(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	binDir := t.TempDir()
+	stubExecutable(t, binDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(path, []byte("version: \"1\"\nname: default\ntargets:\n  - claude\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A pipe is not a terminal, and it is not consent. Substituted explicitly
+	// rather than relying on whatever `go test` was given: this test asserts
+	// what happens off a terminal, so it must be off one by construction.
+	oldStdin := os.Stdin
+	r, w, perr := os.Pipe()
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin }()
+
+	err := dispatch([]string{"manifest", "apply", path, "--target", "claude"})
+	if err == nil {
+		t.Fatal("apply into the real config succeeded with no terminal and no --yes")
+	}
+	// The message must name the resolved absolute path: that display is the
+	// only thing distinguishing the two blast radii on one screen.
+	for _, want := range []string{"real configuration", "--yes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	// --dry-run needs no gate: it writes nothing to the root.
+	if _, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--dry-run"})
+	}); err != nil {
+		t.Errorf("--dry-run against default was gated: %v", err)
 	}
 }

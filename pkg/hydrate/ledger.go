@@ -1,0 +1,190 @@
+package hydrate
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/ackstorm/agent-profile/pkg/schema"
+)
+
+// ledgerName is the ledger inside the root. A dotfile because a root can be the
+// user's real configuration directory.
+const ledgerName = ".ap-ledger.json"
+
+// ledgerVersion is bumped only for a change no older reader could survive.
+const ledgerVersion = 1
+
+// FileRec records one file that was written.
+//
+// The shape is ach's, and the three fields are what make the ledger honest
+// rather than authoritative (§33.1):
+//
+//   - Hash: on removal, a file whose hash no longer matches was edited by the
+//     user, so the verdict is "modified" and it is left alone. The ledger never
+//     claims a file it no longer recognises.
+//   - Merge and Keys: a deep-merged settings.json or config.toml loses only the
+//     dotted keys that were contributed. The file survives, and every key the
+//     user added by hand survives with it.
+//
+// Merge is empty for a whole-file write. Phase 5 writes "deep" for structured
+// configuration; Phase 6 writes "composite" for a marker-bounded region.
+type FileRec struct {
+	RelPath string   `json:"relPath"`
+	Hash    string   `json:"hash"`
+	Merge   string   `json:"merge,omitempty"`
+	Keys    []string `json:"keys,omitempty"`
+}
+
+// ResourceRec is one materialized resource: the first arm of the ledger.
+//
+// ResolvedRef is a RECEIPT, not a pin (§32.2). Nothing re-uses it as a
+// resolution input — a ref re-resolves on every run — and it exists so drift is
+// reportable without a lockfile.
+type ResourceRec struct {
+	Name        string         `json:"name"`
+	Kind        string         `json:"kind"`
+	Ref         string         `json:"ref,omitempty"`
+	Source      *schema.Source `json:"source,omitempty"`
+	ResolvedRef string         `json:"resolvedRef,omitempty"`
+	InstalledAt string         `json:"installedAt"`
+	Files       []FileRec      `json:"files"`
+
+	// The four fields below exist for ONE reader: `ap manifest export` (§35.2),
+	// which must "produce a manifest that validates and re-applies cleanly".
+	//
+	// Three resources cannot be written back from the files alone. An MCP
+	// server and a model block materialize into four different native shapes,
+	// so reversing them means four reverse mappings run over a document the
+	// user may have edited since; an artifact's destination is many-to-one, so
+	// the rel path does not name the destination that produced it. Recording
+	// the DECLARATION is one field each and cannot drift.
+	//
+	// None of them can hold a secret VALUE (§34). They are schema types, and a
+	// schema.Profile has no field capable of holding a resolved one —
+	// resolution lands in schema.Resolved, a different type that never reaches
+	// here. The ban is structural rather than a rule someone must remember.
+	Destination string                    `json:"destination,omitempty"`
+	MCP         *schema.MCP               `json:"mcp,omitempty"`
+	Model       *schema.Model             `json:"model,omitempty"`
+	Secrets     map[string]schema.Binding `json:"secrets,omitempty"`
+}
+
+// There is deliberately NO second arm.
+//
+// One was designed — resolved marketplace definitions, so an ad-hoc
+// `ap install claude:plan skill xlsx@anthropic-skills` could resolve the
+// marketplace name a week after the manifest that declared it was thrown away.
+// It is out of v1 with the thing that needed it: install requires a manifest or
+// a direct source, and a ref is only ever resolved inside the manifest that
+// declares its marketplace. Reintroduction trigger: ad-hoc install by ref.
+//
+// A marketplace therefore records nothing here — it materializes no file, and
+// the manifest is where its definition lives.
+
+// Ledger is per root, and it is the ONLY state (§33.1).
+type Ledger struct {
+	Version   int           `json:"version"`
+	Resources []ResourceRec `json:"resources"`
+}
+
+// LoadLedger reads a root's ledger. An absent one is an EMPTY ledger, not an
+// error: a root nothing has been applied to is the normal first case, and
+// making it an error would put a "does this exist yet" branch in every caller.
+func LoadLedger(root string) (*Ledger, error) {
+	raw, err := os.ReadFile(filepath.Join(root, ledgerName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &Ledger{Version: ledgerVersion}, nil
+		}
+		return nil, fmt.Errorf("reading the ledger in %s: %w", root, err)
+	}
+	var l Ledger
+	if err := json.Unmarshal(raw, &l); err != nil {
+		return nil, fmt.Errorf("the ledger in %s is corrupt: %w", root, err)
+	}
+	if l.Version > ledgerVersion {
+		return nil, fmt.Errorf("the ledger in %s was written by a newer ap (version %d)", root, l.Version)
+	}
+	return &l, nil
+}
+
+// Save writes the ledger atomically: a temporary file in the same directory,
+// then a rename.
+//
+// The same shape source.Cache.Publish uses, for the same reason. A half-written
+// ledger claims files that may not exist, and every later verdict — remove,
+// skip, report as modified — would rest on a record that was never true.
+func (l *Ledger) Save(root string) error {
+	l.Version = ledgerVersion
+	data, err := json.MarshalIndent(l, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
+	// The temp file is a sibling, so the rename stays within one filesystem.
+	// os.Rename across devices fails, and a copy fallback is exactly the
+	// non-atomic write this avoids.
+	f, err := os.CreateTemp(root, ".ap-ledger-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return err
+	}
+	// Flush to the device before the rename. A rename is atomic with respect
+	// to other readers, not with respect to a power loss that leaves the
+	// renamed inode empty.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(root, ledgerName))
+}
+
+// Resource returns the record for one resource, if the ledger holds it.
+func (l *Ledger) Resource(kind, name string) (ResourceRec, bool) {
+	for _, r := range l.Resources {
+		if r.Kind == kind && r.Name == name {
+			return r, true
+		}
+	}
+	return ResourceRec{}, false
+}
+
+// Put replaces a resource's record, or appends it. Apply is additive over the
+// ROOT, not over the ledger: re-applying a resource replaces what is recorded
+// for it, or the record would grow a duplicate on every run.
+func (l *Ledger) Put(r ResourceRec) {
+	for i, existing := range l.Resources {
+		if existing.Kind == r.Kind && existing.Name == r.Name {
+			l.Resources[i] = r
+			return
+		}
+	}
+	l.Resources = append(l.Resources, r)
+}
+
+// Delete drops a resource's record. Removal is the only caller: apply replaces
+// a record through Put and never needs to forget one.
+func (l *Ledger) Delete(kind, name string) {
+	for i, r := range l.Resources {
+		if r.Kind == kind && r.Name == name {
+			l.Resources = append(l.Resources[:i], l.Resources[i+1:]...)
+			return
+		}
+	}
+}

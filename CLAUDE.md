@@ -47,6 +47,10 @@ Read the file before touching the code. Not suggestions.
 | `Dockerfile.smoke`, `Dockerfile.devtools`, `scripts/smoke.sh`   | `docs/references/SMOKE.md`       |
 | `internal/profile/share.go`, share conflicts, promotion         | `docs/references/CREDENTIALS.md` |
 | "the profile behaves oddly", `Agent.FirstRun`, onboarding flags | `docs/references/CLAUDE-JSON.md` |
+| `pkg/schema/*`, composition, the YAML subset                    | `docs/references/DECLARATIVE.md` |
+| `pkg/source/*`, the credential guards, the cache, fetching       | `docs/references/DECLARATIVE.md` |
+| `pkg/hydrate/*`, the ledger, the root lock, materialization      | `docs/references/DECLARATIVE.md` |
+| `internal/run/handoff_*.go`, anything Windows                    | `docs/references/WINDOWS.md`     |
 
 Everything else in this file is a standing rule: it applies before you know
 which file you are about to touch.
@@ -244,60 +248,163 @@ The sandbox check for it is asserted on `arg:[…]`, never on `argv:`. The stub'
 argument from two — which is the entire property under test. That check was
 written against `argv:` first and would have been vacuous.
 
-## `ap sync` runs other people's shell commands, on purpose
+## The ledger is the only state, and it bounds every removal
 
-`git clone` a repository and `ap sync` runs the commands inside it as you. That
-is arbitrary code execution by design and cannot be engineered away — it is the
-feature. Everything in `cmd/ap/sync.go` exists to stop it happening by surprise,
-and four rules hold it together. The reasoning is in
-`docs/specs/ap-sync-v1.md`; these are the parts that must not drift.
+`ap sync` is gone, and with it the one thing in this program that ran other
+people's shell commands. A capability is now DECLARED and ap materializes it,
+which is what lets one declaration work on four runtimes and what lets
+`ap uninstall` know precisely what to take back. Running a tool's own installer
+is no longer expressible — `ap env <ref> -- <installer>` is the honest
+replacement, and it is the user's command, not ap's.
 
-- **`install` goes to `sh -c`; a variant's `args` goes to a tokenizer.** The two
-  fields are both strings and look alike, so the difference is stated rather
-  than inferred. An install command is a shell one-liner by nature; an agent's
-  argv is data. `--prompt $HOME` reaches the agent as those characters. Never
-  give `args` a shell, and never take one away from `install`.
-- **`args` is tokenized BEFORE `{}` is substituted.** Substituting first would
-  let a caller's argument change how many tokens a variant has — one prompt
-  silently becoming three arguments, which claude then drops without a word.
-  `TestSyncVariantArgsTokenizeBeforeSubstituting` fails with four tokens if
-  anyone reverses it.
-- **An inherited variable is stripped by VALUE, never by name.** A value that
-  resolves inside `profile.Root()` goes; everything else stays. Stripping the
-  four config variables by name would delete `XDG_CONFIG_HOME` for a claude
-  install — that string is opencode's config variable *and* the one every other
-  program on the machine reads — and break `npm` for everyone.
-  `TestSyncKeepsAConfigVariableThatPointsOutsideTheProfileRoot` is the guard.
-- **`bootstrap` runs before any profile exists, with no agent variable set.**
-  Not a convention: it is what makes "install this into all my profiles at once"
-  inexpressible. An earlier draft ran a profile-level list once per platform,
-  and its own example leaked into the real home — `npx … --claude --global`
-  during codex's turn sees no `CLAUDE_CONFIG_DIR` and writes to `~/.claude`.
+Four rules hold the state surface together. The reasoning is in
+`docs/specs/agent-profile-declarative-spec-v0.6.3.md` §33 and §35.
 
-`name: default` runs against the configuration the developer uses every day,
-which ap cannot undo. It used to be gated **separately** from `--yes`; that
-second flag, `--allow-default`, was removed on request — one run, one question.
-`--yes` now covers it. What must not be lost with it is the display: a default
-target is printed with its resolved absolute path and named as the real config,
-in `--dry-run` and in the prompt, because that display is now the only thing
-distinguishing the two blast radii. Off a terminal the single gate still
-refuses; a pipe is not consent, checked with `stdinIsTerminal` and not with
-`answered()`. Nothing is ever created for the sentinel — no directory, no
-links, no shim, no wrapper — and `TestSyncDefaultNeverCreatesLinksOrShims`
-holds that line.
+- **A manifest is an INPUT; the ledger is the STATE.** Nothing writes back to a
+  manifest, and applying one does not make it authoritative. `ap list <ref>`
+  reads the ledger, never a manifest, because a manifest says nothing about what
+  is installed. `ap manifest export <ref>` closes the loop the other way.
+- **The preview and the action share ONE classifier.** `hydrate.Remove` is the
+  only entry point and calls `classify` exactly once, so `--dry-run` cannot
+  drift from what happens. Do not add a second path that "just previews".
+- **The hash gates a whole-file record. It CANNOT gate a merged one.** Apply
+  merges each MCP server into one document in turn, so installing a second
+  server invalidates the first one's recorded hash the moment it lands. On a
+  root with two servers every recorded hash but the last is already stale.
+  Gating on it would refuse every merged uninstall on any root holding more
+  than one server — the ledger's headline feature, dead on arrival. A merged
+  record is bounded by its recorded KEYS, which is what `MergeInto` returns
+  them for. `TestUninstallingOneMCPServerLeavesEveryOtherKeyIntact` is the
+  guard, and it goes red if anyone "makes removal consistent".
+- **The credential value is never written down.** `--auth-secret-env VAR` and
+  `--auth-secret-file <path>` record the BINDING only (§13.1, §34) — this is a
+  deliberate divergence from `ach-cli`, which persists tokens in a
+  `credentials.json`. The cost is stated rather than discovered: the variable
+  must be present on every run, where a tool that stores the token asks once.
 
-Two limits are stated in the spec rather than defended here, and neither is a
-bug to be fixed: **ap cannot tell whether an install command honoured the
-variable** (§8.5 — a tool that resolves `~/.claude` directly writes to the real
-home and reports success; the fix belongs upstream, and sandboxing it was
-rejected on four counts), and **a manifest is only as reproducible as its
-install commands** (§14 — `@latest` is whatever it was that day; ap does not pin
-and does not lock).
+Removal is safe against `<agent>:default` — the agent's real configuration
+directory, the case SPEC v0.5 gave up on — precisely because the ledger can tell
+ap's writes from the user's. There is no gate on `ap uninstall`: it is bounded
+by a record, not by a question.
 
-`ap sync` is additive. Nothing is pruned, nothing is uninstalled, and there is
-no ownership tracking. The one exception is a variant of the same name, which is
-overwritten — reported as `updated`, in both the report and `--dry-run`, because
-it is the only place v1 destroys something a user typed.
+Apply stays **additive**, and v1 ships no flag that changes it. A manifest that
+stops declaring a resource leaves it alone. Whole-root convergence (`--prune`)
+is deferred to its first real consumer, `ach-runtime`'s init container.
+
+`ap install` takes a direct source, never a bare `<item>@<marketplace>`: v1
+records no marketplace definition, so there is nothing on the root to resolve
+the catalogue name against. It is refused BY NAME — without that refusal the ref
+is treated as a literal resource name and the user gets a contract error naming
+a cache directory.
+
+## A manifest addresses its own profile
+
+`ap manifest apply <manifest>` takes the manifest and nothing else. A manifest
+IS a profile's definition: `name` is that profile's name and `targets` are the
+runtimes it can be materialized for, so neither is restated on the command line.
+`--profile` overrides the name.
+
+**Naming the runtimes is REQUIRED** — `--target`, repeatable, or `--all-targets`
+— and that holds even when the manifest declares exactly one. It is not
+ceremony: `targets` says what a manifest CAN be materialized for, not what the
+caller wants today, and a manifest that targets claude now can gain three later.
+A script that never named its runtime would quietly start building four profiles
+on somebody's laptop. Do not add a default here.
+
+An earlier version took `<agent>:<profile>` here and ignored both fields. Do not
+restore it. The justification was §33.2's "a root is a parameter, never inferred
+from the environment" — misapplied, because a manifest is the INPUT the user
+named, not the environment, and `ap sync` addressed profiles exactly this way
+before it (`name` was "the logical profile name"; `platforms` chose the
+runtimes). What §33.2 still forbids is intact: no active profile, no default
+manifest location, nothing reading a root out of the environment.
+
+Two guards come with it, and both are load-bearing:
+
+- **`agentreg.ValidNameAllowDefault` runs on the manifest's `name`.** A manifest
+  can come from a repository somebody else wrote, so `name: ../../../.ssh` is a
+  path traversal with an author behind it — the same class as the `--from` bug.
+  The sentinel is permitted here and only here, because a manifest legitimately
+  provisions the configuration the agent already uses.
+- **`name: default` is gated ONCE for the whole run**, naming each agent with
+  its resolved absolute path, and refuses off a terminal. Per-target gating
+  would ask four times for one decision.
+
+`--root` still names a directory outright, and on apply it needs exactly one
+`--target`: one directory holds one runtime's configuration, and writing two
+into it would have them overwrite each other with no way to say so.
+
+`install`, `uninstall`, `list` and `export` keep `<agent>:<profile>`. They have
+no manifest to read a name from — that asymmetry is the reason, not an
+inconsistency to tidy away.
+
+## A root may be named literally, and then nothing is inferred
+
+`--root <dir>` names the materialization directory outright, and the subject is
+then a bare agent name. It is the artifact `ach-runtime` runs as an init
+container: hydrate onto a volume, exit, and let the main container exec the
+runtime against what was left behind.
+
+It is **not** a third root. SPEC §33.2's two roots and this are one mechanism —
+point the agent's configuration-directory variable at a directory — with the
+directory stated instead of derived. The project root stays deferred because it
+is a *different* mechanism.
+
+- **A reference and `--root` together is an error.** They answer the same
+  question, and a silent precedence rule is how the wrong directory gets
+  written. `TestARootIsNamedOnce` is the guard.
+- **Neither is not a default.** A bare agent name with no `--root` is refused
+  with the way forward, never resolved to somewhere nobody named.
+- **A literal root is not gated.** It is neither the user's real configuration
+  nor a profile ap manages, so there is nothing ap could claim to undo — and
+  the resolved absolute path the gate exists to display is the argument the
+  user just typed.
+- **Preflight's executable checks are conditional on `runtimeIsLocal`.** Both
+  of them — the runtime CLI and every active stdio MCP command — belong to the
+  runtime's process, not to ap. An init container has neither and must not:
+  that separation is the topology. The runtime is local whenever the root came
+  from a reference, because a profile exists to be launched.
+
+`make hydrate` builds `Dockerfile.hydrate` and runs it headlessly — no TTY, no
+`$HOME`, non-root — against a git repository mounted in. Keep that image to one
+binary plus git and CA certificates; it pins nothing, because freezing the trust
+store is not a reproducibility win.
+
+## `stdinIsTerminal` asks the kernel, and it must keep doing so
+
+It used to test `os.ModeCharDevice`. `/dev/null` is a character device — so are
+`/dev/zero` and `/dev/urandom` — and systemd, cron and every container runtime
+hand a process `/dev/null` on stdin by default. Every one of them was reported
+as a terminal, and the real-configuration gate **printed its question and read
+the answer off a pipe**, where the rule is that it refuses without asking.
+`docker run` with no `-t` is what found it, after the check had been wrong since
+the gate was written.
+
+It is a `TCGETS` ioctl now (`TIOCGETA` on the BSDs and macOS), which is what a
+terminal actually is and what `x/term` does — spelled out here because the
+standard library is the only dependency. Do not "simplify" it back to a mode
+test: a check that accepts any character device accepts one that can deliver a
+`y`.
+
+`GOOS=darwin go vet ./...` is in `crossbuild` for exactly this: the constant
+exists under one name on linux and another on darwin, `verify` runs in a linux
+container, and a macOS-only defect has shipped that way before.
+
+## Render's output must parse
+
+Two defects lived in `pkg/schema/render.go` because its tests compared emitted
+text to expected text, so a renderer and a parser that disagreed about the
+grammar both stayed green:
+
+- a git or archive `auth` block emitted `secret:` where the decoder requires a
+  nested `value_from:`, so the manifest did not parse at all;
+- a header `prefix` of `"Bearer "` came back as `"Bearer"`, because a bare
+  scalar is right-trimmed — silent, and it materialized `Bearer${TOKEN}` with no
+  separator.
+
+`TestRenderRoundTripsThroughTheParser` feeds render's output to `Effective` and
+asserts a fixed point. Any new emitter belongs in that fixture, and
+`quoteIfNeeded`'s list is read off `scalarNode`, not guessed at.
 
 ## install.sh is a `curl | bash` target, so treat it as one
 
@@ -367,8 +474,18 @@ is not that and must not grow into it.
   default` (the `default` sentinel — see `profile.Default`) reaches the real
   config through the existing `--from` flag. A second flag would be
   redundant, not missing.
-- **Windows.** It would need a second execution model and a second sharing
-  mechanism. The build tags say so.
+- **Windows for the LAUNCHER, for now.** No longer a non-goal: `run` on Windows
+  is **spawn semantics** — start the child, proxy its exit code — because
+  Windows has no exec replacement (`syscall.Exec` exists there as a stub that
+  always returns `EWINDOWS`, which is why the unix code compiles for Windows and
+  fails at the one moment that matters). `internal/run/handoff_windows.go` is
+  that path, and `make crossbuild` vets it so it cannot rot while unshipped.
+
+  Binaries are **not** published yet, and the four blockers are specific rather
+  than a general reluctance — see `docs/references/WINDOWS.md`. The first is
+  silent: a wrapper named `claude:plan` on NTFS creates an alternate data stream
+  on a file called `claude` and reports success. Full command surface or
+  nothing; a hydration-only Windows binary is explicitly not the answer.
 - **`--pure`.** It set `OPENCODE_PURE` (identical to opencode's own `--pure`),
   `OPENCODE_DISABLE_PROJECT_CONFIG` and `OPENCODE_DISABLE_DEFAULT_PLUGINS`. It did
   not isolate anything — the global config still loaded — and the project-config
@@ -399,11 +516,28 @@ build failure instead of a silent toolchain download.
 ## Before claiming done
 
 ```bash
-make verify        # fmt-check, shellcheck, vet, lint, test (race + shuffle), vulncheck
+make verify        # fmt-check, shellcheck, vet, lint, test (race + shuffle), examples, vulncheck
 make secrets       # gitleaks over the full history
 make sandbox       # ap's own side, against a throwaway home, with stub agents
+make walkthrough   # the two sequences a person types, newcomer and expert
 make smoke         # the four real agents, in their own image
+make hydrate       # the hydrator image, headless: no TTY, no $HOME, non-root
 ```
+
+`walkthrough` is not a second sandbox. `sandbox` asserts properties one at a
+time; `walkthrough` runs a SEQUENCE in the order somebody meets it and prints
+what they would see. It exists because three defects shipped past a green
+sandbox and were found by typing commands by hand — `ap list <ref> --raw`
+ignoring `--raw`, `ap list <agent> --root <dir>` ignoring `--root` entirely, and
+`ap list` calling `default` read-only long after the ledger made that false.
+None of those is visible to a per-property assertion; all three are obvious in a
+transcript. Read its output when you change a command's surface, do not just
+check that it is green.
+
+`examples` composes every shipped example manifest for every target it declares,
+and it is inside `verify` because it costs milliseconds and because a shipped
+example that does not parse has already happened — the README's own example
+manifest used flow syntax this subset refuses.
 
 `make doctor` is the fast preflight when something looks wrong with the
 container itself rather than the code.

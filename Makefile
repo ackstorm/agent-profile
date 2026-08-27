@@ -59,7 +59,9 @@ AP_IN_DEVTOOLS ?= 0
 # BIN is forwarded for `smoke`, which builds a linux binary into a path of its
 # own rather than clobbering ./ap — on macOS that would leave a ./ap the host
 # cannot execute. Everywhere else it is the default and forwarding it is a no-op.
-FORWARD = VERSION='$(VERSION)' COMMIT='$(COMMIT)' DATE='$(DATE)' GOOS='$(GOOS)' GOARCH='$(GOARCH)' BIN='$(BIN)'
+FUZZTIME ?= 30s
+
+FORWARD = FUZZTIME='$(FUZZTIME)' VERSION='$(VERSION)' COMMIT='$(COMMIT)' DATE='$(DATE)' GOOS='$(GOOS)' GOARCH='$(GOARCH)' BIN='$(BIN)'
 
 define in_container
 	@if [ "$(AP_IN_DEVTOOLS)" = "1" ]; then \
@@ -71,8 +73,8 @@ endef
 
 # The private in-container halves. Declared phony so a stray file named after
 # one of them can never make a gate silently no-op.
-.PHONY: _build _snapshot _test _test-verbose _cover _fuzz _fmt _fmt-check _vet \
-	_lint _lint-fix _vulncheck _secrets _shellcheck _release-publish _verify
+.PHONY: _build _snapshot _quick _test _test-one _test-verbose _cover _fuzz _fmt _fmt-check _vet \
+	_lint _lint-fix _vulncheck _crossbuild _secrets _shellcheck _release-publish _verify
 
 ##@ General
 
@@ -209,6 +211,19 @@ test: ## Run all tests with race detection and shuffling.
 _test:
 	go test -race -shuffle=on -count=1 -coverprofile coverage.out ./...
 
+.PHONY: quick
+quick: ## Inner-loop gate: vet + tests, no race, no coverage. Use `verify` before done.
+	$(call in_container,_quick P='$(P)')
+_quick:
+	go vet ./...
+	go test -count=1 $(if $(P),$(P),./...)
+
+.PHONY: test-one
+test-one: ## Run one test or package. make test-one T=TestName P=./internal/foo/
+	$(call in_container,_test-one T='$(T)' P='$(P)')
+_test-one:
+	go test -race -count=1 -run '$(T)' $(if $(P),$(P),./...)
+
 .PHONY: test-verbose
 test-verbose: ## Run all tests, listing every test name.
 	$(call in_container,_test-verbose)
@@ -222,12 +237,15 @@ _cover: _test
 	go tool cover -func coverage.out | tail -20
 
 .PHONY: fuzz
-fuzz: ## Fuzz the path-validation surfaces, 30s each (the traversal-bug lesson).
+fuzz: ## Fuzz the path-validation and manifest-parsing surfaces, 30s each (the traversal-bug lesson).
 	$(call in_container,_fuzz)
 _fuzz:
-	go test -run '^$$' -fuzz FuzzValidName -fuzztime 30s ./internal/profile/
-	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime 30s ./internal/profile/
-	go test -run '^$$' -fuzz FuzzParse -fuzztime 30s ./internal/manifest/
+	go test -run '^$$' -fuzz FuzzValidName -fuzztime $(FUZZTIME) ./internal/profile/
+	go test -run '^$$' -fuzz FuzzParseVariantRef -fuzztime $(FUZZTIME) ./internal/profile/
+	go test -run '^$$' -fuzz FuzzParseYAML -fuzztime $(FUZZTIME) ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzResolveExtends -fuzztime $(FUZZTIME) ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzValidRelPath -fuzztime $(FUZZTIME) ./pkg/schema/
+	go test -run '^$$' -fuzz FuzzExtractTar -fuzztime $(FUZZTIME) ./pkg/source/
 
 # The agents run in their own image, not on your machine. That image is where the
 # four real binaries live, so this target needs none of them installed on the
@@ -243,6 +261,30 @@ SMOKE_ARCH  ?= $(shell uname -m | sed -e 's/^x86_64$$/amd64/' -e 's/^aarch64$$/a
 smoke: ## Drive the four real agent binaries inside their own container.
 	@$(MAKE) --no-print-directory build GOOS=linux GOARCH=$(SMOKE_ARCH) BIN=.gocache/smoke/ap
 	AP_SMOKE_IMAGE=$(SMOKE_IMAGE) ./scripts/smoke.sh
+
+.PHONY: walkthrough
+walkthrough: ## Run the two sequences a real person types, newcomer and expert.
+	./scripts/walkthrough.sh $(WALK)
+
+.PHONY: examples
+examples: ## Compose every shipped example manifest for every target it declares.
+	$(call in_container,_examples)
+_examples:
+	@for f in examples/agent-profiles/*.yaml; do \
+		printf '  %s ' "$$f"; \
+		go run ./cmd/ap manifest render "$$f" || exit 1; \
+		echo OK; \
+	done
+
+HYDRATE_IMAGE ?= agent-profile-hydrate:latest
+
+.PHONY: hydrate
+hydrate: hydrate-image ## Run the hydrator image headlessly: no TTY, no HOME, root as a parameter.
+	AP_HYDRATE_IMAGE=$(HYDRATE_IMAGE) ./scripts/hydrate-check.sh
+
+.PHONY: hydrate-image
+hydrate-image: ## Build the hydrator image ach-runtime ships as its init container.
+	docker build -t $(HYDRATE_IMAGE) -f Dockerfile.hydrate .
 
 .PHONY: smoke-image
 smoke-image: ## Rebuild the smoke image (the four agents, unpinned on purpose).
@@ -266,13 +308,13 @@ sandbox: ## Run the home-safety checks against a throwaway home in the container
 fmt: ## Format the code.
 	$(call in_container,_fmt)
 _fmt:
-	gofmt -w ./cmd ./internal
+	gofmt -w ./cmd ./internal ./pkg
 
 .PHONY: fmt-check
 fmt-check: ## Fail if any Go file is not gofmt-clean. Does not mutate.
 	$(call in_container,_fmt-check)
 _fmt-check:
-	@out=$$(gofmt -l ./cmd ./internal); \
+	@out=$$(gofmt -l ./cmd ./internal ./pkg); \
 	if [ -n "$$out" ]; then echo "Not gofmt-clean:"; echo "$$out"; exit 1; fi; \
 	echo "OK gofmt-clean"
 
@@ -306,6 +348,23 @@ vulncheck: ## Check dependencies and stdlib for known vulnerabilities.
 _vulncheck:
 	govulncheck ./...
 
+.PHONY: crossbuild
+crossbuild: ## Build the portable half for windows — ach imports it and ships there.
+	$(call in_container,_crossbuild)
+_crossbuild:
+	GOOS=windows GOARCH=amd64 go build ./pkg/...
+	GOOS=darwin  GOARCH=arm64 go build ./pkg/...
+	# internal/run is portable too, and it is the one package where that is a
+	# CLAIM rather than a convenience: handoff_windows.go is the spawn path a
+	# windows ap would take, and vet is what stops it rotting while unshipped.
+	GOOS=windows GOARCH=amd64 go vet ./internal/run/
+	GOOS=windows GOARCH=amd64 go vet ./pkg/...
+	# darwin is a SUPPORTED platform, not a portability claim, and verify runs
+	# in a linux container — so a macOS-only defect has shipped this way before.
+	# The whole unix tree is vetted for it, which is what catches a syscall
+	# constant that exists on one of them and not the other.
+	GOOS=darwin  GOARCH=arm64 go vet ./...
+
 .PHONY: secrets
 secrets: ## Scan the full git history for secrets.
 	$(call in_container,_secrets)
@@ -315,9 +374,9 @@ _secrets:
 .PHONY: verify
 verify: ## Everything CI runs, in one container hop.
 	$(call in_container,_verify)
-_verify: _fmt-check _shellcheck _vet _lint _test _vulncheck
+_verify: _fmt-check _shellcheck _vet _lint _test _examples _vulncheck _crossbuild
 	@echo
-	@echo "verify OK — and before pushing a public change, also: make secrets smoke"
+	@echo "verify OK — and before pushing a public change, also: make secrets walkthrough smoke"
 
 ##@ Housekeeping
 

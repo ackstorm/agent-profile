@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 func envMap(t *testing.T, env []string) map[string]string {
@@ -22,7 +22,7 @@ func envMap(t *testing.T, env []string) map[string]string {
 }
 
 func TestEnvSetsConfigVar(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got := envMap(t, Env(a, "/p/plan", []string{"PATH=/usr/bin", "HOME=/home/x"}))
 	if got["CLAUDE_CONFIG_DIR"] != "/p/plan" {
 		t.Errorf("CLAUDE_CONFIG_DIR = %q, want /p/plan", got["CLAUDE_CONFIG_DIR"])
@@ -35,7 +35,7 @@ func TestEnvSetsConfigVar(t *testing.T) {
 // A pre-existing value for the same variable must be replaced, not duplicated:
 // the user may already have exported it.
 func TestEnvOverridesExistingValue(t *testing.T) {
-	a, _ := agent.Lookup("codex")
+	a, _ := agentreg.Lookup("codex")
 	env := Env(a, "/p/review", []string{"CODEX_HOME=/home/x/.codex", "PATH=/usr/bin"})
 	if got := envMap(t, env); got["CODEX_HOME"] != "/p/review" {
 		t.Errorf("CODEX_HOME = %q, want /p/review", got["CODEX_HOME"])
@@ -67,8 +67,8 @@ func TestEnvOverridesExistingValue(t *testing.T) {
 // allowlist would have permitted.
 func TestEnvOnlySetsPathsInsideTheProfile(t *testing.T) {
 	const dir = "/p/x"
-	for _, name := range agent.Names() {
-		a, _ := agent.Lookup(name)
+	for _, name := range agentreg.Names() {
+		a, _ := agentreg.Lookup(name)
 		for k, v := range envMap(t, Env(a, dir, nil)) {
 			rel, err := filepath.Rel(dir, v)
 			if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
@@ -92,8 +92,8 @@ func TestEnvNeverRedirectsStateOrCache(t *testing.T) {
 		"XDG_CACHE_HOME=/home/x/.cache",
 		"HOME=/home/x",
 	}
-	for _, name := range agent.Names() {
-		a, _ := agent.Lookup(name)
+	for _, name := range agentreg.Names() {
+		a, _ := agentreg.Lookup(name)
 		shimmed := map[string]bool{}
 		for _, s := range a.Shims {
 			shimmed[s.Env] = true
@@ -123,7 +123,7 @@ func TestEnvNeverRedirectsStateOrCache(t *testing.T) {
 // bare agent — measured: a session created inside `opencode:plan` landed in
 // ~/.local/share/opencode/opencode.db.
 func TestOpencodeRedirectsDataThroughAShim(t *testing.T) {
-	a, _ := agent.Lookup("opencode")
+	a, _ := agentreg.Lookup("opencode")
 	got := envMap(t, Env(a, "/p/x", []string{"XDG_DATA_HOME=/real/share"}))
 	if want := "/p/x/xdg-data"; got["XDG_DATA_HOME"] != want {
 		t.Errorf("XDG_DATA_HOME = %q, want %q", got["XDG_DATA_HOME"], want)
@@ -136,7 +136,7 @@ func TestOpencodeRedirectsDataThroughAShim(t *testing.T) {
 // Moved here from internal/profile, which imported run.Env only to call it -
 // this is where the behaviour actually lives.
 func TestRunDefaultSetsNoConfigVariable(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	env := Env(a, "", nil)
 	for _, e := range env {
 		if strings.HasPrefix(e, a.ConfigEnv+"=") {
@@ -151,7 +151,7 @@ func TestRunDefaultSetsNoConfigVariable(t *testing.T) {
 // runs against the PARENT profile instead of the real config, because base
 // (normally os.Environ()) still carries the inherited value straight through.
 func TestEnvStripsInheritedConfigVarForDefault(t *testing.T) {
-	a, _ := agent.Lookup("claude")
+	a, _ := agentreg.Lookup("claude")
 	got := envMap(t, Env(a, "", []string{"CLAUDE_CONFIG_DIR=/parent/profile", "PATH=/usr/bin"}))
 	if v, ok := got["CLAUDE_CONFIG_DIR"]; ok {
 		t.Errorf("default must strip an inherited config var, still got %q", v)
@@ -165,8 +165,8 @@ func TestEnvStripsInheritedConfigVarForDefault(t *testing.T) {
 // config variable. A second variable appearing for an agent without a shim
 // should be a deliberate decision, not a side effect.
 func TestEnvSetsOnlyTheConfigVars(t *testing.T) {
-	for _, name := range agent.Names() {
-		a, _ := agent.Lookup(name)
+	for _, name := range agentreg.Names() {
+		a, _ := agentreg.Lookup(name)
 		got := Env(a, "/p/x", nil)
 		wantLen := 1
 		if len(a.Shims) > 0 {
@@ -182,7 +182,7 @@ func TestEnvSetsOnlyTheConfigVars(t *testing.T) {
 // root: the agent looks for its own name inside whatever it is given, and the
 // profile root does not contain a directory called "opencode".
 func TestEnvPointsAShimmedAgentAtTheShimDir(t *testing.T) {
-	oc, _ := agent.Lookup("opencode")
+	oc, _ := agentreg.Lookup("opencode")
 	if len(oc.Shims) == 0 {
 		t.Fatal("opencode has no shim spec; this test no longer describes it")
 	}
@@ -199,7 +199,7 @@ func TestEnvPointsAShimmedAgentAtTheShimDir(t *testing.T) {
 // An agent with no shim gets the profile itself, unchanged.
 func TestEnvPointsUnshimmedAgentsAtTheProfile(t *testing.T) {
 	for _, name := range []string{"claude", "codex", "pi"} {
-		a, _ := agent.Lookup(name)
+		a, _ := agentreg.Lookup(name)
 		if got := envMap(t, Env(a, "/p/plan", nil)); got[a.ConfigEnv] != "/p/plan" {
 			t.Errorf("%s: %s = %q, want /p/plan", name, a.ConfigEnv, got[a.ConfigEnv])
 		}
@@ -209,7 +209,7 @@ func TestEnvPointsUnshimmedAgentsAtTheProfile(t *testing.T) {
 // `ap env` output must be stable between runs: the overrides come from a map, so
 // without sorting the order changed on every invocation.
 func TestEnvOutputIsSorted(t *testing.T) {
-	oc, _ := agent.Lookup("opencode")
+	oc, _ := agentreg.Lookup("opencode")
 	first := Env(oc, "/p/x", nil)
 	for range 8 {
 		got := Env(oc, "/p/x", nil)
@@ -230,7 +230,7 @@ func TestEnvOutputIsSorted(t *testing.T) {
 // subdirectory of the profile. TestEnvOnlySetsPathsInsideTheProfile already
 // guarantees they stay inside; this one guarantees they are all set at all.
 func TestEnvSetsOneVariablePerShim(t *testing.T) {
-	a := agent.Agent{Name: "x", ConfigEnv: "XDG_CONFIG_HOME", Shims: []agent.Shim{
+	a := agentreg.Agent{Name: "x", ConfigEnv: "XDG_CONFIG_HOME", Shims: []agentreg.Shim{
 		{Env: "XDG_CONFIG_HOME", Rel: "xdg", Entry: "x", Fallback: ".config"},
 		{Env: "XDG_DATA_HOME", Rel: "xdg-data", Entry: "x", Fallback: ".local/share"},
 	}}

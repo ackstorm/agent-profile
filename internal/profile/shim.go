@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // ConfigBase is the directory the agent's config variable normally resolves to,
@@ -20,10 +20,10 @@ import (
 // This must be evaluated against the environment ap inherited, before ap sets
 // anything, or the shim would end up pointing at itself.
 //
-// Delegates to agent.ConfigBase, which is also what opencode's registry entry
+// Delegates to agentreg.ConfigBase, which is also what opencode's registry entry
 // derives its Config from — one definition, not two that can drift apart.
 func ConfigBase() string {
-	return agent.ConfigBase()
+	return agentreg.ConfigBase()
 }
 
 // Shim builds the directory each of a's shims points at, and re-asserts them.
@@ -43,7 +43,7 @@ func ConfigBase() string {
 //
 // Re-asserted on every run because the real bases gain entries over time, and a
 // profile created last month must not hide a tool installed yesterday.
-func Shim(a agent.Agent, dir string) (foundReal []string, err error) {
+func Shim(a agentreg.Agent, dir string) (foundReal []string, err error) {
 	for _, s := range a.Shims {
 		found, err := shimOne(s, dir, a.Name)
 		if err != nil {
@@ -59,7 +59,7 @@ func Shim(a agent.Agent, dir string) (foundReal []string, err error) {
 
 // shimOne builds a single shim directory. This is what Shim's body used to be,
 // with the base taken from the spec instead of hardcoded to ConfigBase.
-func shimOne(s agent.Shim, dir, agentName string) (foundReal []string, err error) {
+func shimOne(s agentreg.Shim, dir, agentName string) (foundReal []string, err error) {
 	shimDir := filepath.Join(dir, s.Rel)
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func shimOne(s agent.Shim, dir, agentName string) (foundReal []string, err error
 
 // shimTargets maps each name in the shim to what it must point at: the agent's
 // own name to the profile, everything else in the real config base to itself.
-func shimTargets(s agent.Shim, dir, base string) (map[string]string, error) {
+func shimTargets(s agentreg.Shim, dir, base string) (map[string]string, error) {
 	want := map[string]string{s.Entry: dir}
 	entries, err := os.ReadDir(base)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {

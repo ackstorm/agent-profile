@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // A launch variant is a set of arguments over an existing profile's
@@ -51,7 +51,7 @@ func VariantsRoot() string {
 // what that argument missed is that the pair is one line only when you already
 // know the variant exists, and you find that out from an error after typing the
 // whole payload.
-func WriteVariant(a agent.Agent, name, v string, args []string, replace bool) error {
+func WriteVariant(a agentreg.Agent, name, v string, args []string, replace bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("variant %s:%s:%s would carry no arguments, so it would behave identically to %s:%s",
 			a.Name, name, v, a.Name, name)
@@ -138,7 +138,7 @@ func WriteVariant(a agent.Agent, name, v string, args []string, replace bool) er
 }
 
 // VariantArgs returns the arguments recorded for a:name:v.
-func VariantArgs(a agent.Agent, name, v string) ([]string, error) {
+func VariantArgs(a agentreg.Agent, name, v string) ([]string, error) {
 	root, err := openVariantsRoot(false)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, noVariant(a, name, v)
@@ -184,7 +184,7 @@ func VariantArgs(a agent.Agent, name, v string) ([]string, error) {
 
 // Variants lists the variant names recorded for a profile, sorted. A missing
 // directory means none, not an error — most profiles have none.
-func Variants(a agent.Agent, name string) ([]string, error) {
+func Variants(a agentreg.Agent, name string) ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(VariantsRoot(), a.Name, name))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
@@ -201,7 +201,7 @@ func Variants(a agent.Agent, name string) ([]string, error) {
 
 // DeleteVariant removes one variant. The profile is untouched — a variant holds
 // two lines of text, and that is the whole reason it is cheap to try five.
-func DeleteVariant(a agent.Agent, name, v string) error {
+func DeleteVariant(a agentreg.Agent, name, v string) error {
 	root, err := openVariantsRoot(false)
 	if errors.Is(err, fs.ErrNotExist) {
 		return noVariant(a, name, v)
@@ -221,7 +221,7 @@ func DeleteVariant(a agent.Agent, name, v string) error {
 // DeleteVariants removes every variant of a profile, for `ap delete
 // <agent>:<profile>`. A variant without its parent is a command that fails
 // confusingly — the same reason delete already removes wrappers.
-func DeleteVariants(a agent.Agent, name string) error {
+func DeleteVariants(a agentreg.Agent, name string) error {
 	root, err := openVariantsRoot(false)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil // nothing was ever recorded
@@ -249,7 +249,7 @@ func openVariantsRoot(create bool) (*os.Root, error) {
 // noVariant is the error for a reference that names no variant. Listing what
 // the profile does have turns a typo into a one-line fix, the same as notThere
 // does for a profile.
-func noVariant(a agent.Agent, name, v string) error {
+func noVariant(a agentreg.Agent, name, v string) error {
 	have, err := Variants(a, name)
 	if err != nil || len(have) == 0 {
 		return fmt.Errorf("no variant %s:%s:%s", a.Name, name, v)

@@ -8,15 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
-func onlySettingsAgent() agent.Agent {
-	return agent.Agent{
+func onlySettingsAgent() agentreg.Agent {
+	return agentreg.Agent{
 		Name:           "test",
 		CloneAllow:     []string{"settings.json", "CLAUDE.md", "skills"},
 		Settings:       "settings.json",
-		SettingsFormat: agent.JSON,
+		SettingsFormat: agentreg.JSON,
 	}
 }
 
@@ -88,12 +88,12 @@ func TestCloneSettingsCannotReachOutsideTheProfile(t *testing.T) {
 func TestCloneSettingsRefusesASharedOrStatePath(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		mut  func(*agent.Agent)
+		mut  func(*agentreg.Agent)
 	}{
-		{"shared", func(a *agent.Agent) {
-			a.Shared = []agent.Share{{Rel: "settings.json", From: "/nowhere"}}
+		{"shared", func(a *agentreg.Agent) {
+			a.Shared = []agentreg.Share{{Rel: "settings.json", From: "/nowhere"}}
 		}},
-		{"state", func(a *agent.Agent) { a.State = []string{"settings.json"} }},
+		{"state", func(a *agentreg.Agent) { a.State = []string{"settings.json"} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			src, dst := t.TempDir(), t.TempDir()

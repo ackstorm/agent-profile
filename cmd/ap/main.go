@@ -12,13 +12,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
 	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
 	"github.com/ackstorm/agent-profile/internal/session"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 const usage = `ap - per-agent profile launcher
@@ -35,11 +37,13 @@ Commands:
   sessions  List recent sessions across agents and profiles
   resume    Resume a past session in its directory
   create    Create a profile and a wrapper you can type as a command
-  sync      Create profiles, variants and installs from a manifest repository
+  install   Install one capability into a profile
+  uninstall Remove one capability from a profile
   variant   Name a set of launch arguments over an existing profile
   which     Print the profile directory
   env       Print the environment override, or run a command under it
   run       Run the agent with that profile
+  manifest  Apply, render or export a whole manifest
   delete    Delete a profile and its wrapper, asking first
   unlink    Remove the wrapper, keep the profile
   link      Write the wrapper back
@@ -51,7 +55,7 @@ There is no active profile: every command names one explicitly.
 
 Examples:
   ap create claude:plan
-  ap sync ./agent-profiles --dry-run
+  ap manifest apply claude:plan ./agent-profile.yaml
   ap run claude:plan --effort xhigh
   ap sessions
   ap resume 05d8188f
@@ -75,14 +79,90 @@ disables every permission prompt is never invisible.
 
 Every reference is qualified, so any line is pasteable after "ap run".
 
+Given a qualified reference, it answers the same question one level deeper:
+what that profile has INSTALLED, read from the ledger. That is not what a
+manifest says — a manifest is an input, and applying one is what put these
+here. Each row shows what the resource wrote, because that is what
+"ap uninstall" will act on.
+
 Flags:
-  --raw   one tab-separated line per reference, for scripts: the reference in
-          field 1 and one argument per field after it, no tree and no padding
+  --raw          one tab-separated line per row, for scripts: for an agent
+                 listing, the reference in field 1 and one argument per field
+                 after it; for a profile's resources, kind, name, resolved ref
+  --root <dir>   list what the ledger in that directory holds, with the agent
+                 named on its own: "ap list claude --root /config"
 
 Examples:
   ap list
   ap list claude
+  ap list claude:plan
   ap list --raw
+`,
+
+	"install": `ap install - install one capability into a profile
+
+Usage:
+  ap install <agent>:<profile> <kind> <name> [locator] [--auth] [--yes]
+
+Installs ONE resource with no manifest anywhere on disk, and records it in the
+profile's ledger, which is what "ap list" reads and "ap uninstall" is bounded
+by. It is the same resolution and the same materialization "ap manifest apply"
+runs; only the input is smaller.
+
+Kinds: skill, plugin, artifact. An mcp server and the model block have no
+source to install from — declare them in a manifest and apply it.
+
+A locator is required, and exactly one:
+  --git <url> [--ref <r>] [--subpath <p>]   a git repository
+  --local <path> [--subpath <p>]            a directory on this machine
+  --url <url> --digest sha256:<64 hex>      an archive, verified before it is
+                                            extracted
+
+Flags:
+  --root <dir>             install into that directory instead of a profile's
+  --dest <d>               where an artifact's content lands; required for one
+  --auth-secret-env <VAR>  environment variable holding the source credential
+  --auth-secret-file <p>   file holding the source credential
+  --strict                 promote every degradation warning to an error
+  --yes                    install into <agent>:default without asking
+
+The credential VALUE is never written down: only the variable name or the file
+path is recorded. The cost is stated rather than discovered — the variable has
+to be present on every run, where a tool that stores the token asks once.
+
+Examples:
+  ap install claude:plan skill pdf --git https://github.com/anthropics/skills.git --subpath pdf
+  ap install claude:plan skill review --git https://gitlab.acme.com/t/s.git --auth-secret-env GITLAB_TOKEN
+  ap install claude:plan artifact style --local ./style --dest memory
+`,
+
+	"uninstall": `ap uninstall - remove one capability from a profile
+
+Usage:
+  ap uninstall <agent>:<profile> <kind> <name> [--dry-run]
+
+Removes what the ledger owns, and nothing else. Two rules follow from what the
+ledger records:
+
+  - a file whose hash no longer matches was edited by you, so it is kept and
+    reported, never removed;
+  - a file this profile only merged INTO loses exactly the keys it contributed,
+    so every server, setting and key you added by hand survives.
+
+That is also why this is safe against <agent>:default, your agent's real
+configuration: the ledger can tell ap's writes from yours.
+
+--dry-run prints the same verdicts the real run acts on. There is one
+classifier, so the preview cannot disagree with what happens.
+
+Flags:
+  --root <dir>   remove from that directory instead of a profile's
+  --dry-run   print what would be removed; touch nothing
+
+Examples:
+  ap uninstall claude:plan skill xlsx --dry-run
+  ap uninstall claude:plan mcp memory
+  ap uninstall claude:default skill company-review
 `,
 
 	"sessions": `ap sessions - list recent sessions across agents and profiles
@@ -177,44 +257,6 @@ Examples:
       --only-settings statusLine --only-settings theme
 `,
 
-	"sync": `ap sync - create profiles from manifests kept in Git
-
-Usage:
-  ap sync [--dry-run] [--yes] <file-or-directory>
-
-Reads YAML manifests describing profiles, the commands that populate them and
-the launch variants over them, then materialises all of it. A directory is
-scanned for *.yaml and *.yml, not recursively, in filename order.
-
-Everything is parsed and checked before anything is created, so a typo in one
-manifest leaves the run with nothing done.
-
-Flags:
-  --dry-run  print the whole plan and change nothing
-  --yes, -y  run the manifests' commands without asking
-
-A manifest's commands are shell commands, and syncing a repository runs them as
-you. That is the feature, not an oversight — but ap will not do it by surprise:
-off a terminal it refuses unless --yes is given, and a pipe is not an answer.
-
-"name: default" is not a profile. It names the agent you already had, so its
-install commands run against ~/.claude, ~/.codex and the rest, which ap cannot
-undo. There is one gate, not two: --yes covers it as well, and --dry-run prints
-the resolved directory so you can see what is at stake first.
-
-Sync is additive. Removing a line from a manifest does not undo it: a variant
-dropped from the YAML stays on disk, and nothing an install command did is
-reversed. "ap delete" is still how things are removed.
-
-A variant of the same name IS overwritten, and the report says "updated" rather
-than "created" when it was.
-
-Examples:
-  ap sync ./agent-profiles --dry-run
-  ap sync ./agent-profiles
-  ap sync ./agent-profiles/execute.yaml
-  ap sync ./agent-profiles --yes            # in a script
-`,
 	"variant": `ap variant - name a set of launch arguments over a profile
 
 Usage:
@@ -261,6 +303,76 @@ Examples:
   ap run claude:plan --effort xhigh
   ap run claude:plan plugin install caveman@caveman
   ap run opencode:review --model anthropic/claude-sonnet-4-5
+`,
+
+	"manifest": `ap manifest - apply, render or export a whole manifest
+
+Usage:
+  ap manifest render [--target <runtime>] [--quiet] <manifest.yaml>
+  ap manifest apply  <manifest.yaml> (--target <runtime>... | --all-targets)
+  ap manifest apply  --manifest - [...]   < manifest.yaml
+  ap manifest export <agent>:<profile> [--name <name>]
+
+render answers what a manifest MEANS, before any root is chosen. With no
+--target it composes EVERY target the manifest declares and prints nothing —
+the exit status is the answer, and that is the contract check a producer runs
+against a manifest it generated. There is no separate "validate".
+
+apply materialises it, and the manifest is the only argument it needs. A
+manifest IS a profile's definition: its "name" is that profile's name and its
+"targets" are the runtimes it CAN be materialised for. The name is not restated
+on the command line; --profile overrides it when you want the manifest to land
+somewhere else.
+
+Which of those runtimes to actually materialise for is yours to say, and saying
+it is REQUIRED: --target, repeatable, or --all-targets for every one declared.
+That holds even for a manifest declaring a single target, which is the case
+that would otherwise drift — a manifest can gain three tomorrow, and a script
+that never named its runtime would quietly start creating four profiles.
+
+It is ADDITIVE: a manifest that stops mentioning a resource does not remove it,
+and "ap uninstall" is how things are removed. A file you added by hand
+survives, and so does a key you added by hand to a file this profile only
+merged into.
+
+A manifest named "default" materialises into the configuration your agents
+already use. That is displayed with its resolved absolute path and asked about
+once; off a terminal it refuses, because a manifest can come from a repository
+somebody else wrote and that field is what decides this.
+
+export turns the profile's ledger back into a manifest, so an environment
+assembled one "ap install" at a time becomes portable. It emits binding names,
+never secret values, and writes the auth scheme it actually resolved.
+
+export reads a ledger, so it names a profile rather than a manifest.
+
+Flags:
+  --target <runtime>  render: compose for one runtime and print it
+                      apply:  materialise for this runtime; repeatable, and
+                              required unless --all-targets
+  --all-targets       apply: materialise for every target declared
+  --quiet             render: compose and print nothing
+  --profile <name>    apply: use this profile name instead of the manifest's
+  --dry-run           apply: resolve, authenticate and fetch, then stop. It
+                      does NOT do nothing: that is the only way to check a
+                      source contract
+  --strict            promote every degradation warning to an error
+  --yes               apply a manifest named "default" without asking
+  --manifest -        read the manifest from stdin, for a caller that
+                      generated one and has no temp file
+  --root <dir>        apply: materialise into that directory outright, for a
+                      container where there is no $HOME to derive a profile
+                      namespace from. Needs exactly one --target
+  --name <name>       export: the manifest's name; defaults to the profile's
+
+Examples:
+  ap manifest render ./agent-profile.yaml
+  ap manifest apply ./agent-profile.yaml --target claude --dry-run
+  ap manifest apply ./agent-profile.yaml --target claude --target codex
+  ap manifest apply ./agent-profile.yaml --all-targets
+  ap manifest apply ./agent-profile.yaml --target claude --profile experiment
+  ap manifest apply ./agent-profile.yaml --target claude --root /config
+  ap manifest export claude:plan > team-plan.yaml
 `,
 
 	"env": `ap env - print the environment override, or run a command under it
@@ -365,39 +477,43 @@ func dispatch(args []string) error {
 		fmt.Print(helpFor(args[0]))
 		return nil
 	}
-	switch args[0] {
-	case "list", "ls":
-		return cmdList(args[1:])
-	case "sessions":
-		return cmdSessions(args[1:])
-	case "resume":
-		return cmdResume(args[1:])
-	case "create":
-		return cmdCreate(args[1:])
-	case "sync":
-		return cmdSync(args[1:])
-	case "variant":
-		return cmdVariant(args[1:])
-	case "which":
-		return cmdWhich(args[1:])
-	case "env":
-		return cmdEnv(args[1:])
-	case "run":
-		return cmdRun(args[1:])
-	case "delete", "rm":
-		return cmdDelete(args[1:])
-	case "link":
-		return cmdLink(args[1:])
-	case "unlink":
-		return cmdUnlink(args[1:])
-	case "version", "--version", "-v":
-		return cmdVersion(args[1:])
-	case "help", "-h", "--help":
-		fmt.Print(usage)
-		return nil
-	default:
+	fn, ok := commandTable[args[0]]
+	if !ok {
 		return fmt.Errorf("unknown command %q (try `ap help`)", args[0])
 	}
+	return fn(args[1:])
+}
+
+// commandTable is dispatch's {name, fn} table. A switch with this many
+// commands crossed gocyclo's limit on branch count alone, with no branch
+// doing anything a table entry doesn't say more plainly; this replaces it
+// one for one; no command's behavior changes.
+var commandTable = map[string]func([]string) error{
+	"list": cmdList, "ls": cmdList,
+	"sessions":  cmdSessions,
+	"resume":    cmdResume,
+	"create":    cmdCreate,
+	"install":   cmdInstall,
+	"uninstall": cmdUninstall,
+	"variant":   cmdVariant,
+	"which":     cmdWhich,
+	"env":       cmdEnv,
+	"run":       cmdRun,
+	"manifest":  cmdManifest,
+	"delete":    cmdDelete, "rm": cmdDelete,
+	"link":    cmdLink,
+	"unlink":  cmdUnlink,
+	"version": cmdVersion, "--version": cmdVersion, "-v": cmdVersion,
+	"help": cmdUsage, "-h": cmdUsage, "--help": cmdUsage,
+}
+
+// cmdUsage is "help"/"-h"/"--help" as a commandTable entry: print the top-level
+// usage and stop, taking no arguments. dispatch already special-cases "-h"/
+// "--help" as the FIRST argument for run/env's passthrough commands above, so
+// this is only ever reached for "ap help" and the bare top-level flags.
+func cmdUsage([]string) error {
+	fmt.Print(usage)
+	return nil
 }
 
 // flagSet builds a FlagSet that stays quiet: ContinueOnError otherwise writes the
@@ -469,7 +585,7 @@ func (r *repeatedFlag) Set(v string) error {
 
 // checkOnlySettings validates --only-settings before anything is created — the
 // same "fail before the profile exists" rule as --from and --copy-instructions.
-func checkOnlySettings(a agent.Agent, keys []string, from string) error {
+func checkOnlySettings(a agentreg.Agent, keys []string, from string) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -552,7 +668,7 @@ func onPath(dir string) bool {
 
 // notThere is the error for a reference that names no profile. Listing what the
 // agent does have turns a typo into a one-line fix instead of a second command.
-func notThere(a agent.Agent, name string) error {
+func notThere(a agentreg.Agent, name string) error {
 	have, err := profile.List(a)
 	if err != nil || len(have) == 0 {
 		return fmt.Errorf("no profile %s:%s", a.Name, name)
@@ -677,7 +793,7 @@ func renderSessions(sessions []session.Session, hasOpencode bool) string {
 // resumeArgs substitutes the session id into the agent's stated resume argv, then
 // appends whatever the caller passed. The placeholder is "{}", exactly as in a
 // variant: the registry states where the id goes, ap never infers it.
-func resumeArgs(a agent.Agent, id string, extra []string) []string {
+func resumeArgs(a agentreg.Agent, id string, extra []string) []string {
 	out := make([]string, 0, len(a.Sessions.ResumeArgs)+len(extra))
 	for _, arg := range a.Sessions.ResumeArgs {
 		if arg == "{}" {
@@ -824,7 +940,7 @@ func cmdResume(args []string) error {
 		}
 	}
 
-	a, ok := agent.Lookup(s.Agent)
+	a, ok := agentreg.Lookup(s.Agent)
 	if !ok {
 		return fmt.Errorf("unknown agent %q for session %s", s.Agent, s.ID)
 	}
@@ -908,26 +1024,45 @@ func cmdVersion(args []string) error {
 func cmdList(args []string) error {
 	fs := flagSet("list")
 	raw := fs.Bool("raw", false, "one tab-separated line per reference, no tree and no padding")
+	rootFlag := fs.String("root", "", "list what the ledger in this directory holds (§33.2)")
 	stop, err := parse(fs, args)
 	if stop {
 		return err
 	}
-	names := agent.Names()
+	names := agentreg.Names()
 	// The agent is optional, so this cannot use parseAroundRef, which requires
 	// one. The second parse is that helper's trick all the same: it is what lets
 	// `ap list claude --raw` work as well as `ap list --raw claude`. list has no
 	// passthrough, so there is nothing for either order to be ambiguous about.
+	//
+	// It happens BEFORE either flag is read, and that ordering is the whole
+	// point. Reading them first and re-parsing afterwards left both stale:
+	// `ap list claude:plan --raw` printed the padded listing, and
+	// `ap list claude --root /config` did not even reach the ledger — the
+	// branch below tested a --root that had not been parsed yet, so it fell
+	// through to the ordinary agent tree and ignored the directory entirely.
 	if rest := fs.Args(); len(rest) > 0 {
-		if _, ok := agent.Lookup(rest[0]); !ok {
-			return fmt.Errorf("unknown agent %q: supported are %s", rest[0], strings.Join(agent.Names(), ", "))
-		}
-		names = []string{rest[0]}
+		subject := rest[0]
 		if stop, err := parse(fs, rest[1:]); stop {
 			return err
 		}
 		if extra := fs.Args(); len(extra) > 0 {
-			return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [agent]", extra[0])
+			return fmt.Errorf("unexpected argument %q\nusage: ap list [--raw] [--root <dir>] [<agent>[:<profile>]]", extra[0])
 		}
+		// A qualified reference asks the same question one level deeper: not
+		// "which profiles exist" but "what does this one hold". It is the same
+		// command because it is the same tree, and `ap status` as a second
+		// name for a deeper row is a command surface growing for no reason.
+		//
+		// It reads the LEDGER, never a manifest: a manifest is an input and
+		// says nothing about what is installed (§1.1).
+		if strings.Contains(subject, ":") || *rootFlag != "" {
+			return listResources(subject, *rootFlag, *raw)
+		}
+		if _, ok := agentreg.Lookup(subject); !ok {
+			return fmt.Errorf("unknown agent %q: supported are %s", subject, strings.Join(agentreg.Names(), ", "))
+		}
+		names = []string{subject}
 	}
 	rows, err := listRows(names)
 	if err != nil {
@@ -946,10 +1081,16 @@ func cmdList(args []string) error {
 // Default is the one row in the listing ap did not create and cannot remove —
 // Dir resolves it to the agent's real config directory — so printing it exactly
 // like a profile invites `ap delete claude:default`, which is the command
-// profile.ValidName exists to refuse. It replaced a bracketed name plus a
+// agentreg.ValidName exists to refuse. It replaced a bracketed name plus a
 // footnote explaining the brackets: the note says the same thing in the place
 // you are already looking, and a reference nothing decorates stays pasteable.
-const defaultNote = "(the agent's own config: read-only)"
+//
+// It used to say "read-only", and that stopped being true when the ledger
+// landed: `ap manifest apply`, `ap install` and `ap uninstall` all reach this
+// root, gated. What is still true is the thing the note exists to prevent —
+// ap did not create it and cannot delete it — so the note says THAT instead of
+// a blanket claim the program no longer honours.
+const defaultNote = "(the agent's own config — not a profile)"
 
 // listRow is one line of the listing.
 //
@@ -972,7 +1113,7 @@ type listRow struct {
 func listRows(names []string) ([]listRow, error) {
 	var rows []listRow
 	for _, name := range names {
-		a, _ := agent.Lookup(name)
+		a, _ := agentreg.Lookup(name)
 		// List always includes Default, so there is no "no profiles yet" case to
 		// report: every agent has at least its real config to show.
 		profiles, err := profile.List(a)
@@ -983,7 +1124,7 @@ func listRows(names []string) ([]listRow, error) {
 		for i, p := range profiles {
 			lastProfile := i == len(profiles)-1
 			row := listRow{tree: branch(lastProfile), ref: a.Name + ":" + p}
-			if p == profile.Default {
+			if p == agentreg.Default {
 				row.note = defaultNote
 			}
 			rows = append(rows, row)
@@ -1123,9 +1264,9 @@ func printRaw(rows []listRow) {
 //
 // Not delete: that one takes a flag as well, so it parses with parseAroundRef
 // and calls ParseVariantRef itself.
-func vref(args []string, cmd string) (agent.Agent, string, string, error) {
+func vref(args []string, cmd string) (agentreg.Agent, string, string, error) {
 	if len(args) != 1 {
-		return agent.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
+		return agentreg.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
 	}
 	a, name, v, err := profile.ParseVariantRef(args[0])
 	return a, name, v, err
@@ -1139,9 +1280,9 @@ func vref(args []string, cmd string) (agent.Agent, string, string, error) {
 // The variant is parsed and then ignored, on purpose: a variant has no
 // configuration of its own, and answering with anything but the parent's
 // directory would invent a second one that nothing writes to.
-func vrefAllowDefault(args []string, cmd string) (agent.Agent, string, string, error) {
+func vrefAllowDefault(args []string, cmd string) (agentreg.Agent, string, string, error) {
 	if len(args) != 1 {
-		return agent.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
+		return agentreg.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
 	}
 	a, name, v, err := profile.ParseVariantRefAllowDefault(args[0])
 	return a, name, v, err
@@ -1251,7 +1392,7 @@ func cmdCreate(args []string) error {
 // does on a reused one: Link re-asserts, Shim re-asserts, seedFirstRun opens
 // with O_EXCL and so can never rewrite a file the profile already has, and the
 // wrapper is rewritten to the same bytes.
-func finishCreate(a agent.Agent, name, dir string, rc *receipt) error {
+func finishCreate(a agentreg.Agent, name, dir string, rc *receipt) error {
 	if err := linkAndReport(a, dir, rc); err != nil {
 		return err
 	}
@@ -1269,7 +1410,7 @@ func finishCreate(a agent.Agent, name, dir string, rc *receipt) error {
 // `ap run` by this point, so a failure here is worth saying out loud and worth
 // nothing more — an unusable wrapper name or a first-run file that could not be
 // read must not turn a created profile into a failed command.
-func seedAndLink(a agent.Agent, name, dir string, rc *receipt) {
+func seedAndLink(a agentreg.Agent, name, dir string, rc *receipt) {
 	if keys, err := seedFirstRun(a, dir); err != nil {
 		rc.warn("first-run flags not seeded: %v", err)
 	} else if len(keys) > 0 {
@@ -1422,7 +1563,7 @@ func cmdVariant(args []string) error {
 // A failed clone removes the half-populated directory so `ap create` can be
 // retried. Safe here specifically because Link has not run yet, so the directory
 // provably contains no symlinks.
-func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir string, rc *receipt) error {
+func cloneAndReport(a agentreg.Agent, srcDir, from string, only []string, name, dir string, rc *receipt) error {
 	if srcDir == "" {
 		return nil
 	}
@@ -1464,7 +1605,7 @@ func cloneAndReport(a agent.Agent, srcDir, from string, only []string, name, dir
 
 // linkAndReport runs profile.Link and prints what it did. Split out of cmdCreate
 // purely to keep cmdCreate under the project's cyclomatic-complexity gate.
-func linkAndReport(a agent.Agent, dir string, rc *receipt) error {
+func linkAndReport(a agentreg.Agent, dir string, rc *receipt) error {
 	linked, skipped, unshared, orphaned, err := profile.Link(a, dir, nil)
 	if err != nil {
 		return err
@@ -1507,7 +1648,7 @@ func orphanWarning(orphaned []string) string {
 // one may hold the only token that still works, and only the person at the
 // terminal can say whether it should become the machine-wide login — see
 // profile.Promote for why nothing can decide that on its own.
-func linkForRun(a agent.Agent, name, dir string) error {
+func linkForRun(a agentreg.Agent, name, dir string) error {
 	var promoted []string
 	_, _, _, orphaned, err := profile.Link(a, dir, func(c profile.Conflict) profile.Resolution {
 		if askToPromote(a, name, c) != profile.Promote {
@@ -1541,7 +1682,7 @@ func linkForRun(a agent.Agent, name, dir string) error {
 // Non-interactive runs are not prompted at all: `ap run` in a script or a CI job
 // has nobody to ask, and guessing "promote" there would write into the user's real
 // config directory unattended.
-func askToPromote(a agent.Agent, name string, c profile.Conflict) profile.Resolution {
+func askToPromote(a agentreg.Agent, name string, c profile.Conflict) profile.Resolution {
 	if !stdinIsTerminal() {
 		return profile.Orphan
 	}
@@ -1578,9 +1719,26 @@ func askToPromote(a agent.Agent, name string, c profile.Conflict) profile.Resolu
 
 // stdinIsTerminal reports whether there is anyone there to answer a prompt.
 // os.Stdin.Stat rather than x/term because this project is standard library only.
+// stdinIsTerminal asks the kernel, because the file mode cannot answer.
+//
+// It used to test os.ModeCharDevice, and /dev/null is a character device — so
+// is /dev/zero, and so is /dev/urandom. Anything started by systemd, cron or a
+// container runtime gets /dev/null on stdin by default and was reported as a
+// terminal. `docker run` with no -t found it: the real-configuration gate
+// PRINTED its question and read the answer off a pipe, where the rule is that
+// it must refuse without asking.
+//
+// The outcome there was safe by luck — EOF is not "y" — but the rule this
+// program states is "a pipe is not consent", and a check that accepts any
+// character device accepts one that can deliver a "y".
+//
+// A TCGETS ioctl is what a terminal actually is, and it is what x/term does.
+// Standard library only, so it is spelled out here rather than depended on.
 func stdinIsTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	var t syscall.Termios
+	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, os.Stdin.Fd(),
+		ioctlReadTermios, uintptr(unsafe.Pointer(&t)), 0, 0, 0)
+	return errno == 0
 }
 
 // readLine reads one line from r, one byte at a time.
@@ -1602,7 +1760,7 @@ func readLine(r io.Reader) string {
 
 // checkCopyInstructions validates that --copy-instructions is usable for a,
 // without copying anything yet — the same "fail before creating" rule as --from.
-func checkCopyInstructions(a agent.Agent) error {
+func checkCopyInstructions(a agentreg.Agent) error {
 	if a.Instructions == nil {
 		return fmt.Errorf("--copy-instructions: no global instructions file is known for %s "+
 			"(only claude is verified; see internal/agent)", a.Name)
@@ -1618,7 +1776,7 @@ func checkCopyInstructions(a agent.Agent) error {
 // A copy, not a link: the profile owns it, and the reason to want it in a profile at
 // all is usually to then change it there. Through an os.Root confined to the profile,
 // same as everything else that writes into one.
-func copyInstructions(a agent.Agent, dir string) error {
+func copyInstructions(a agentreg.Agent, dir string) error {
 	b, err := os.ReadFile(a.Instructions.Source)
 	if err != nil {
 		return fmt.Errorf("--copy-instructions: %w", err)
@@ -1650,7 +1808,7 @@ func copyInstructions(a agent.Agent, dir string) error {
 // Nothing here is an error the caller should stop on — see the call site. A
 // missing source file is the ordinary case on a machine where the agent has
 // never run outside a profile, and there the wizard is the correct behaviour.
-func seedFirstRun(a agent.Agent, dir string) ([]string, error) {
+func seedFirstRun(a agentreg.Agent, dir string) ([]string, error) {
 	if a.FirstRun == nil {
 		return nil, nil
 	}
@@ -1705,7 +1863,7 @@ func seedFirstRun(a agent.Agent, dir string) ([]string, error) {
 // profile inherits nothing but the credential, so the next step is real work and
 // it is different for each agent — the text lives in the registry, beside the agent
 // it describes.
-func setupHint(a agent.Agent, name string) string {
+func setupHint(a agentreg.Agent, name string) string {
 	if a.Setup == "" {
 		return ""
 	}
@@ -1761,7 +1919,7 @@ func cmdEnv(args []string) error {
 	// what makes `ap env <agent>:default` print nothing rather than the real
 	// config directory it would otherwise be pointless to assign to itself.
 	dir := profile.Dir(a, name)
-	if name == profile.Default {
+	if name == agentreg.Default {
 		dir = ""
 	}
 	for _, e := range run.Env(a, dir, nil) {
@@ -1829,7 +1987,7 @@ const placeholder = "{}"
 // a bare word — which is a guess about four external CLIs, re-verified every
 // release. A placeholder guesses nothing: the author states the position, and
 // ap substitutes text. Every variant without one behaves exactly as before.
-func runArgs(a agent.Agent, name, v string, caller []string) ([]string, error) {
+func runArgs(a agentreg.Agent, name, v string, caller []string) ([]string, error) {
 	if v == "" {
 		return caller, nil
 	}
@@ -1867,9 +2025,9 @@ func fill(args []string, with string) ([]string, bool) {
 // it, shared by `ap run` and by `ap env <ref> <command>`. It returns the
 // directory the config variable should point at — empty for Default, which sets
 // no override at all.
-func prepare(a agent.Agent, name string) (string, error) {
+func prepare(a agentreg.Agent, name string) (string, error) {
 	if !profile.Exists(a, name) {
-		if name == profile.Default {
+		if name == agentreg.Default {
 			// "ap create claude:default" is unconditionally refused - that advice
 			// would be a dead end. Name the actual path instead: on this machine
 			// the agent has never been run outside ap, or its config lives
@@ -1883,7 +2041,7 @@ func prepare(a agent.Agent, name string) (string, error) {
 	// Default is the agent's real config, reached exactly as it already is:
 	// nothing is created, nothing is linked, no shim is built, and Exec gets no
 	// override at all (an empty dir), not even one that happens to equal it.
-	if name == profile.Default {
+	if name == agentreg.Default {
 		return "", nil
 	}
 
@@ -1903,7 +2061,7 @@ func prepare(a agent.Agent, name string) (string, error) {
 // shimWarning reports entries a program wrote into a shim for real, each pointed
 // at the base directory it should be moved to. The base differs per shim, so the
 // entries are grouped by the Rel they came back under.
-func shimWarning(a agent.Agent, foundReal []string) string {
+func shimWarning(a agentreg.Agent, foundReal []string) string {
 	byRel := map[string][]string{}
 	for _, p := range foundReal {
 		rel, name, ok := strings.Cut(p, string(filepath.Separator))
@@ -1929,7 +2087,7 @@ func shimWarning(a agent.Agent, foundReal []string) string {
 
 // shim builds or refreshes the config shim and reports anything a program wrote
 // into it for real, which would otherwise be invisible from outside the profile.
-func shim(a agent.Agent, dir string) error {
+func shim(a agentreg.Agent, dir string) error {
 	foundReal, err := profile.Shim(a, dir)
 	if err != nil {
 		return err
@@ -2005,7 +2163,7 @@ func cmdDelete(args []string) error {
 // sitting at one variant's wrapper path — which abandoned every later variant
 // AND swallowed the receipt, so `ap delete` reported a refusal and never
 // mentioned the profile it had just erased.
-func deleteTheVariantsToo(a agent.Agent, name string, variants []string, rc *receipt) {
+func deleteTheVariantsToo(a agentreg.Agent, name string, variants []string, rc *receipt) {
 	if err := profile.DeleteVariants(a, name); err != nil {
 		rc.warn("variant arguments not removed: %v", err)
 	}
@@ -2025,7 +2183,7 @@ func deleteTheVariantsToo(a agent.Agent, name string, variants []string, rc *rec
 // profile because a profile holds its own session transcripts, and a variant
 // holds two lines of text. Asking about both equally is how a prompt stops
 // being read.
-func deleteVariant(a agent.Agent, name, v string) error {
+func deleteVariant(a agentreg.Agent, name, v string) error {
 	ref := a.Name + ":" + name + ":" + v
 	if err := profile.DeleteVariant(a, name, v); err != nil {
 		return err
@@ -2091,8 +2249,8 @@ func cmdLink(args []string) error {
 	// what actually fires. Kept anyway, so a future change to vref or to link's
 	// own routing does not silently start writing a wrapper for "nothing" (ap
 	// run codex:default is already the real config).
-	if name == profile.Default {
-		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, profile.Default)
+	if name == agentreg.Default {
+		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, agentreg.Default)
 	}
 	if !profile.Exists(a, name) {
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",

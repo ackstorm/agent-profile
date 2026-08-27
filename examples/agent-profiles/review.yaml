@@ -1,0 +1,24 @@
+# Stage 3 — review. Read what stage 2 wrote, with none of its context.
+#
+# A separate profile is the point: a reviewer that remembers writing the code
+# is not a reviewer.
+version: "1"
+name: review
+
+extends: ./base.yaml
+
+skills:
+  # Nothing here needs the plan-writing skills, and §4 warns rather than
+  # silently leaving them behind if a previous apply already materialized one.
+  writing-plans:
+    enabled: false
+  executing-plans:
+    enabled: false
+
+runtimes:
+
+  claude:
+    variants:
+      diff:
+        - --effort=xhigh
+        - "/code-review {}"

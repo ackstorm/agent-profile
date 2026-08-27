@@ -272,122 +272,124 @@ if quiet "$AP" create claude:sbxrun; then
     else
         bad variant "could not store the placeholder variant"
     fi
-# --- sync -------------------------------------------------------------------
+# --- the state surface: install, list, uninstall, export ---------------------
 #
-# Every assertion here is ap's own side: what it refuses, what it creates, what
-# environment a manifest's command sees, and what argv a synced variant produces.
-# None of it needs a real agent, which is why it lives here and not in smoke.sh.
-MAN="$SANDBOX/manifests"
-rm -rf "$MAN" && mkdir -p "$MAN"
-RAN="$SANDBOX/ran"
-cat >"$MAN/execute.yaml" <<YAML
-version: 1
-name: execute
-bootstrap:
-  - printf 'boot:%s|%s\n' "\${CLAUDE_CONFIG_DIR:-none}" "\$(ls -A "\$HOME/.local/share/agent-profile/profiles/claude" 2>/dev/null | grep -c '^execute\$')" >> $RAN
-platforms:
-  claude:
-    install:
-      - printf 'install:%s\n' "\${CLAUDE_CONFIG_DIR:-none}" >> $RAN
-    variants:
-      execute-plan:
-        args: --effort=xhigh "/plan:run {}"
-YAML
+# Every assertion here is ap's own side of the ledger: what it writes, what it
+# refuses to take back, and what a preview does. None of it needs a real agent
+# or a network — the source is a directory on disk — which is why it lives here
+# and not in smoke.sh, and why it can assert exact file contents.
+SRC="$SANDBOX/src-skill"
+rm -rf "$SRC" && mkdir -p "$SRC/scripts"
+printf '# pdf\n' > "$SRC/SKILL.md"
+printf 'print()\n' > "$SRC/scripts/convert.py"
+PROF="$HOME/.local/share/agent-profile/profiles/claude/plan"
 
-# --dry-run changes nothing at all: no profile, no variant, no command.
-rm -f "$RAN"
-if quiet "$AP" sync "$MAN" --dry-run; then
-    if [ -e "$RAN" ]; then
-        bad sync "--dry-run ran a command"
-    elif [ -d "$HOME/.local/share/agent-profile/profiles/claude/execute" ]; then
-        bad sync "--dry-run created a profile"
+# An install needs no manifest anywhere, and everything it writes lands inside
+# the profile.
+rm -rf "$PROF"
+if quiet "$AP" install claude:plan skill pdf --local "$SRC"; then
+    if [ ! -f "$PROF/skills/pdf/SKILL.md" ] || [ ! -f "$PROF/skills/pdf/scripts/convert.py" ]; then
+        bad install "the skill's files are not in the profile"
+    elif [ ! -f "$PROF/.ap-ledger.json" ]; then
+        bad install "nothing was recorded in the ledger"
+    elif find "$HOME/.local/share/agent-profile" -name '*.yaml' | grep -q .; then
+        bad install "a manifest was written; a manifest is an input, not state"
     else
-        pass sync "--dry-run changed nothing"
+        pass install "one capability installed with no manifest on disk"
     fi
 else
-    bad sync "ap sync --dry-run failed"
+    bad install "ap install failed"
 fi
 
-# A literal "y" down a PIPE, never </dev/null and never a "1": an empty answer
-# and a "1" both mean NO, so a check written either of those ways stops for the
-# wrong reason and cannot fail. Only a YES down a pipe proves that ap refused
-# because there was no terminal, rather than because the answer was no.
-rm -f "$RAN"
-if echo y | "$AP" sync "$MAN" >/dev/null 2>&1; then
-    bad sync "ap sync ran commands with an answer read off a pipe"
-elif [ -e "$RAN" ]; then
-    bad sync "a command ran despite the refusal"
+# list reads the LEDGER. A manifest says nothing about what is installed.
+out=$("$AP" list claude:plan 2>&1 || true)
+case "$out" in
+    *skill*pdf*) pass list "ap list <ref> reports what the ledger holds" ;;
+    *)           bad list "the listing does not name the installed skill: $out" ;;
+esac
+
+# --dry-run previews and touches nothing.
+out=$("$AP" uninstall claude:plan skill pdf --dry-run 2>&1 || true)
+if [ ! -f "$PROF/skills/pdf/SKILL.md" ]; then
+    bad uninstall "--dry-run removed a file"
 else
-    pass sync "a pipe is not consent"
+    case "$out" in
+        *"would remove"*) pass uninstall "--dry-run previews and removes nothing" ;;
+        *)                bad uninstall "--dry-run said nothing useful: $out" ;;
+    esac
 fi
 
-# The real run: bootstrap first with no agent variable and no profile yet, then
-# the install inside the profile.
-rm -f "$RAN"
-if quiet "$AP" sync "$MAN" --yes; then
-    boot=$(grep '^boot:' "$RAN" 2>/dev/null || true)
-    inst=$(grep '^install:' "$RAN" 2>/dev/null || true)
-    pdir="$HOME/.local/share/agent-profile/profiles/claude/execute"
-    if [ -z "$boot" ] || [ -z "$inst" ]; then
-        bad sync "a command did not run: boot=$boot inst=$inst"
-    elif [ "$boot" != "boot:none|0" ]; then
-        # The profile root is NOT empty here — the checks above this one made
-        # profiles of their own in the same fake home — so what is asserted is
-        # the manifest's OWN profile: bootstrap is step 8a and claude:execute
-        # does not exist yet when it runs.
-        bad sync "bootstrap saw an agent variable, or its profile already existed: $boot"
-    elif [ "$inst" != "install:$pdir" ]; then
-        bad sync "install did not see its profile: $inst"
-    elif [ ! -d "$pdir" ]; then
-        bad sync "the profile was not created"
+# The exit criterion: a file the user edited is never removed. The ledger's
+# recorded hash is the only thing that can tell ap's write from the user's.
+printf "print('mine')\n" > "$PROF/skills/pdf/scripts/convert.py"
+if quiet "$AP" uninstall claude:plan skill pdf; then
+    if [ ! -f "$PROF/skills/pdf/scripts/convert.py" ]; then
+        bad uninstall "the edited file was removed"
+    elif [ -f "$PROF/skills/pdf/SKILL.md" ]; then
+        bad uninstall "the unchanged file survived"
+    elif "$AP" list claude:plan 2>&1 | grep -q 'pdf'; then
+        bad uninstall "the ledger still claims the removed skill"
     else
-        pass sync "bootstrap ran clean, install ran in the profile"
+        pass uninstall "the edited file kept, the unchanged one removed"
     fi
 else
-    bad sync "ap sync --yes failed"
+    bad uninstall "ap uninstall failed"
 fi
 
-# The argv property, asserted on arg:[…] and never on argv:. The stub's "$*"
-# joins with a space, so a check written against that line cannot tell one
-# argument from two — which is the entire property {} exists to produce.
-out=$("$AP" run claude:execute:execute-plan 'fix the parser' 2>&1 || true)
-if ! printf '%s' "$out" | grep -q 'arg:\[--effort=xhigh\]'; then
-    bad sync "the variant's own argument is missing: $out"
-elif ! printf '%s' "$out" | grep -qF 'arg:[/plan:run fix the parser]'; then
-    bad sync "args was tokenized after substitution, or not at all: $out"
-elif printf '%s' "$out" | grep -qF 'arg:[fix]'; then
-    bad sync "the caller's argument was split across argv elements: $out"
+# Export closes the loop: the ledger, back as a manifest that composes.
+rm -rf "$PROF"
+if quiet "$AP" install claude:plan skill pdf --local "$SRC"; then
+    "$AP" manifest export claude:plan > "$SANDBOX/exported.yaml" 2>/dev/null
+    if ! grep -q 'pdf' "$SANDBOX/exported.yaml"; then
+        bad export "the exported manifest does not mention the installed skill"
+    elif ! quiet "$AP" manifest render "$SANDBOX/exported.yaml"; then
+        bad export "the exported manifest does not compose for its own targets"
+    elif quiet "$AP" manifest apply "$SANDBOX/exported.yaml" --target claude --profile copy &&
+         cmp -s "$PROF/skills/pdf/SKILL.md" \
+                "$HOME/.local/share/agent-profile/profiles/claude/copy/skills/pdf/SKILL.md"; then
+        pass export "a hand-built root exports to a manifest that re-applies"
+    else
+        bad export "the exported manifest did not re-apply to the same bytes"
+    fi
 else
-    pass sync "a synced variant tokenizes before it substitutes"
+    bad export "ap install failed before export"
 fi
 
-# name: default reaches the agent's real config under --yes — there is one gate
-# now, not two. What must still hold is that NOTHING is created for it: no
-# profile directory, no shared links, no shim, no wrapper. Link especially must
-# never run there, since the shared credential IS the file in that directory.
-cat >"$MAN/base.yaml" <<YAML
-version: 1
+# A pipe is not consent. A manifest NAMED "default" reaches the real
+# configuration and ap cannot undo a write there — and that field is decided by
+# whoever wrote the manifest, which may not be you. Off a terminal it refuses,
+# checked with stdinIsTerminal, never with the answer to a question nobody was
+# asked. And NOTHING is created for the sentinel: no profile directory, no shim,
+# no wrapper. Link especially must never run there, since the shared credential
+# IS the file in that directory.
+cat >"$SANDBOX/default.yaml" <<YAML
+version: "1"
 name: default
-platforms:
-  claude:
-    install:
-      - touch "\$HOME/.claude/SYNC-RAN-HERE"
+targets:
+  - claude
+skills:
+  pdf:
+    source:
+      local:
+        path: $SRC
 YAML
-rm -f "$MAN/execute.yaml" "$HOME/.claude/SYNC-RAN-HERE"
-if quiet "$AP" sync "$MAN" --yes; then
-    if [ ! -e "$HOME/.claude/SYNC-RAN-HERE" ]; then
-        bad sync "a name: default install did not run under --yes"
-    elif [ -d "$HOME/.local/share/agent-profile/profiles/claude/default" ]; then
-        bad sync "a profile directory was created for the sentinel"
-    elif [ -e "$HOME/.local/share/agent-profile/variants/claude/default" ]; then
-        bad sync "variants were written for the sentinel"
-    else
-        pass sync "name: default runs in the real config and creates nothing"
-    fi
+rm -rf "$HOME/.claude/skills/pdf"
+out=$(echo y | "$AP" manifest apply "$SANDBOX/default.yaml" --target claude 2>&1) && rc=0 || rc=1
+# The refusal must be THE GATE's, not any other failure. A check that accepts
+# a non-zero exit would stay green if the manifest simply stopped parsing.
+if [ "$rc" = 0 ]; then
+    bad gate "apply ran against the real config with an answer read off a pipe"
+elif ! printf '%s' "$out" | grep -q 'no terminal to confirm on'; then
+    bad gate "apply failed for some other reason than the gate: $out"
+elif ! printf '%s' "$out" | grep -q "$HOME/.claude"; then
+    bad gate "the refusal does not name the resolved absolute path: $out"
+elif [ -e "$HOME/.claude/skills/pdf" ]; then
+    bad gate "the skill was written into the real config despite the refusal"
+elif [ -d "$HOME/.local/share/agent-profile/profiles/claude/default" ]; then
+    bad gate "a profile directory was created for the sentinel"
 else
-    bad sync "ap sync --yes failed on a name: default manifest"
+    pass gate "a pipe is not consent, and nothing was created for default"
 fi
-rm -f "$HOME/.claude/SYNC-RAN-HERE"
 
     # An agent that rewrites its credential with temp-file-plus-rename leaves a
     # real file where ap's symlink was. Measured on two real claude profiles, so

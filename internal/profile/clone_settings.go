@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // CloneSettings is `ap create --only-settings`: it builds the new profile's
@@ -32,7 +32,7 @@ import (
 // keys is deduplicated up front, keeping each key's first occurrence: a user
 // repeating --only-settings theme --only-settings theme must not see "theme"
 // twice in the receipt, and repeating a typo must not warn about it twice.
-func CloneSettings(a agent.Agent, src, dst string, keys []string) (found, missing []string, err error) {
+func CloneSettings(a agentreg.Agent, src, dst string, keys []string) (found, missing []string, err error) {
 	keys = dedupeKeys(keys)
 	if a.Settings == "" {
 		return nil, nil, fmt.Errorf("no settings file is known for %s", a.Name)

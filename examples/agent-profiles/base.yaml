@@ -1,0 +1,42 @@
+# What every stage shares: the catalogues, and what comes out of them.
+#
+# A manifest is an INPUT. Applying it does not make it the profile's source of
+# truth, nothing writes back to it, and you may throw it away — the ledger in
+# the profile is the only state. `ap list claude:plan` reads that ledger;
+# `ap manifest export claude:plan` turns it back into a file like this one.
+version: "1"
+name: base
+
+targets:
+  - claude
+  - codex
+  - opencode
+  - pi
+
+marketplaces:
+  superpowers:
+    type: skills
+    source:
+      git:
+        url: https://github.com/obra/superpowers.git
+        ref: main
+        subpath: skills
+
+  ponytail:
+    type: plugins
+    source:
+      git:
+        url: https://github.com/DietrichGebert/ponytail.git
+        ref: main
+
+plugins:
+  ponytail:
+    ref: ponytail@ponytail
+
+skills:
+  brainstorming:
+    ref: brainstorming@superpowers
+  writing-plans:
+    ref: writing-plans@superpowers
+  executing-plans:
+    ref: executing-plans@superpowers

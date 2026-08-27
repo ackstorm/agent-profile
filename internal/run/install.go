@@ -1,12 +1,10 @@
-//go:build unix
-
 package run
 
 import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // StripProfilePaths removes every variable in base whose value resolves inside
@@ -53,7 +51,7 @@ func StripProfilePaths(root string, base []string) []string {
 //
 // dir == "" is `name: default`: no override at all, exactly as `ap run
 // claude:default` behaves.
-func InstallEnv(a agent.Agent, dir, root string, base []string) []string {
+func InstallEnv(a agentreg.Agent, dir, root string, base []string) []string {
 	return Env(a, dir, StripProfilePaths(root, base))
 }
 

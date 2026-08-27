@@ -1,5 +1,3 @@
-//go:build unix
-
 package run
 
 import (
@@ -9,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 func TestExecMissingBinaryGivesUsefulError(t *testing.T) {
-	a := agent.Agent{Name: "nope", Bin: "definitely-not-installed-xyz", ConfigEnv: "X_DIR"}
+	a := agentreg.Agent{Name: "nope", Bin: "definitely-not-installed-xyz", ConfigEnv: "X_DIR"}
 	err := Exec(a, t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("Exec = nil error, want not-found")
@@ -29,7 +27,7 @@ func TestExecMissingBinaryGivesUsefulError(t *testing.T) {
 // technique as the test below.
 func TestExecBinRunsAnotherBinaryWithTheAgentsVariable(t *testing.T) {
 	if os.Getenv("AP_EXEC_CHILD") == "1" {
-		a := agent.Agent{Name: "fake", Bin: "fake-agent", ConfigEnv: "FAKE_CONFIG_DIR"}
+		a := agentreg.Agent{Name: "fake", Bin: "fake-agent", ConfigEnv: "FAKE_CONFIG_DIR"}
 		if err := ExecBin(a, "/p/plan", "fake-installer", []string{"add", "skill"}); err != nil {
 			os.Stderr.WriteString("exec failed: " + err.Error())
 			os.Exit(3)
@@ -61,7 +59,7 @@ func TestExecBinRunsAnotherBinaryWithTheAgentsVariable(t *testing.T) {
 // PATH prints its config variable and argv, and we assert both arrived.
 func TestExecPassesConfigVarAndArgs(t *testing.T) {
 	if os.Getenv("AP_EXEC_CHILD") == "1" {
-		a := agent.Agent{Name: "fake", Bin: "fake-agent", ConfigEnv: "FAKE_CONFIG_DIR"}
+		a := agentreg.Agent{Name: "fake", Bin: "fake-agent", ConfigEnv: "FAKE_CONFIG_DIR"}
 		if err := Exec(a, "/p/plan", []string{"plugin", "install", "x"}); err != nil {
 			os.Stderr.WriteString("exec failed: " + err.Error())
 			os.Exit(3)

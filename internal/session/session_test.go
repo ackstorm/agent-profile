@@ -8,9 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ackstorm/agent-profile/internal/agent"
-	"github.com/ackstorm/agent-profile/internal/profile"
 	"github.com/ackstorm/agent-profile/internal/run"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // codex writes one session_meta line first, carrying the id, the cwd and the
@@ -245,18 +244,18 @@ func TestScanOpensOnlyWhatItPrints(t *testing.T) {
 	_ = files
 }
 
-// profile.Default is not a profile: it names the agent's real configuration, and
+// agentreg.Default is not a profile: it names the agent's real configuration, and
 // reaching it means inheriting the user's environment untouched. Scan used to
 // hand run.Env the directory profile.Dir resolves Default to, which produced a
 // real override pointing at <real config>/xdg-data — a directory that does not
 // exist. Measured: opencode listed nothing for :default and would have created
 // state inside the user's own config directory.
 func TestEnvDirIsEmptyForDefault(t *testing.T) {
-	a, ok := agent.Lookup("opencode")
+	a, ok := agentreg.Lookup("opencode")
 	if !ok {
 		t.Fatal("no opencode in the registry")
 	}
-	if got := envDir(a, profile.Default); got != "" {
+	if got := envDir(a, agentreg.Default); got != "" {
 		t.Errorf("envDir(default) = %q, want empty so run.Env sets no override", got)
 	}
 	if got := envDir(a, "plan"); got == "" {
@@ -265,7 +264,7 @@ func TestEnvDirIsEmptyForDefault(t *testing.T) {
 
 	// The property that actually matters, stated against run.Env itself.
 	base := []string{"XDG_DATA_HOME=/real/share", "XDG_CONFIG_HOME=/real/config"}
-	for _, e := range run.Env(a, envDir(a, profile.Default), base) {
+	for _, e := range run.Env(a, envDir(a, agentreg.Default), base) {
 		if strings.HasPrefix(e, "XDG_DATA_HOME=") && e != "XDG_DATA_HOME=/real/share" {
 			t.Errorf("scanning :default rewrote the environment: %s", e)
 		}
