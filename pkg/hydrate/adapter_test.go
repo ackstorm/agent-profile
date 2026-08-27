@@ -37,15 +37,15 @@ func TestSkillDestinationsComeFromTheRegistry(t *testing.T) {
 	}
 }
 
-// codex reads skills from ~/.agents/skills, OUTSIDE CODEX_HOME, so pointing
-// that variable at a profile does not isolate them. Writing there anyway would
-// leak one profile's skills into every other profile and into the user's bare
-// codex — which is the opposite of what this tool is for.
+// codex read skills only from ~/.agents/skills — outside CODEX_HOME — until
+// codex-cli 0.149.1, so a profile could not isolate them and this case pinned
+// the absence. It now reads $CODEX_HOME/skills too, verified by planting a
+// marker skill there and watching `codex exec` list it back.
 //
-// This is pinned as a named case rather than left to the table above, because
-// the tempting "fix" is to give codex a skills path and make the table
-// uniform, and the reason not to is not visible from the code.
-func TestCodexHasNoConfigDirSkillDestination(t *testing.T) {
+// Kept as a named case for the same reason it existed: the row is the one most
+// likely to be changed on a guess, in either direction, and the evidence for
+// its current value is not visible from the code.
+func TestCodexSkillsLandInsideItsConfigDir(t *testing.T) {
 	a, ok := agentreg.Lookup("codex")
 	if !ok {
 		t.Fatal("codex is not in the registry")
@@ -54,8 +54,37 @@ func TestCodexHasNoConfigDirSkillDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, supported := ad.SkillDir("pdf"); supported {
-		t.Error("codex reports a skills destination inside its config dir; ~/.agents/skills is outside it")
+	rel, supported := ad.SkillDir("pdf")
+	if !supported {
+		t.Fatal("codex reports no skills destination; it reads $CODEX_HOME/skills")
+	}
+	if want := filepath.Join("skills", "pdf"); rel != want {
+		t.Errorf("codex skill destination = %q, want %q", rel, want)
+	}
+}
+
+// Measured, not read: `pi install git:github.com/DietrichGebert/ponytail`
+// against a throwaway PI_CODING_AGENT_DIR left settings.json holding exactly
+// {"packages":["git:github.com/DietrichGebert/ponytail"]}.
+func TestPiDeclaresPackagesInItsSettings(t *testing.T) {
+	a, _ := agentreg.Lookup("pi")
+	ad, _ := AdapterFor(a)
+	rel, key, ok := ad.PackageTarget()
+	if !ok || rel != "settings.json" || key != "packages" {
+		t.Errorf("pi PackageTarget = %q %q %v", rel, key, ok)
+	}
+}
+
+// claude and codex declare plugins through a marketplace, not a package list.
+// Inventing a key for them would write a file neither reads (§8: warn, never
+// invent).
+func TestClaudeAndCodexHaveNoNativePackageList(t *testing.T) {
+	for _, name := range []string{"claude", "codex"} {
+		a, _ := agentreg.Lookup(name)
+		ad, _ := AdapterFor(a)
+		if _, _, ok := ad.PackageTarget(); ok {
+			t.Errorf("%s reports a native package list; it uses a marketplace", name)
+		}
 	}
 }
 

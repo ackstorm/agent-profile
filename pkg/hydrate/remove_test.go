@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 	"github.com/ackstorm/agent-profile/pkg/schema"
 	"github.com/ackstorm/agent-profile/pkg/source"
 )
@@ -216,6 +218,36 @@ func TestMergeOutRefusesAnUnparseableDocument(t *testing.T) {
 	body, _ := os.ReadFile(path)
 	if string(body) != "{not json" {
 		t.Errorf("the file was touched: %q", body)
+	}
+}
+
+// The bound, end to end: the user's package survives ours being removed.
+func TestUninstallingANativePluginLeavesTheUsersPackagesIntact(t *testing.T) {
+	a, _ := agentreg.Lookup("pi")
+	ad, _ := AdapterFor(a)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "settings.json"),
+		[]byte(`{"packages":["git:example.com/theirs"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(t.Context(), Plan{
+		Root: root, Adapter: ad, Now: fixedNow,
+		Profile: schema.Profile{Runtimes: map[string]schema.Runtime{"pi": {
+			Plugins: map[string]schema.NativePlugin{"ponytail": {Enabled: true, Package: "git:example.com/ours"}},
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Remove(root, "native-plugin", "ponytail", false); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(root, "settings.json"))
+	if strings.Contains(string(raw), "ours") {
+		t.Errorf("ours survived the removal:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "theirs") {
+		t.Errorf("the user's package was removed with ours:\n%s", raw)
 	}
 }
 

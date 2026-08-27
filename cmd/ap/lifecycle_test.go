@@ -6,8 +6,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
 // lifecycleEnv seeds a repository and a throwaway home, and returns the repo
@@ -126,6 +130,171 @@ func TestUninstallDryRunPreviewsAndThenRemoves(t *testing.T) {
 	if !strings.Contains(out, "nothing is installed") {
 		t.Errorf("the ledger still claims the skill:\n%s", out)
 	}
+}
+
+// A profile a manifest built is a profile, and a profile that cannot log in is
+// not one. Applying used to materialize resources into a bare directory and
+// stop: no shared credential, no shim, no first-run flags, no wrapper — so the
+// first thing a user typed was an agent with no auth, in a profile they could
+// not type the name of.
+//
+// The four things `ap create` does are asserted here, and the credential is the
+// one that matters: it must be a SYMLINK to the real home's file, because a copy
+// would go stale the moment the token refreshed.
+func TestApplyingAManifestProvisionsTheProfileLikeCreateDoes(t *testing.T) {
+	repo, data := lifecycleEnv(t)
+	home := seedRealHome(t)
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+
+	path := filepath.Join(t.TempDir(), "p.yaml")
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude"})
+	})
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+
+	root := filepath.Join(data, "agent-profile", "profiles", "claude", "plan")
+	// The credential, as a link and not a copy.
+	cred := filepath.Join(root, ".credentials.json")
+	dest, err := os.Readlink(cred)
+	if err != nil {
+		t.Fatalf("the shared credential is not a symlink: %v", err)
+	}
+	if want := filepath.Join(home, ".claude", ".credentials.json"); dest != want {
+		t.Errorf("the credential links to %q, want %q", dest, want)
+	}
+	// The first-run flags and the wrapper. `projects` is deliberately absent:
+	// it is Unshared, so transcripts stay per-profile.
+	seeded, err := os.ReadFile(filepath.Join(root, ".claude.json"))
+	if err != nil {
+		t.Fatalf("the first-run file was not seeded: %v", err)
+	}
+	if !strings.Contains(string(seeded), "hasCompletedOnboarding") {
+		t.Errorf("the first-run flags are missing:\n%s", seeded)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "claude:plan")); err != nil {
+		t.Errorf("no wrapper was written: %v", err)
+	}
+	// And the skill still landed: provisioning runs BEFORE materialization, so
+	// a regression in the order shows up as a missing resource here.
+	if _, err := os.Stat(filepath.Join(root, "skills", "pdf", "SKILL.md")); err != nil {
+		t.Errorf("the skill was not materialized: %v", err)
+	}
+}
+
+// The other half of the same rule: --root is the init container's spelling, and
+// an init container has no $HOME to link a credential out of and no PATH
+// directory to write a wrapper into. Provisioning there would fail, or worse,
+// succeed against whatever home the container happened to have.
+func TestApplyingToALiteralRootProvisionsNothing(t *testing.T) {
+	repo, _ := lifecycleEnv(t)
+	seedRealHome(t)
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+
+	path := filepath.Join(t.TempDir(), "p.yaml")
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\nskills:\n  pdf:\n    source:\n      git:\n        url: " +
+		repo + "\n        subpath: skills/pdf\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude", "--root", root})
+	})
+	if err != nil {
+		t.Fatalf("apply --root: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "skills", "pdf", "SKILL.md")); err != nil {
+		t.Fatalf("the skill was not materialized: %v", err)
+	}
+	for _, rel := range []string{".credentials.json", ".claude.json"} {
+		if _, err := os.Lstat(filepath.Join(root, rel)); !os.IsNotExist(err) {
+			t.Errorf("%s was provisioned into a literal root", rel)
+		}
+	}
+	entries, err := os.ReadDir(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a literal root wrote a wrapper: %v", entries)
+	}
+}
+
+// A manifest's variants used to parse, render, and then do nothing: `ap manifest
+// apply` materialized skills and left `runtimes.<rt>.variants` on the floor, so
+// the command the manifest declared was not a command. §8 forbids exactly that.
+func TestApplyingAManifestRecordsItsVariants(t *testing.T) {
+	_, _ = lifecycleEnv(t)
+	seedRealHome(t)
+	bin := t.TempDir()
+	t.Setenv("AP_LINK_DIR", bin)
+
+	path := filepath.Join(t.TempDir(), "p.yaml")
+	body := "version: \"1\"\nname: plan\ntargets:\n  - claude\n" +
+		"runtimes:\n  claude:\n    variants:\n      opus:\n        - --model=claude-opus-5\n" +
+		"        - --effort=xhigh\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude"})
+	})
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out)
+	}
+
+	args, err := profile.VariantArgs(agentreg.Agent{Name: "claude"}, "plan", "opus")
+	if err != nil {
+		t.Fatalf("the variant was not recorded: %v\n%s", err, out)
+	}
+	want := []string{"--model=claude-opus-5", "--effort=xhigh"}
+	if !slices.Equal(args, want) {
+		t.Errorf("variant args = %q, want %q", args, want)
+	}
+	// And it is typeable, which is the point of recording it.
+	if _, err := os.Stat(filepath.Join(bin, "claude:plan:opus")); err != nil {
+		t.Errorf("no wrapper for the variant: %v", err)
+	}
+
+	// Applying again converges rather than refusing: a manifest is a
+	// declaration, and WriteVariant refuses an existing name unless replaced.
+	if out, err := captureStdout(t, func() error {
+		return dispatch([]string{"manifest", "apply", path, "--target", "claude"})
+	}); err != nil {
+		t.Fatalf("re-applying the same manifest failed: %v\n%s", err, out)
+	}
+}
+
+// seedRealHome points HOME at a throwaway directory holding the two files
+// provisioning reads: the credential a profile links back to, and the
+// onboarding flags it seeds from.
+func seedRealHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		filepath.Join(home, ".claude", ".credentials.json"): `{"token":"t"}`,
+		filepath.Join(home, ".claude.json"):                 `{"hasCompletedOnboarding":true,"other":1}`,
+	}
+	for p, body := range files {
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return home
 }
 
 // §35.1 as amended by D4: v1 records no marketplace definition, so a bare ref

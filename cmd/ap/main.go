@@ -1621,8 +1621,11 @@ func linkAndReport(a agentreg.Agent, dir string, rc *receipt) error {
 		// login was shared when it was not, and only found out much later when a
 		// run dead-ended on "refusing to replace real file"; a row in the calm
 		// column would be barely louder than silence.
+		// Names no single command on purpose: create, install and apply all
+		// reach this, and `ap run` re-asserts the link anyway. "Re-run `ap
+		// create`" was wrong advice from two of the three.
 		rc.warn("NOT shared: %q\n"+
-			"    run %s once outside a profile first, then re-run `ap create`",
+			"    run %s once outside a profile to create it; the link is re-asserted on every `ap run`",
 			skipped, a.Bin)
 	}
 	if len(unshared) > 0 {

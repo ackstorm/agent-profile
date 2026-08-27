@@ -488,3 +488,50 @@ own bootstrap, which was most of what the old example manifests did. The honest
 replacement is the user's own command under the profile's environment —
 `ap env <ref> -- <installer>` — and `examples/agent-profiles/README.md` states
 the trade rather than pretending the format grew a way to express it.
+
+## Runtime-native plugins: a list is not a map, and neither is a marketplace
+
+`runtimes.<rt>.plugins` was parsed into a raw `*Node`, rendered back out, and
+dropped — so §24.3's own example, a pi package overriding the common ponytail
+plugin, materialized the common plugin anyway. Three things had to be true
+before it could work, and none of them fell out of the existing machinery.
+
+**A package list is an ARRAY, and `MergeInto` cannot touch it.** `mergeMap`
+descends exactly one level into MAPS and records a dotted key per entry; handed
+a list it takes the `doc[k] = v` branch, replacing the whole array and recording
+the container key `packages`. Uninstalling ap's one package would then delete
+every package in the file, the user's included — the precise failure `mergeMap`'s
+own comment describes for `mcpServers`, one container shape over. `AppendInto`
+and `RemoveFrom` are that primitive for lists: idempotent on the way in, bounded
+by the ELEMENT on the way out, recorded as `<key>.<package>`.
+
+A pi locator contains dots (`git:github.com/DietrichGebert/ponytail`), so the
+recorded key is split on the FIRST `.` — `strings.Cut`, the same shape
+`deleteDotted` walks — and the container name is what precedes it.
+
+**The override has to apply to a DISABLED entry too.** The tempting reading is
+that a disabled native plugin means "nothing here", falling back to the common
+one. That makes "ponytail on every runtime except pi" inexpressible, which was
+the original request. So the suppression set is every name in the runtime's
+plugin block, enabled or not, and `applyNativePlugins` runs before `applyPlugins`
+so the set exists when the common plugins are walked.
+
+**Two runtimes have a package list; two have a marketplace.** pi declares
+`packages` in `settings.json`, opencode declares `plugin` in `opencode.json`.
+claude (`extraKnownMarketplaces`/`enabledPlugins`) and codex
+(`[plugins."<p>@<m>"]`) declare through a marketplace instead — expressible, but
+a second mechanism with its own reconcile story, which §40.1 leaves open. They
+warn under §8 rather than getting an invented `packages` key written into a file
+neither of them reads.
+
+**What ap does not do:** clone the tree, or run the installer. Measured against
+a throwaway `PI_CODING_AGENT_DIR`: `pi install <src>` clones into
+`<dir>/git/<host>/<owner>/<repo>`, writes `<dir>/git/.gitignore`, appends the
+source string to `settings.json`, and runs `npm install`. But `pi update <src>`
+materializes a declaration with **nothing on disk** — verified against a
+`settings.json` holding only the array — and `pi list` shows the package from the
+declaration alone. So ap writes the declaration and reports `pi update` as the
+reconcile command, exactly as the clone path reports `codex plugin add`. Cloning
+it ourselves would make ap the owner of pi's on-disk layout and would leave a
+package with JavaScript dependencies half-installed and looking finished, since
+ap has no business running `npm`.

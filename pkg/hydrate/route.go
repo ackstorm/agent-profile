@@ -55,10 +55,11 @@ type Rule struct {
 //
 // Nothing here generalises, and the gaps are as load-bearing as the rows:
 //
-//   - codex has NO skills row. ach routes skills to `.agents/skills/`, which is
-//     outside CODEX_HOME, so pointing that variable at a profile does not
-//     isolate them — writing there would leak one profile's skills into every
-//     other. Same fact agentreg.Agent.Skills records by being empty.
+//   - codex had NO skills row until 0.149.1, because ach routes skills to
+//     `.agents/skills/`, outside CODEX_HOME. It now also reads
+//     `$CODEX_HOME/skills`, verified by planting a marker skill there and
+//     watching `codex exec` list it — the same fact agentreg.Agent.Skills
+//     records by no longer being empty.
 //   - claude's AGENTS.md becomes CLAUDE.md, and it is a COMPOSITE merge: the
 //     file belongs to the user, and a plugin contributes a marked region rather
 //     than replacing it.
@@ -75,6 +76,7 @@ var routeTables = map[string][]Rule{
 	},
 	"codex": {
 		{Kind: "commands", To: "prompts"},
+		{Kind: "skills", To: "skills"},
 		{Kind: "agents", To: "agents", Transform: "markdown frontmatter to TOML"},
 		{Kind: "mcp", To: "config.toml", Merge: "deep"},
 		{Kind: ".mcp.json", To: "config.toml", Merge: "deep"},

@@ -26,6 +26,15 @@ type Adapter interface {
 	// top-level key inside it. ok=false means this runtime has no config-dir
 	// MCP surface, which is a §8 degradation, not something to invent.
 	MCPTarget() (rel, key string, ok bool)
+	// PackageTarget is the file a runtime's OWN package declarations live in
+	// and the key holding the list. ok=false means this runtime has no such
+	// list, which is a §8 degradation and not something to invent — claude
+	// and codex declare plugins through a marketplace instead.
+	PackageTarget() (rel, key string, ok bool)
+	// ReconcileCommand is the command that materializes a declared package,
+	// with pkg substituted in, or "" when there is nothing to run. ap prints
+	// this rather than running it: ap does not run other people's installers.
+	ReconcileCommand(pkg string) string
 }
 
 // AdapterFor returns the adapter for an agent. Destinations come from
@@ -54,6 +63,20 @@ func (r registryAdapter) MCPTarget() (string, string, bool) {
 		return "", "", false
 	}
 	return r.agent.MCPFile, r.agent.MCPKey, true
+}
+
+func (r registryAdapter) PackageTarget() (string, string, bool) {
+	if r.agent.PackageFile == "" || r.agent.PackageKey == "" {
+		return "", "", false
+	}
+	return r.agent.PackageFile, r.agent.PackageKey, true
+}
+
+func (r registryAdapter) ReconcileCommand(pkg string) string {
+	if r.agent.PackageReconcile == "" {
+		return ""
+	}
+	return fmt.Sprintf(r.agent.PackageReconcile, pkg)
 }
 
 // ArtifactDest applies §26.1: a destination is relative to the root, must not

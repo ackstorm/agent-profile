@@ -157,6 +157,10 @@ func TestRenderRoundTripsThroughTheParser(t *testing.T) {
 				"X-Note":        {Value: "trailing space and a # hash "},
 			},
 		}}},
+		Runtimes: map[string]Runtime{"claude": {Plugins: map[string]NativePlugin{
+			"ponytail": {Enabled: true, Package: "git:github.com/DietrichGebert/ponytail"},
+			"disabled": {Enabled: false},
+		}}},
 	}
 
 	dir := t.TempDir()

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -74,14 +75,14 @@ func FetchGit(ctx context.Context, c *Cache, s GitSpec) (Resolved, error) {
 		}
 	}
 
-	sha, err := lsRemote(ctx, s, scheme, inferred)
+	sha, full, err := lsRemote(ctx, s, scheme, inferred)
 	if err != nil {
 		return Resolved{}, err
 	}
 	res.ResolvedRef = sha
 
 	entry, err := c.Publish(sha, func(dir string) error {
-		return cloneAt(ctx, dir, s, scheme, sha, inferred)
+		return cloneAt(ctx, dir, s, scheme, sha, full, inferred)
 	})
 	if err != nil {
 		return Resolved{}, err
@@ -93,23 +94,73 @@ func FetchGit(ctx context.Context, c *Cache, s GitSpec) (Resolved, error) {
 	return res, nil
 }
 
-// lsRemote turns a ref into a SHA without cloning anything. An empty ref means
-// HEAD, which is the repository's own default branch — never a branch name
-// guessed here.
-func lsRemote(ctx context.Context, s GitSpec, scheme Scheme, inferred bool) (string, error) {
+// lsRemote turns a ref into a SHA and the FULL name of the ref it came from,
+// without cloning anything. An empty ref means HEAD, which is the repository's
+// own default branch — never a branch name guessed here.
+//
+// It returns the full name because `ls-remote <ref>` is a PATTERN match against
+// the tail of every ref name, not a lookup. `main` also matches
+// `refs/heads/daisy/caffeinate/main`, and taking the first line returned that
+// branch's SHA — measured against anthropics/claude-plugins-official, where two
+// such branches sort ahead of `refs/heads/main`. The `git fetch` below then
+// resolved `main` properly, the two SHAs disagreed, and the mismatch surfaced
+// as "main moved while fetching": a race that never happened, advising a re-run
+// that could never help.
+//
+// So the ambiguity is resolved exactly once, here, and cloneAt fetches the
+// resolved NAME rather than the user's shorthand. The two cannot disagree
+// afterwards, which leaves the SHA check downstream meaning only what it was
+// written to mean.
+//
+// A branch beats a tag of the same name. Stated rather than discovered: it is
+// what the old first-line-wins behaviour did by accident (`refs/heads/` sorts
+// before `refs/tags/`), and it is what `git fetch origin <name>` does.
+func lsRemote(ctx context.Context, s GitSpec, scheme Scheme, inferred bool) (sha, full string, err error) {
 	ref := s.Ref
 	if ref == "" {
 		ref = "HEAD"
 	}
-	out, err := runGit(ctx, "", gitArgs(s, scheme, "ls-remote", "--", s.URL, ref)...)
+	// Ask for the exact candidates rather than a bare pattern, so an unrelated
+	// branch whose name merely ends in the ref cannot be one of the answers.
+	candidates := []string{ref}
+	if ref != "HEAD" && !strings.HasPrefix(ref, "refs/") {
+		candidates = append(candidates, "refs/heads/"+ref, "refs/tags/"+ref, "refs/"+ref)
+	}
+	// The peeled forms are ASKED FOR but never selected: ls-remote emits a
+	// "^{}" line only when a pattern matches it, and it is the commit an
+	// annotated tag resolves to rather than a ref of its own.
+	patterns := slices.Clone(candidates)
+	for _, c := range candidates {
+		patterns = append(patterns, c+"^{}")
+	}
+	args := append([]string{"ls-remote", "--", s.URL}, patterns...)
+	out, err := runGit(ctx, "", gitArgs(s, scheme, args...)...)
 	if err != nil {
-		return "", gitError(fmt.Sprintf("resolving %s of %s", ref, s.URL), out, err, scheme, inferred, s.Token != "")
+		return "", "", gitError(fmt.Sprintf("resolving %s of %s", ref, s.URL), out, err, scheme, inferred, s.Token != "")
 	}
-	fields := strings.Fields(string(out))
-	if len(fields) == 0 || !shaPattern.MatchString(fields[0]) {
-		return "", fmt.Errorf("%s: ref %q not found", s.URL, ref)
+
+	byName := map[string]string{}
+	for line := range strings.Lines(string(out)) {
+		f := strings.Fields(line)
+		if len(f) == 2 && shaPattern.MatchString(f[0]) {
+			byName[f[1]] = f[0]
+		}
 	}
-	return fields[0], nil
+	for _, name := range candidates {
+		sha, ok := byName[name]
+		if !ok {
+			continue
+		}
+		// An annotated tag reports its own object, then the commit it points at
+		// on a "^{}" line. The checkout lands on the COMMIT, so the peeled value
+		// is the one the SHA check downstream can agree with — and it is the one
+		// worth recording in the ledger, since a tag object names no tree.
+		if peeled, ok := byName[name+"^{}"]; ok {
+			sha = peeled
+		}
+		return sha, name, nil
+	}
+	return "", "", fmt.Errorf("%s: ref %q not found", s.URL, ref)
 }
 
 // cloneAt fills a staging directory with the tree at sha.
@@ -120,11 +171,11 @@ func lsRemote(ctx context.Context, s GitSpec, scheme Scheme, inferred bool) (str
 // default), and a local path transport ignores --depth entirely. A ref that
 // moved in between is an error naming both SHAs, not a silently different
 // tree.
-func cloneAt(ctx context.Context, dir string, s GitSpec, scheme Scheme, sha string, inferred bool) error {
-	ref := s.Ref
-	if ref == "" {
-		ref = "HEAD"
-	}
+//
+// The ref fetched is the FULL name lsRemote resolved, never the user's
+// shorthand. Resolving it a second time here is what let the two disagree about
+// what `main` meant and report it as a race.
+func cloneAt(ctx context.Context, dir string, s GitSpec, scheme Scheme, sha, ref string, inferred bool) error {
 	steps := [][]string{
 		{"init", "--quiet"},
 		{"remote", "add", "origin", "--", s.URL},

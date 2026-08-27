@@ -158,9 +158,18 @@ type Runtime struct {
 	Model        *Model
 	Prompt       *Prompt
 	Inputs       Inputs
-	Plugins      map[string]*Node // adapter-owned, §24 — kept as a tree for Phase 6
+	Plugins      map[string]NativePlugin
 	Environment  map[string]string
 	Variants     map[string][]string
+}
+
+// NativePlugin is a runtime's OWN packaging mechanism (§24.3), not §24's
+// common plugin contract. Package is the locator in the runtime's own
+// syntax — "git:github.com/owner/repo" for pi, "@scope/name" for opencode —
+// and ap never parses it.
+type NativePlugin struct {
+	Enabled bool
+	Package string
 }
 
 type Inputs struct {
@@ -1270,7 +1279,7 @@ func decodeRuntimeInputsField(path string, r *Runtime, n *Node) error {
 }
 
 func decodeRuntimePluginsField(path string, r *Runtime, n *Node) error {
-	v, err := decodePlugins(path+".plugins", n)
+	v, err := decodeNativePlugins(path+".plugins", n)
 	if err != nil {
 		return err
 	}
@@ -1296,16 +1305,47 @@ func decodeRuntimeVariantsField(path string, r *Runtime, n *Node) error {
 	return nil
 }
 
-// decodePlugins captures each entry as a raw Node, no deeper than that: §24
-// makes the plugin schema adapter-owned, and `package:` (opencode) is a third
-// locator form this package does not know about. Phase 6 decides its shape.
-func decodePlugins(path string, n *Node) (map[string]*Node, error) {
+// decodeNativePlugins reads runtimes.<rt>.plugins: a runtime's OWN packaging
+// mechanism (§24.3), which is not §24's common plugin contract and shares only
+// the word. The locator is in the runtime's own syntax and ap never parses it —
+// ap writes it into the runtime's settings and the runtime resolves it.
+func decodeNativePlugins(path string, n *Node) (map[string]NativePlugin, error) {
 	if n.Kind != Mapping {
 		return nil, fmt.Errorf("line %d: %s: expected a mapping of name to plugin", n.Line, path)
 	}
-	out := map[string]*Node{}
+	out := map[string]NativePlugin{}
 	for _, k := range n.Keys {
-		out[k] = n.Map[k]
+		p := fmt.Sprintf("%s.%s", path, k)
+		e := n.Map[k]
+		np := NativePlugin{Enabled: true}
+		if e.Kind == Empty {
+			e = &Node{Kind: Mapping, Line: e.Line, Map: map[string]*Node{}}
+		}
+		if e.Kind != Mapping {
+			return nil, fmt.Errorf("line %d: %s: expected a mapping", e.Line, p)
+		}
+		if err := onlyKeys(e, "enabled", "package"); err != nil {
+			return nil, err
+		}
+		if en, ok := e.Map["enabled"]; ok {
+			b, err := en.Bool()
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %s.enabled: %w", en.Line, p, err)
+			}
+			np.Enabled = b
+		}
+		if pk, ok := e.Map["package"]; ok {
+			v, err := pk.Text()
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %s.package: %w", pk.Line, p, err)
+			}
+			np.Package = v
+		} else if np.Enabled {
+			// §22's rule, one collection over: an enabled resource defines
+			// exactly one locator. A disabled one needs none.
+			return nil, fmt.Errorf("line %d: %s: no package; an enabled runtime-native plugin needs one", e.Line, p)
+		}
+		out[k] = np
 	}
 	return out, nil
 }

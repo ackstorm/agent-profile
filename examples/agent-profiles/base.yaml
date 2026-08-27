@@ -40,3 +40,13 @@ skills:
     ref: writing-plans@superpowers
   executing-plans:
     ref: executing-plans@superpowers
+
+runtimes:
+  # pi packages plugins itself, so it takes ponytail its own way and the common
+  # plugin above is NOT materialized for it — a runtime-native entry overrides
+  # the common one of the same name. ap writes the declaration into pi's
+  # settings.json and names `pi update`; it does not run pi's installer.
+  pi:
+    plugins:
+      ponytail:
+        package: "git:github.com/DietrichGebert/ponytail"

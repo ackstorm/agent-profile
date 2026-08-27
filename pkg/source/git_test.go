@@ -51,32 +51,91 @@ func newBareRepo(t *testing.T, files map[string]string) string {
 		t.Skip("git is not on PATH")
 	}
 	work := t.TempDir()
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = work
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
-			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
-			"GIT_CONFIG_NOSYSTEM=1", "HOME="+work,
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
-	run("init", "--quiet", "--initial-branch=main")
+	gitIn(t, work, "init", "--quiet", "--initial-branch=main")
 	for rel, body := range files {
-		p := filepath.Join(work, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeIn(t, work, rel, body)
 	}
-	run("add", "-A")
-	run("commit", "--quiet", "-m", "seed")
+	gitIn(t, work, "add", "-A")
+	gitIn(t, work, "commit", "--quiet", "-m", "seed")
 	return work
+}
+
+// mustGit runs git in repo and returns its output, failing the test if it
+// errors. Same fixed identity and isolated HOME as newBareRepo built inline
+// before the ref-matching tests needed to reach for it too.
+func mustGit(t *testing.T, repo string, args ...string) []byte {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+		"GIT_CONFIG_NOSYSTEM=1", "HOME="+repo,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+func gitIn(t *testing.T, repo string, args ...string) {
+	t.Helper()
+	mustGit(t, repo, args...)
+}
+
+func writeIn(t *testing.T, repo, rel, body string) {
+	t.Helper()
+	p := filepath.Join(repo, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// `git ls-remote <url> main` is a PATTERN match against the tail of every ref
+// name, so a branch called `daisy/caffeinate/main` is one of the answers — and
+// it sorts ahead of `refs/heads/main`. Taking the first line resolved `main` to
+// that branch's SHA while the fetch resolved it properly, and the mismatch was
+// reported as "main moved while fetching; re-run": a race that never happened,
+// advising a re-run that could never help.
+//
+// Found against anthropics/claude-plugins-official, which has two such
+// branches. Reproduced here with a local repository, because a test that needs
+// the network goes red for reasons nobody controls.
+func TestARefIsMatchedExactlyAndNotAsASuffix(t *testing.T) {
+	repo := newBareRepo(t, map[string]string{"a.md": "main"})
+	gitIn(t, repo, "checkout", "--quiet", "-b", "daisy/caffeinate/main")
+	writeIn(t, repo, "a.md", "decoy")
+	gitIn(t, repo, "commit", "--quiet", "-am", "decoy")
+	gitIn(t, repo, "checkout", "--quiet", "main")
+
+	got, err := FetchGit(t.Context(), mustCache(t), GitSpec{URL: repo, Ref: "main"})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(got.Dir, "a.md")); err != nil || string(b) != "main" {
+		t.Errorf("a.md = %q %v, want the content of refs/heads/main", b, err)
+	}
+}
+
+// An annotated tag reports its own object AND the commit it points at. The
+// checkout lands on the commit, so recording the tag object would both disagree
+// with the SHA check and put a hash naming no tree in the ledger.
+func TestAnAnnotatedTagResolvesToTheCommitItPointsAt(t *testing.T) {
+	repo := newBareRepo(t, map[string]string{"a.md": "tagged"})
+	gitIn(t, repo, "tag", "-a", "v1.0", "-m", "release")
+
+	got, err := FetchGit(t.Context(), mustCache(t), GitSpec{URL: repo, Ref: "v1.0"})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	head := strings.TrimSpace(string(mustGit(t, repo, "rev-parse", "v1.0^{commit}")))
+	if got.ResolvedRef != head {
+		t.Errorf("ResolvedRef = %q, want the commit %q", got.ResolvedRef, head)
+	}
 }
 
 func TestFetchGitResolvesARefToASHAAndSlicesASubpath(t *testing.T) {

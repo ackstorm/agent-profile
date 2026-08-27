@@ -141,10 +141,19 @@ func parseVariantRef(ref string, allowDefault bool) (agentreg.Agent, string, str
 }
 
 // Create makes the profile directory. It refuses to clobber an existing one.
+//
+// The refusal names the way forward, the same shape WriteVariant uses. `ap
+// create` against a profile that already exists is overwhelmingly someone
+// reaching for its WRAPPER — a profile materialized by `ap manifest apply`
+// before apply provisioned one, or made before create wrote one at all — and a
+// bare "already exists" left them with nowhere to go. `ap link` is that
+// somewhere; it writes the wrapper and touches nothing else.
 func Create(a agentreg.Agent, name string) (string, error) {
 	dir := Dir(a, name)
 	if _, err := os.Stat(dir); err == nil {
-		return "", fmt.Errorf("profile %s:%s already exists at %s", a.Name, name, dir)
+		return "", fmt.Errorf("profile %s:%s already exists at %s\n"+
+			"to write its wrapper without touching the profile: ap link %s:%s",
+			a.Name, name, dir, a.Name, name)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
