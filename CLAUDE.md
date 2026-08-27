@@ -308,6 +308,35 @@ the catalogue name against. It is refused BY NAME — without that refusal the r
 is treated as a literal resource name and the user gets a contract error naming
 a cache directory.
 
+## A runtime-native plugin overrides the common one, and ap declares it
+
+`runtimes.<rt>.plugins.<name>.package` is the runtime's OWN packaging mechanism
+(§24.3), which shares only a word with §24's common plugin contract. The locator
+is in the runtime's syntax — `git:github.com/owner/repo` for pi, `@scope/name`
+for opencode — and ap never parses it.
+
+- **A native entry suppresses the common plugin of that name, for that runtime,
+  INCLUDING when it is disabled.** That is what makes "ponytail everywhere except
+  pi" expressible at all: `enabled: false` with no package is a runtime opting
+  out, and the common plugin must not come back to fill the hole. Materializing
+  both would install one plugin twice by two mechanisms.
+- **ap writes the DECLARATION and names the reconcile command.** It does not run
+  the runtime's installer — that is the line `ap sync` was removed to draw, and
+  ap cannot run `npm install`, so a package with JavaScript dependencies would be
+  left half-installed and looking finished. Measured: `pi update <source>` clones
+  a package that exists only in `settings.json`, with nothing on disk, so the
+  declaration alone is enough to act on and `pi list` shows it before any clone.
+- **The record is bounded by the ELEMENT.** A package list is an ARRAY the user
+  also writes to, so `AppendInto`/`RemoveFrom` record `<key>.<package>` and never
+  the bare container key. `MergeInto` is wrong here for the reason its own
+  `mergeMap` comment gives for `mcpServers`: it replaces a non-map value whole and
+  records the container, so uninstalling ours would delete the user's packages.
+  `TestUninstallingANativePluginLeavesTheUsersPackagesIntact` is the guard.
+- **claude and codex have no package list and warn.** Both declare plugins
+  through a marketplace, which is a second mechanism with its own reconcile
+  story; §40.1 leaves it open. Inventing a `packages` key for them would write a
+  file neither reads — §8 says warn, never invent.
+
 ## A manifest addresses its own profile
 
 `ap manifest apply <manifest>` takes the manifest and nothing else. A manifest

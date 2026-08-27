@@ -355,6 +355,63 @@ else
     bad export "ap install failed before export"
 fi
 
+# --- a runtime-native plugin overrides the common one ------------------------
+#
+# SPEC §24.3's own case: pi packages plugins itself, so it takes ponytail its own
+# way and the common plugin must NOT be materialized for it. ap writes the
+# declaration into pi's settings.json and names the reconcile command; it never
+# runs pi's installer, which is the line `ap sync` was removed to draw.
+PSRC="$SANDBOX/src-plugin"
+rm -rf "$PSRC" && mkdir -p "$PSRC/skills/ponytail"
+printf '# ponytail\n' > "$PSRC/skills/ponytail/SKILL.md"
+PPROF="$HOME/.local/share/agent-profile/profiles/pi/native"
+rm -rf "$PPROF"
+# A package the user put there by hand, seeded BEFORE apply. It is what makes
+# the removal bound below mean anything: ours is appended beside it, and
+# uninstall must take exactly ours back.
+mkdir -p "$PPROF"
+printf '{"packages":["git:example.com/theirs"]}\n' > "$PPROF/settings.json"
+cat >"$SANDBOX/native.yaml" <<YAML
+version: "1"
+name: native
+targets:
+  - pi
+plugins:
+  ponytail:
+    source:
+      local:
+        path: src-plugin
+runtimes:
+  pi:
+    plugins:
+      ponytail:
+        package: "git:example.com/ours"
+YAML
+out=$("$AP" manifest apply "$SANDBOX/native.yaml" --target pi 2>&1) && rc=0 || rc=1
+if [ "$rc" != 0 ]; then
+    bad native "apply failed: $out"
+elif ! grep -q 'git:example.com/ours' "$PPROF/settings.json" 2>/dev/null; then
+    bad native "the package was not declared in pi's settings.json"
+elif find "$PPROF" -name 'SKILL.md' -path '*ponytail*' | grep -q .; then
+    bad native "the common plugin materialized despite the runtime-native override"
+elif ! printf '%s' "$out" | grep -q 'pi update'; then
+    bad native "the reconcile command was not reported: $out"
+else
+    pass native "the native package is declared and the common plugin is suppressed"
+fi
+
+# Removal is bounded by the ELEMENT. A recorded container key would take every
+# package in the list, and the user writes to this list by hand.
+if ! quiet "$AP" uninstall pi:native native-plugin ponytail; then
+    bad native "ap uninstall native-plugin failed"
+elif grep -q 'git:example.com/ours' "$PPROF/settings.json"; then
+    bad native "ours survived the removal"
+elif ! grep -q 'git:example.com/theirs' "$PPROF/settings.json"; then
+    bad native "the user's package was removed with ours"
+else
+    pass native "uninstall takes our element and leaves the user's"
+fi
+
 # A pipe is not consent. A manifest NAMED "default" reaches the real
 # configuration and ap cannot undo a write there — and that field is decided by
 # whoever wrote the manifest, which may not be you. Off a terminal it refuses,

@@ -300,6 +300,35 @@ if command -v pi >/dev/null 2>&1; then
   else
     bad pi "profile never reached the credential - auth.json link broken"
   fi
+  # A runtime-native package is a DECLARATION ap writes into pi's own
+  # settings.json; ap never runs pi's installer. This is the half only the real
+  # binary can answer: whether pi still reads that file and that key. It rides
+  # on the isolation check above having just said "no packages installed", so a
+  # listing that no longer says it is pi reading OUR declaration.
+  #
+  # No network, and no clone is asserted: `pi update` is the user's command, and
+  # asserting it would put a fetch inside the check.
+  mkdir -p "$HOME/smoke-native"
+  cat >"$HOME/smoke-native/native.yaml" <<'YAML'
+version: "1"
+name: apsmoke
+targets:
+  - pi
+runtimes:
+  pi:
+    plugins:
+      apsmoke-pkg:
+        package: "git:example.com/apsmoke"
+YAML
+  if ! "$AP" manifest apply "$HOME/smoke-native/native.yaml" --target pi >/dev/null 2>&1; then
+    bad pi "applying a runtime-native package failed"
+  elif ! grep -q 'git:example.com/apsmoke' "$d/settings.json" 2>/dev/null; then
+    bad pi "the package was not declared in settings.json"
+  elif timeout 120 "$AP" run pi:apsmoke list 2>&1 | grep -qi "no packages installed"; then
+    bad pi "pi does not read the declaration ap wrote - check PackageFile/PackageKey"
+  else
+    pass pi "pi reads a package ap only declared"
+  fi
 else
   bad pi "pi is not in the smoke image"
 fi
