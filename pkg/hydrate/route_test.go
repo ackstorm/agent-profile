@@ -60,17 +60,16 @@ func TestAKnownKindWithNoDestinationIsReportedAndAnUnknownOneIsNot(t *testing.T)
 	}
 }
 
-// codex has NO skills row, and it is the row most likely to be "fixed" into
-// existence. ach routes codex skills to .agents/skills, OUTSIDE CODEX_HOME, so
-// writing there would leak one profile's skills into every other profile and
-// into the user's bare codex.
-func TestCodexRoutesNoSkills(t *testing.T) {
+// codex had NO skills row until codex-cli 0.149.1, because ach routes skills to
+// .agents/skills, outside CODEX_HOME. It now reads $CODEX_HOME/skills as well,
+// so a plugin's skills land in the profile like every other runtime's.
+func TestCodexRoutesSkillsIntoItsConfigDir(t *testing.T) {
 	got, err := Route("codex", []string{"skills"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Dropped == "" {
-		t.Fatalf("codex routed skills somewhere: %+v", got)
+	if len(got) != 1 || got[0].To != "skills" || got[0].Dropped != "" {
+		t.Fatalf("codex skills routing = %+v", got)
 	}
 }
 

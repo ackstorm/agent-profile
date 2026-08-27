@@ -167,12 +167,25 @@ func TestAFailedApplyLeavesNoLedger(t *testing.T) {
 	}
 }
 
+// noSkillsAdapter is a runtime whose configuration directory has nowhere to put
+// a skill.
+//
+// A fake, and deliberately so. This test used to ride on codex, which had no
+// config-dir skills destination until 0.149.1 grew one — so the day that fact
+// changed, the guard for §8 disappeared with it rather than merely needing an
+// update. All four runtimes support skills today; the property must not depend
+// on that staying true in either direction.
+type noSkillsAdapter struct{ Adapter }
+
+func (noSkillsAdapter) Name() string                   { return "codex" }
+func (noSkillsAdapter) SkillDir(string) (string, bool) { return "", false }
+
 // §8: an unsupported concept warns and is skipped, never dropped silently.
-// codex has no skills destination inside its config directory, and "why is my
-// skill missing" has exactly one useful answer.
+// "Why is my skill missing" has exactly one useful answer, and this is it.
 func TestARuntimeWithNoSkillsDestinationWarnsRatherThanDropping(t *testing.T) {
 	a, _ := agentreg.Lookup("codex")
-	ad, _ := AdapterFor(a)
+	base, _ := AdapterFor(a)
+	ad := noSkillsAdapter{base}
 	src := writeTree(t, t.TempDir(), map[string]string{"SKILL.md": "#"})
 	root := t.TempDir()
 
@@ -185,7 +198,7 @@ func TestARuntimeWithNoSkillsDestinationWarnsRatherThanDropping(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.Warnings) == 0 {
-		t.Fatal("codex silently dropped a skill")
+		t.Fatal("the runtime silently dropped a skill")
 	}
 	joined := strings.Join(res.Warnings, "\n")
 	for _, want := range []string{"codex", "pdf"} {
@@ -508,12 +521,14 @@ func TestAPluginRoutesPerRuntimeAndReportsWhatItCannot(t *testing.T) {
 			dropped: []string{"hooks"},
 		},
 		{
-			// codex has NO skills destination inside its config dir.
+			// codex puts commands under prompts/ like pi, and since 0.149.1
+			// reads $CODEX_HOME/skills as well as the shared ~/.agents/skills.
 			runtime: "codex",
-			want:    map[string]string{"prompts/deploy.md": "# deploy"},
-			dropped: []string{"hooks", "skills"},
-			// Writing codex skills would leak one profile's into every other.
-			notThere: []string{"skills/review/SKILL.md"},
+			want: map[string]string{
+				"skills/review/SKILL.md": "# review",
+				"prompts/deploy.md":      "# deploy",
+			},
+			dropped: []string{"hooks"},
 		},
 	} {
 		t.Run(tc.runtime, func(t *testing.T) {

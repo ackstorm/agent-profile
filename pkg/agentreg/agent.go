@@ -411,11 +411,21 @@ func registry() map[string]Agent {
 			Bin:       "codex",
 			Config:    filepath.Join(h, ".codex"),
 			ConfigEnv: "CODEX_HOME",
-			// Skills is deliberately EMPTY: codex reads skills from
-			// ~/.agents/skills, outside CODEX_HOME, so pointing that variable
-			// at a profile does not isolate them. Writing there anyway would
-			// leak one profile's skills into every other profile and into the
-			// user's bare codex. Warn and skip is the honest answer (§8).
+			// Was EMPTY until codex grew a config-dir skills directory. It used
+			// to read skills only from ~/.agents/skills, outside CODEX_HOME, so
+			// pointing that variable at a profile did not isolate them and
+			// writing there would have leaked one profile's skills into every
+			// other one.
+			//
+			// Re-verified on codex-cli 0.149.1, the way every row here is: a
+			// marker skill written to $CODEX_HOME/skills/zz-marker-skill, then
+			// `codex exec` under that CODEX_HOME asked to list its skills. The
+			// marker came back. The binary carries the path literally, as
+			// `${CODEX_HOME:-$HOME/.codex}/skills`.
+			//
+			// ~/.agents/skills is still read as well — it is the shared location
+			// and is not ap's to manage.
+			Skills:  "skills",
 			MCPFile: "config.toml",
 			MCPKey:  "mcp_servers",
 			Mode:    Replace,
