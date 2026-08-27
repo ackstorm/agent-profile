@@ -320,12 +320,28 @@ for opencode — and ap never parses it.
   pi" expressible at all: `enabled: false` with no package is a runtime opting
   out, and the common plugin must not come back to fill the hole. Materializing
   both would install one plugin twice by two mechanisms.
-- **ap writes the DECLARATION and names the reconcile command.** It does not run
-  the runtime's installer — that is the line `ap sync` was removed to draw, and
-  ap cannot run `npm install`, so a package with JavaScript dependencies would be
-  left half-installed and looking finished. Measured: `pi update <source>` clones
-  a package that exists only in `settings.json`, with nothing on disk, so the
-  declaration alone is enough to act on and `pi list` shows it before any clone.
+- **ap writes the declaration and then RUNS the command that materializes it**,
+  by default, under the profile's own environment. Measured: `pi update <source>`
+  clones a package that exists only in `settings.json`, with nothing on disk, so
+  the declaration alone is enough to act on.
+
+  This is not the thing `ap sync` did. That line is **ap never runs a command a
+  MANIFEST chose** — an `install:` string, arbitrary, from a repository somebody
+  else wrote. `ReconcileArgv` comes from ap's own registry and only the package
+  locator comes from the manifest, and applying a manifest is the consent, the
+  same way running a script you downloaded is. Declaring a package and then
+  refusing to finish installing it protects nobody.
+
+  It returns **argv**, not a command line. A locator holding a space must not
+  become two arguments, which is what splitting a rendered string downstream
+  would do. The sandbox check asserts `arg:[…]`, never `argv:`, for the reason
+  the `{}` check does: the stub's `"$*"` cannot tell one argument from two.
+
+  A literal `--root` runs nothing — an init container has no runtime binary,
+  the same separation that makes it provision nothing. A failure is a WARNING,
+  not an error: the declaration is written and the ledger records it, so what
+  failed is a command the user can run again. `--no-reconcile` turns off the
+  running and never the recording.
 - **The record is bounded by the ELEMENT.** A package list is an ARRAY the user
   also writes to, so `AppendInto`/`RemoveFrom` record `<key>.<package>` and never
   the bare container key. `MergeInto` is wrong here for the reason its own

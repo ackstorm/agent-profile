@@ -41,7 +41,7 @@ import (
 // defaulting to every target declared. `--profile` overrides the name, and
 // `--root` names a directory outright for a container.
 func manifestApply(args []string) error {
-	const use = "manifest apply <manifest.yaml> (--target <runtime>... | --all-targets) [--profile <name>] [--root <dir>] [--dry-run] [--strict] [--yes]"
+	const use = "manifest apply <manifest.yaml> (--target <runtime>... | --all-targets) [--profile <name>] [--root <dir>] [--dry-run] [--strict] [--yes] [--no-reconcile]"
 	fs := flagSet("manifest")
 	dryRun := fs.Bool("dry-run", false, "run the resolution phase and print it; touch nothing")
 	strict := fs.Bool("strict", false, "promote every degradation warning (§7.2, §8) to an error")
@@ -51,6 +51,7 @@ func manifestApply(args []string) error {
 	profileFlag := fs.String("profile", "", "materialize into this profile instead of the manifest's own name")
 	rootFlag := fs.String("root", "", "materialize into this directory outright; needs exactly one --target (§33.2)")
 	allTargets := fs.Bool("all-targets", false, "materialize for every target the manifest declares")
+	noReconcile := fs.Bool("no-reconcile", false, "declare runtime-native packages without running the command that materializes them")
 	var targets stringList
 	fs.Var(&targets, "target", "runtime to materialize for; repeatable, and required unless --all-targets")
 
@@ -108,15 +109,16 @@ func manifestApply(args []string) error {
 	}
 
 	for _, tgt := range roots {
-		if err := applyOne(path, tgt, *strict, *dryRun); err != nil {
+		if err := applyOne(path, tgt, *strict, *dryRun, !*noReconcile); err != nil {
 			return fmt.Errorf("%s: %w", tgt.Label(), err)
 		}
 	}
 	return nil
 }
 
-// applyOne is one target's whole pass: resolve, fetch, materialize, report.
-func applyOne(path string, tgt target, strict, dryRun bool) error {
+// applyOne is one target's whole pass: resolve, fetch, materialize, reconcile,
+// report.
+func applyOne(path string, tgt target, strict, dryRun, reconcile bool) error {
 	res, resolved, fetched, reports, err := resolvePhase(path, tgt.Agent.Name, strict, tgt.Name != "")
 	if err != nil {
 		return err
@@ -142,6 +144,9 @@ func applyOne(path string, tgt target, strict, dryRun bool) error {
 	})
 	if err != nil {
 		return err
+	}
+	if reconcile {
+		tgt.reconcile(applied.Reconcile, rc)
 	}
 	return printApplied(os.Stdout, res, tgt, applied, reports, rc)
 }

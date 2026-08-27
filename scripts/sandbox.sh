@@ -396,9 +396,42 @@ elif find "$PPROF" -name 'SKILL.md' -path '*ponytail*' | grep -q .; then
     bad native "the common plugin materialized despite the runtime-native override"
 elif ! printf '%s' "$out" | grep -q 'pi update'; then
     bad native "the reconcile command was not reported: $out"
+# ap RUNS the reconcile now, and the stub reports the argv it was execed with.
+# Asserted on 'arg:[...]', never on 'argv:': the stub's "$*" joins with a space,
+# so a check written against that line cannot tell one argument from two - and a
+# locator arriving as ONE element is the whole reason ReconcileArgv returns argv
+# instead of a command line for someone downstream to split.
+elif ! printf '%s' "$out" | grep -qF 'arg:[git:example.com/ours]'; then
+    bad native "the reconcile did not run, or split the locator: $out"
+# And it ran under the PROFILE's environment, so pi writes inside the profile
+# rather than into the real home.
+elif ! printf '%s' "$out" | grep -qF "PI_CODING_AGENT_DIR=$PPROF"; then
+    bad native "the reconcile ran outside the profile environment: $out"
 else
-    pass native "the native package is declared and the common plugin is suppressed"
+    pass native "the native package is declared, the common plugin suppressed, the reconcile run"
 fi
+
+# --no-reconcile declares and stops. The declaration still lands: what the flag
+# turns off is running someone else's command, never recording what was asked
+# for.
+rm -rf "$PPROF"
+out=$("$AP" manifest apply "$SANDBOX/native.yaml" --target pi --no-reconcile 2>&1) && rc=0 || rc=1
+if [ "$rc" != 0 ]; then
+    bad native "--no-reconcile failed: $out"
+elif ! grep -q 'git:example.com/ours' "$PPROF/settings.json" 2>/dev/null; then
+    bad native "--no-reconcile skipped the declaration, not just the command"
+elif printf '%s' "$out" | grep -qF 'arg:[update]'; then
+    bad native "--no-reconcile ran the command anyway: $out"
+else
+    pass native "--no-reconcile declares without running the command"
+fi
+
+# Restore the state the removal check below expects: the seeded package plus
+# ours, applied once.
+rm -rf "$PPROF"
+mkdir -p "$PPROF"
+printf '{"packages":["git:example.com/theirs"]}\n' > "$PPROF/settings.json"
+quiet "$AP" manifest apply "$SANDBOX/native.yaml" --target pi
 
 # Removal is bounded by the ELEMENT. A recorded container key would take every
 # package in the list, and the user writes to this list by hand.

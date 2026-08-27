@@ -301,13 +301,15 @@ if command -v pi >/dev/null 2>&1; then
     bad pi "profile never reached the credential - auth.json link broken"
   fi
   # A runtime-native package is a DECLARATION ap writes into pi's own
-  # settings.json; ap never runs pi's installer. This is the half only the real
-  # binary can answer: whether pi still reads that file and that key. It rides
-  # on the isolation check above having just said "no packages installed", so a
-  # listing that no longer says it is pi reading OUR declaration.
+  # settings.json. This is the half only the real binary can answer: whether pi
+  # still reads that file and that key. It rides on the isolation check above
+  # having just said "no packages installed", so a listing that no longer says
+  # it is pi reading OUR declaration.
   #
-  # No network, and no clone is asserted: `pi update` is the user's command, and
-  # asserting it would put a fetch inside the check.
+  # --no-reconcile keeps this one network-free: the locator is deliberately
+  # unresolvable, and the point here is that pi READS the declaration. That ap
+  # also runs the command is asserted against a real repository further down,
+  # and deterministically in sandbox.sh.
   mkdir -p "$HOME/smoke-native"
   cat >"$HOME/smoke-native/native.yaml" <<'YAML'
 version: "1"
@@ -320,7 +322,7 @@ runtimes:
       apsmoke-pkg:
         package: "git:example.com/apsmoke"
 YAML
-  if ! "$AP" manifest apply "$HOME/smoke-native/native.yaml" --target pi >/dev/null 2>&1; then
+  if ! "$AP" manifest apply "$HOME/smoke-native/native.yaml" --target pi --no-reconcile >/dev/null 2>&1; then
     bad pi "applying a runtime-native package failed"
   elif ! grep -q 'git:example.com/apsmoke' "$d/settings.json" 2>/dev/null; then
     bad pi "the package was not declared in settings.json"
@@ -724,6 +726,38 @@ if command -v pi >/dev/null 2>&1; then
     fi
   fi
   "$AP" delete --yes pi:apsmokeplug >/dev/null 2>&1
+
+  # And the whole loop, declaratively: a manifest declares the package, ap
+  # writes it into settings.json and then RUNS `pi update` under the profile's
+  # environment, and the clone lands inside the profile.
+  #
+  # This is the measurement the design rests on and only the real binary can
+  # make it: `pi update <src>` materializing a declaration that exists nowhere
+  # but settings.json, with nothing on disk. The clone path is asserted, not
+  # `pi list`, for the reason the check above gives - a project-local install
+  # would print the same line.
+  setup "$AP" delete --yes pi:apsmokenative
+  mkdir -p "$HOME/smoke-native"
+  cat >"$HOME/smoke-native/real.yaml" <<YAML
+version: "1"
+name: apsmokenative
+targets:
+  - pi
+runtimes:
+  pi:
+    plugins:
+      smokepkg:
+        package: "git:github.com/$mkrepo"
+YAML
+  nd="$HOME/.local/share/agent-profile/profiles/pi/apsmokenative"
+  if ! (cd "$neutral" && setup timeout 300 "$AP" manifest apply "$HOME/smoke-native/real.yaml" --target pi); then
+    bad plugin "applying a manifest with a runtime-native package failed"
+  elif [ ! -d "$nd/git/github.com/$mkrepo" ]; then
+    bad plugin "ap declared the package but the reconcile left no clone under $nd/git"
+  else
+    pass plugin "a declared package was reconciled into the profile"
+  fi
+  "$AP" delete --yes pi:apsmokenative >/dev/null 2>&1
 else
   bad plugin "pi is not in the smoke image"
 fi

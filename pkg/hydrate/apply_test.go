@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -618,10 +619,17 @@ func TestANativePluginOverridesTheCommonOneOfTheSameName(t *testing.T) {
 	if !strings.Contains(string(raw), "git:github.com/DietrichGebert/ponytail") {
 		t.Errorf("the package was not declared:\n%s", raw)
 	}
-	// And the user is told the one command that reconciles it, because ap does
-	// not run other people's installers.
-	if !strings.Contains(strings.Join(res.Warnings, "\n"), "pi update") {
-		t.Errorf("the reconcile command was not reported: %v", res.Warnings)
+	// The command that materializes the declaration comes back as ARGV, with
+	// the locator one element. hydrate does not run it — it has no profile
+	// environment and a bare directory has no runtime — so the caller gets it
+	// and decides.
+	//
+	// argv rather than a rendered string is the property: a locator holding a
+	// space must not become two arguments, which is what splitting a command
+	// line downstream would do.
+	want := []string{"pi", "update", "git:github.com/DietrichGebert/ponytail"}
+	if len(res.Reconcile) != 1 || !slices.Equal(res.Reconcile[0], want) {
+		t.Errorf("Reconcile = %v, want [%v]", res.Reconcile, want)
 	}
 
 	// The ledger bounds removal by the ELEMENT, never by the container key: a

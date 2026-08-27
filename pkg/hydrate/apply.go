@@ -39,6 +39,14 @@ type Change struct{ Path, Op string }
 type Result struct {
 	Changes  []Change
 	Warnings []string
+	// Reconcile is the commands that materialize the declarations this apply
+	// wrote — one per runtime-native package, in the order they landed.
+	//
+	// Reported rather than run HERE: hydrate writes files and knows nothing
+	// about a profile's environment, and a root that is a bare directory has
+	// no runtime to run anything with. The caller decides, because the caller
+	// is the one that knows which of those it is holding.
+	Reconcile [][]string
 }
 
 // Apply materializes a resolved profile into a root and records what it wrote.
@@ -188,9 +196,8 @@ func applyNativePlugins(p Plan, l *Ledger, res *Result, stamp string) error {
 			Files: []FileRec{{RelPath: filepath.ToSlash(rel), Hash: hash, Merge: "list", Keys: []string{key + "." + pkg}}},
 		})
 		res.Changes = append(res.Changes, Change{Path: filepath.Join(rel, key+"."+pkg), Op: "merge"})
-		if cmd := p.Adapter.ReconcileCommand(pkg); cmd != "" {
-			res.Warnings = append(res.Warnings, fmt.Sprintf(
-				"plugin %q is declared but not materialized; ap does not run a runtime's installer — run: %s", name, cmd))
+		if argv := p.Adapter.ReconcileArgv(pkg); len(argv) > 0 {
+			res.Reconcile = append(res.Reconcile, argv)
 		}
 	}
 	return nil

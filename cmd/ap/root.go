@@ -5,10 +5,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/ackstorm/agent-profile/internal/profile"
+	"github.com/ackstorm/agent-profile/internal/run"
 	"github.com/ackstorm/agent-profile/pkg/agentreg"
 )
 
@@ -130,6 +132,43 @@ func (t target) provision(rc *receipt) error {
 		return err
 	}
 	return finishCreate(t.Agent, t.Name, t.Root, rc)
+}
+
+// reconcile runs the commands that materialize the declarations an apply just
+// wrote — `pi update <pkg>` and whatever joins it — under the profile's own
+// environment, so the runtime writes inside the profile and not the real home.
+//
+// It runs BY DEFAULT, and that is a deliberate reversal. The line `ap sync` was
+// removed to draw is that ap never runs a command a MANIFEST chose; this argv
+// comes from ap's own registry, and only the package locator comes from the
+// manifest. Applying a manifest is the consent, the same way running a script
+// you downloaded is: refusing to finish the job it describes protects nobody
+// and leaves a declaration nothing acts on.
+//
+// A literal --root runs NOTHING, for the same reason it provisions nothing: an
+// init container has no runtime binary to run, and that separation is the
+// topology rather than a safety rail.
+//
+// A failure is a WARNING. The declaration is already written and the ledger
+// already records it, so the apply succeeded; what failed is a command the user
+// can run again, and the receipt names it.
+func (t target) reconcile(cmds [][]string, rc *receipt) {
+	if t.Name == "" {
+		return
+	}
+	for _, argv := range cmds {
+		shown := strings.Join(argv, " ")
+		rc.add("reconcile", shown)
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Env = run.Env(t.Agent, t.Root, os.Environ())
+		// Both streams to stderr: the receipt owns stdout, and a child that
+		// wrote there would interleave with it and break anything piping it.
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		if err := cmd.Run(); err != nil {
+			rc.warn("%s failed: %v\n"+
+				"    the package is declared and recorded; run it again when you can", shown, err)
+		}
+	}
 }
 
 // gate asks the one question, and only for the one root that has no undo.

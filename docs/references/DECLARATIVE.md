@@ -524,14 +524,40 @@ a second mechanism with its own reconcile story, which §40.1 leaves open. They
 warn under §8 rather than getting an invented `packages` key written into a file
 neither of them reads.
 
-**What ap does not do:** clone the tree, or run the installer. Measured against
-a throwaway `PI_CODING_AGENT_DIR`: `pi install <src>` clones into
+**What ap does not do: clone the tree itself.** Measured against a throwaway
+`PI_CODING_AGENT_DIR`: `pi install <src>` clones into
 `<dir>/git/<host>/<owner>/<repo>`, writes `<dir>/git/.gitignore`, appends the
 source string to `settings.json`, and runs `npm install`. But `pi update <src>`
 materializes a declaration with **nothing on disk** — verified against a
 `settings.json` holding only the array — and `pi list` shows the package from the
-declaration alone. So ap writes the declaration and reports `pi update` as the
-reconcile command, exactly as the clone path reports `codex plugin add`. Cloning
-it ourselves would make ap the owner of pi's on-disk layout and would leave a
-package with JavaScript dependencies half-installed and looking finished, since
-ap has no business running `npm`.
+declaration alone. So ap writes the declaration and lets pi do the rest. Cloning
+it ourselves would make ap the owner of pi's on-disk layout, and ap has no
+business running `npm`, so a package with JavaScript dependencies would be left
+half-installed and looking finished.
+
+**What ap does do: run `pi update`, by default.** This shipped as a warning
+first — "ap does not run a runtime's installer, run this yourself" — and that was
+over-applying the rule. The rule `ap sync` was removed to establish is that **ap
+never runs a command a manifest chose**: `install:` was an arbitrary shell string
+from a repository somebody else may have written. `ReconcileArgv` is built from
+`Agent.PackageReconcile`, a constant in ap's own registry; the manifest supplies
+one argument to a verb it cannot pick. Applying a manifest is the consent, the
+same way running a script you downloaded is, and a declaration nothing acts on
+is a half-finished job rather than a safety feature.
+
+Three consequences follow, and each is a guard:
+
+- **argv, never a command line.** `ReconcileArgv` splits ap's own template and
+  substitutes the locator as one element, so a locator holding a space cannot
+  become two arguments. The sandbox asserts `arg:[git:example.com/ours]` and
+  never the stub's `argv:` line, which joins with a space and could not tell the
+  difference — the same trap the `{}` placeholder's check fell into first.
+- **The profile's environment, not the ambient one.** `run.Env` builds it, so pi
+  writes inside the profile. Without that the reconcile would install into the
+  user's real home, which is the thing profiles exist to prevent.
+- **A failure is a warning.** The file is written and the ledger records it
+  before the command runs (§37.2 puts the ledger last within apply, and the
+  reconcile is after apply entirely), so the apply genuinely succeeded. What
+  failed is repeatable, and the receipt names it. `--no-reconcile` suppresses
+  the running and never the recording; a literal `--root` never reconciles at
+  all, because an init container has no runtime binary to run.

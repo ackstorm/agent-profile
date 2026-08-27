@@ -31,10 +31,15 @@ type Adapter interface {
 	// list, which is a §8 degradation and not something to invent — claude
 	// and codex declare plugins through a marketplace instead.
 	PackageTarget() (rel, key string, ok bool)
-	// ReconcileCommand is the command that materializes a declared package,
-	// with pkg substituted in, or "" when there is nothing to run. ap prints
-	// this rather than running it: ap does not run other people's installers.
-	ReconcileCommand(pkg string) string
+	// ReconcileArgv is the command that materializes a declared package, as
+	// argv, or nil when the runtime resolves its packages itself and there is
+	// nothing to run.
+	//
+	// argv rather than a string because ap RUNS this. The package locator is
+	// one element however it is spelled, so a locator holding a space cannot
+	// become two arguments — the failure that splitting a rendered command
+	// line invites.
+	ReconcileArgv(pkg string) []string
 }
 
 // AdapterFor returns the adapter for an agent. Destinations come from
@@ -72,11 +77,23 @@ func (r registryAdapter) PackageTarget() (string, string, bool) {
 	return r.agent.PackageFile, r.agent.PackageKey, true
 }
 
-func (r registryAdapter) ReconcileCommand(pkg string) string {
+func (r registryAdapter) ReconcileArgv(pkg string) []string {
 	if r.agent.PackageReconcile == "" {
-		return ""
+		return nil
 	}
-	return fmt.Sprintf(r.agent.PackageReconcile, pkg)
+	// The template is ap's own and holds no spaces inside a word, so splitting
+	// IT is safe; the package is substituted as one element afterwards, which
+	// is the part that comes from a manifest.
+	fields := strings.Fields(r.agent.PackageReconcile)
+	argv := make([]string, len(fields))
+	for i, f := range fields {
+		if f == "%s" {
+			argv[i] = pkg
+			continue
+		}
+		argv[i] = f
+	}
+	return argv
 }
 
 // ArtifactDest applies §26.1: a destination is relative to the root, must not
