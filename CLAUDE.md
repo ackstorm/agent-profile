@@ -193,6 +193,17 @@ XDG_CONFIG_HOME=/tmp/shim opencode debug paths   # config must be /tmp/shim/open
 CLAUDE_CONFIG_DIR=/tmp/x claude -p --debug-file /tmp/x.log "ok"
 ```
 
+A row that was right when measured goes stale, and it does so silently.
+`Agent.Skills` for codex was empty because codex read skills only from
+`~/.agents/skills`, outside `CODEX_HOME`; on codex-cli 0.149.1 it reads
+`$CODEX_HOME/skills` too, so ap materializes them and the §8 warning is gone.
+Verified the only way that counts — a marker skill planted in a throwaway
+`CODEX_HOME`, `codex exec` asked to list its skills, the marker came back — and
+the tests that encoded the absence were updated rather than deleted, except
+`TestARuntimeWithNoSkillsDestinationWarnsRatherThanDropping`, which now rides on
+a fake adapter. That is the lesson worth keeping: a §8 guard riding on a real
+runtime's gap disappears the day upstream fills it.
+
 When `scripts/smoke.sh` fails, the registry row is usually what is wrong — but
 check whether the *check* is lying first, because three of them were: two
 grepped output that could never match, and one asserted claude's asynchronous
@@ -338,6 +349,39 @@ into it would have them overwrite each other with no way to say so.
 no manifest to read a name from — that asymmetry is the reason, not an
 inconsistency to tidy away.
 
+## Materializing into a profile PROVISIONS it, exactly as `create` does
+
+A profile that a manifest built is a profile, and one that cannot log in is not.
+Applying used to write resources into a bare directory and stop: no shared
+credential, no shim, no first-run flags, no wrapper — so the first thing anyone
+typed was an unauthenticated agent in a profile whose name was not a command.
+`target.provision` closes it, and both `manifest apply` and `install` call it,
+because they are the two commands that materialize into a root.
+
+- **It calls `finishCreate`, it does not reimplement it.** §10's rule is that a
+  materialized profile is indistinguishable from a hand-made one, and one shared
+  function is the only way to keep that true.
+- **It runs BEFORE materialization, and the order is load-bearing.**
+  `seedFirstRun` opens the first-run file with `O_EXCL`, and for claude that file
+  is `.claude.json` — which is also where a manifest's MCP servers merge.
+  Materializing first leaves the seed refusing a file that already exists, and
+  the profile opens on the theme picker.
+- **A literal `--root` provisions NOTHING.** An init container has no `$HOME` to
+  link a credential out of and no PATH directory to write a wrapper into.
+  `TestApplyingToALiteralRootProvisionsNothing` is the guard; with it removed the
+  wrapper is written to a file literally named `claude:`.
+- **`<agent>:default` provisions nothing either.** It IS the real configuration:
+  its credential is already the one the agent reads, and shimming it would point
+  the agent's configuration directory at itself.
+
+Variants are materialized here too, by `applyVariants`, and NOT by `pkg/hydrate`.
+The variant store is a sibling of the profiles root and deliberately outside the
+configuration directory, so a literal root has nowhere to put one. They replace
+without asking: a manifest is a declaration the caller named, applying it twice
+has to converge, and `--all-targets` would otherwise stop to ask once per variant
+per runtime. `ap variant` keeps its confirmation, because there the arguments are
+typed and what is being overwritten is not on screen.
+
 ## A root may be named literally, and then nothing is inferred
 
 `--root <dir>` names the materialization directory outright, and the subject is
@@ -389,6 +433,37 @@ test: a check that accepts any character device accepts one that can deliver a
 `GOOS=darwin go vet ./...` is in `crossbuild` for exactly this: the constant
 exists under one name on linux and another on darwin, `verify` runs in a linux
 container, and a macOS-only defect has shipped that way before.
+
+## `ls-remote <ref>` is a PATTERN, and it lied about a race
+
+`git ls-remote <url> main` matches the tail of every ref name, so it also
+answers with `refs/heads/daisy/caffeinate/main` — which sorts first. `lsRemote`
+took the first line, `cloneAt` then fetched `main` and got the real branch, and
+the SHA check between them reported:
+
+```
+main moved from 95380b3c to b819188d while fetching; re-run
+```
+
+Nothing moved. Re-running could never help, and the repository it was found on
+is `anthropics/claude-plugins-official`, which anyone may declare as a
+marketplace. Two rules came out of it:
+
+- **The ref is resolved ONCE, and the fetch uses the full name that came back.**
+  `lsRemote` returns `(sha, full)` and `cloneAt` fetches `full`, so the two
+  cannot disagree about what `main` meant. Resolving a shorthand twice, against
+  two commands with different matching rules, is what created a race that did
+  not exist.
+- **Candidates are asked for by exact name, and selected by precedence** —
+  `refs/heads/<ref>`, then `refs/tags/<ref>`, then `refs/<ref>`. A branch beats
+  a tag of the same name; that is stated here because it is what the old
+  first-line-wins did by accident, not because either is obviously right.
+
+Annotated tags come with the same trap one layer down: `ls-remote` emits the
+peeled `^{}` line only when a pattern asks for it, and the checkout lands on the
+COMMIT, not the tag object. The peeled forms are requested and never selected.
+`TestAnAnnotatedTagResolvesToTheCommitItPointsAt` is the guard, and it fails the
+same way the branch bug did — as a phantom "moved while fetching".
 
 ## Render's output must parse
 
