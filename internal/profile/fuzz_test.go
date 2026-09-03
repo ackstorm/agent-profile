@@ -78,8 +78,12 @@ func FuzzParseVariantRef(f *testing.F) {
 		if err != nil {
 			return // rejected: nothing to prove
 		}
-		if err := agentreg.ValidName(name); err != nil {
-			t.Fatalf("ParseVariantRef(%q) accepted profile %q that agentreg.ValidName rejects: %v", ref, name, err)
+		// ValidNameAllowDefault for the profile: the sentinel is the one name the
+		// splitter passes through, and it resolves to a directory the agent
+		// already owns rather than to one built under the root. Every OTHER rule
+		// — the traversal one this fuzz exists for — still runs.
+		if err := agentreg.ValidNameAllowDefault(name); err != nil {
+			t.Fatalf("ParseVariantRef(%q) accepted profile %q that agentreg.ValidNameAllowDefault rejects: %v", ref, name, err)
 		}
 		if v != "" {
 			if err := agentreg.ValidName(v); err != nil {

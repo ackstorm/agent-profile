@@ -93,46 +93,42 @@ func parseRef(ref string, allowDefault bool) (agentreg.Agent, string, error) {
 }
 
 // ParseVariantRef splits "<agent>:<profile>" or "<agent>:<profile>:<variant>",
-// returning an empty variant for the two-segment form. Rejects agentreg.Default
-// via agentreg.ValidName, so every writing command that routes through it —
-// variant, delete, link, unlink — refuses the sentinel.
-func ParseVariantRef(ref string) (agentreg.Agent, string, string, error) {
-	return parseVariantRef(ref, false)
-}
-
-// ParseVariantRefAllowDefault is ParseVariantRef but additionally accepts
-// agentreg.Default as the profile of a two-segment reference, for the
-// read-only paths that may resolve to the agent's real config directory: run,
-// which, env.
-func ParseVariantRefAllowDefault(ref string) (agentreg.Agent, string, string, error) {
-	return parseVariantRef(ref, true)
-}
-
-// parseVariantRef splits at most one trailing ":<variant>" off a reference.
+// returning an empty variant for the two-segment form.
 //
 // Depth is exactly three, permanently. The name is a reference that gets
 // parsed, so it has to be bounded; "for now" would make every later command
 // guess how deep the thing it was handed goes.
 //
-// A variant over agentreg.Default is refused whatever allowDefault says, which
-// is why the head is parsed with allowDefault=false in that branch.
-// agentreg.Default is the agent's real config directory, read-only, and
-// nothing is ever created for it — least of all a launch mode that only
-// exists because ap wrote a file.
-func parseVariantRef(ref string, allowDefault bool) (agentreg.Agent, string, string, error) {
+// agentreg.Default is ACCEPTED as the profile, with or without a variant, and
+// what a bare "<agent>:default" means is then each command's own decision: a
+// launch for run, which and env, a refusal naming the way forward for variant,
+// delete, link and unlink. There used to be a strict sibling that rejected the
+// sentinel on behalf of the writing commands, and it hid that decision rather
+// than making it — three of those four still needed a guard of their own,
+// because the sentinel is fine as the PARENT of a variant and never fine alone.
+//
+// A variant over the sentinel is a variant like any other. It used to be
+// refused outright, on the grounds that nothing is ever created for `default` —
+// which confused WHERE a variant lives with WHAT it names. A variant has no
+// directory, no shim and no links: it is one file under VariantsRoot, a sibling
+// of the profiles root, and running one still hands Exec no override at all.
+// Nothing is written inside the real config directory, so `default` is exactly
+// as read-only with a variant as it is without one.
+func ParseVariantRef(ref string) (agentreg.Agent, string, string, error) {
 	switch strings.Count(ref, ":") {
 	case 1:
-		a, name, err := parseRef(ref, allowDefault)
+		a, name, err := parseRef(ref, true)
 		return a, name, "", err
 	case 2:
 		i := strings.LastIndex(ref, ":")
 		v := ref[i+1:]
-		// The same agentreg.ValidName as the profile segment, so "default" is
-		// refused here too, and so the fuzz property covers both with one guard.
+		// agentreg.ValidName and not ValidNameAllowDefault: the variant segment
+		// names a file ap writes, so "default" is refused here even though it is
+		// permitted as the profile it hangs off.
 		if err := agentreg.ValidName(v); err != nil {
 			return agentreg.Agent{}, "", "", fmt.Errorf("variant: %w", err)
 		}
-		a, name, err := parseRef(ref[:i], false)
+		a, name, err := parseRef(ref[:i], true)
 		return a, name, v, err
 	default:
 		return agentreg.Agent{}, "", "", fmt.Errorf(

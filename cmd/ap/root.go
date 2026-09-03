@@ -72,7 +72,7 @@ func resolveTarget(subject, rootFlag, verb string) (target, error) {
 			return target{}, fmt.Errorf(
 				"%s needs a root: either <agent>:<profile>, or an agent name with --root <dir>", verb)
 		}
-		agent, name, variant, err := profile.ParseVariantRefAllowDefault(subject)
+		agent, name, variant, err := profile.ParseVariantRef(subject)
 		if err != nil {
 			return target{}, err
 		}

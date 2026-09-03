@@ -668,6 +668,16 @@ func onPath(dir string) bool {
 
 // notThere is the error for a reference that names no profile. Listing what the
 // agent does have turns a typo into a one-line fix instead of a second command.
+// noRealConfig is what a command says when <agent>:default names a directory
+// that is not there. `ap create <agent>:default` is unconditionally refused, so
+// the usual "create it with" advice would be a dead end: on this machine the
+// agent has never been run outside ap, or its config lives somewhere this
+// registry row does not expect. The path is the only useful answer.
+func noRealConfig(a agentreg.Agent) error {
+	return fmt.Errorf("%s's real config directory does not exist: %s",
+		a.Name, profile.Dir(a, agentreg.Default))
+}
+
 func notThere(a agentreg.Agent, name string) error {
 	have, err := profile.List(a)
 	if err != nil || len(have) == 0 {
@@ -1258,33 +1268,24 @@ func printRaw(rows []listRow) {
 	}
 }
 
-// vref parses the single positional argument taken by link and unlink.
-// ParseVariantRef rejects Default. The variant is "" for a two-segment
-// reference.
+// vref parses the single positional argument taken by which, link and unlink.
+// The variant is "" for a two-segment reference.
 //
 // Not delete: that one takes a flag as well, so it parses with parseAroundRef
 // and calls ParseVariantRef itself.
+//
+// agentreg.Default arrives here like any other profile name. `which` answers
+// for it; link and unlink refuse a BARE one themselves, each with the sentence
+// that names the way forward for that command.
+//
+// For `which` the variant is parsed and then ignored, on purpose: a variant has
+// no configuration of its own, and answering with anything but the parent's
+// directory would invent a second one that nothing writes to.
 func vref(args []string, cmd string) (agentreg.Agent, string, string, error) {
 	if len(args) != 1 {
 		return agentreg.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
 	}
 	a, name, v, err := profile.ParseVariantRef(args[0])
-	return a, name, v, err
-}
-
-// vrefAllowDefault is vref but also accepts Default, for `which` — the one
-// read-only command that takes nothing but a reference and may resolve to the
-// agent's real config directory. `env` has the same rule but takes a trailing
-// command, so it calls ParseVariantRefAllowDefault itself.
-//
-// The variant is parsed and then ignored, on purpose: a variant has no
-// configuration of its own, and answering with anything but the parent's
-// directory would invent a second one that nothing writes to.
-func vrefAllowDefault(args []string, cmd string) (agentreg.Agent, string, string, error) {
-	if len(args) != 1 {
-		return agentreg.Agent{}, "", "", fmt.Errorf("usage: ap %s <agent>:<profile>[:<variant>]", cmd)
-	}
-	a, name, v, err := profile.ParseVariantRefAllowDefault(args[0])
 	return a, name, v, err
 }
 
@@ -1490,7 +1491,15 @@ func cmdVariant(args []string) error {
 	}
 	// Never creates the parent implicitly: a profile is the expensive half, and
 	// this command writes two lines.
+	//
+	// agentreg.Default is a legal parent — `ap variant codex:default:yolo` bakes
+	// arguments over the configuration codex already reads, and writes nothing
+	// inside it: the store is a sibling of the profiles root. The bare form was
+	// already refused above, by the "names no variant" branch.
 	if !profile.Exists(a, name) {
+		if name == agentreg.Default {
+			return noRealConfig(a)
+		}
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}
@@ -1876,7 +1885,7 @@ func setupHint(a agentreg.Agent, name string) string {
 }
 
 func cmdWhich(args []string) error {
-	a, name, _, err := vrefAllowDefault(args, "which")
+	a, name, _, err := vref(args, "which")
 	if err != nil {
 		return err
 	}
@@ -1904,7 +1913,7 @@ func cmdEnv(args []string) error {
 	// the exec'ing one. `ap env <ref> <command...>` runs something that is NOT
 	// the agent — an installer, `npx skills add` — and a variant's arguments are
 	// the agent's flags. runArgs is deliberately not called here.
-	a, name, _, err := profile.ParseVariantRefAllowDefault(args[0])
+	a, name, _, err := profile.ParseVariantRef(args[0])
 	if err != nil {
 		return err
 	}
@@ -1937,7 +1946,7 @@ func cmdRun(args []string) error {
 	}
 	// No flag parsing at all: everything after the reference belongs to the agent,
 	// verbatim. See the flag-order note in usage.
-	a, name, v, err := profile.ParseVariantRefAllowDefault(args[0])
+	a, name, v, err := profile.ParseVariantRef(args[0])
 	if err != nil {
 		return err
 	}
@@ -2031,11 +2040,7 @@ func fill(args []string, with string) ([]string, bool) {
 func prepare(a agentreg.Agent, name string) (string, error) {
 	if !profile.Exists(a, name) {
 		if name == agentreg.Default {
-			// "ap create claude:default" is unconditionally refused - that advice
-			// would be a dead end. Name the actual path instead: on this machine
-			// the agent has never been run outside ap, or its config lives
-			// somewhere this registry row does not expect.
-			return "", fmt.Errorf("%s's real config directory does not exist: %s", a.Name, profile.Dir(a, name))
+			return "", noRealConfig(a)
 		}
 		return "", fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
@@ -2117,6 +2122,17 @@ func cmdDelete(args []string) error {
 	}
 	if v != "" {
 		return deleteVariant(a, name, v)
+	}
+	// The sentinel reaches here because ParseVariantRef accepts it for the sake
+	// of `ap delete codex:default:yolo`, which removes two lines of text ap
+	// wrote. Deleting the PROFILE would remove the agent's own configuration
+	// directory, and profile.Delete refuses that on its own — but only after
+	// this function has already asked "delete ~/.claude?" at a terminal and
+	// been answered. Refusing here is what keeps that question from being
+	// printed at all, which is the whole difference between the two forms.
+	if name == agentreg.Default {
+		return fmt.Errorf("refusing to delete %s:%s: that is %s itself, the config directory %s reads when ap is not involved",
+			a.Name, agentreg.Default, profile.Dir(a, agentreg.Default), a.Name)
 	}
 	// Before the prompt, not after: a typo must not be answered "y".
 	if !profile.Exists(a, name) {
@@ -2244,18 +2260,18 @@ func cmdLink(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Belt as well as braces, the same reason Delete re-checks Default
-	// independently of ParseRef: vref already routes through ParseVariantRef,
-	// which refuses Default for every writing command, so there is no path
-	// through dispatch that reaches this branch today -
-	// TestLinkRefusesDefaultViaParseRef pins the ParseRef rejection, which is
-	// what actually fires. Kept anyway, so a future change to vref or to link's
-	// own routing does not silently start writing a wrapper for "nothing" (ap
-	// run codex:default is already the real config).
-	if name == agentreg.Default {
+	// A BARE <agent>:default has nothing to link: the wrapper would name the
+	// configuration the agent already reads with no arguments of its own, which
+	// is what typing the agent does. This is the guard now, not a belt over a
+	// parser's braces — ParseVariantRef accepts the sentinel so that a VARIANT
+	// over it can be linked, and a variant is a name worth having.
+	if name == agentreg.Default && v == "" {
 		return fmt.Errorf("nothing to link: ap run %s:%s is already your real config", a.Name, agentreg.Default)
 	}
 	if !profile.Exists(a, name) {
+		if name == agentreg.Default {
+			return noRealConfig(a)
+		}
 		return fmt.Errorf("profile %s:%s does not exist; create it with: ap create %s:%s",
 			a.Name, name, a.Name, name)
 	}

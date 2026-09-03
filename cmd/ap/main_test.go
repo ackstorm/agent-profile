@@ -679,6 +679,126 @@ func TestDefaultIsRejectedByEverythingThatWrites(t *testing.T) {
 	}
 }
 
+// A variant over the agent's real config is the point of the whole feature:
+// `ap variant codex:default:yolo -- --dangerously-bypass-approvals-and-sandbox`
+// gives the configuration you already use a second name with different
+// arguments, without cloning it into a profile that then drifts.
+//
+// What makes it safe is WHERE a variant lives. The store is a sibling of the
+// profiles root, so this writes nothing at all inside ~/.claude — asserted here
+// by listing that directory before and after, because "it did not error" would
+// pass just as happily if ap had dropped a file in it.
+func TestAVariantMayHangOffTheRealConfig(t *testing.T) {
+	home := t.TempDir()
+	bin := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AP_LINK_DIR", bin)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	real := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "settings.json"), []byte(`{"model":"opus"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := lsNames(t, real)
+
+	if err := dispatch([]string{"variant", "claude:default:yolo", "--", "--dangerously-skip-permissions"}); err != nil {
+		t.Fatalf("ap variant claude:default:yolo = %v, want nil", err)
+	}
+	a, _ := agentreg.Lookup("claude")
+	args, err := profile.VariantArgs(a, "default", "yolo")
+	if err != nil {
+		t.Fatalf("the variant was not stored: %v", err)
+	}
+	if len(args) != 1 || args[0] != "--dangerously-skip-permissions" {
+		t.Errorf("stored args = %q, want the payload", args)
+	}
+	if got := lsNames(t, real); got != before {
+		t.Errorf("the real config directory gained entries: %q, was %q", got, before)
+	}
+	// The wrapper is the point of doing this at all: the whole reason to name a
+	// launch mode is to be able to type it.
+	if _, err := os.Stat(filepath.Join(bin, "claude:default:yolo")); err != nil {
+		t.Errorf("no wrapper was written: %v", err)
+	}
+
+	// Composition goes through the same runArgs as any other variant, so the
+	// baked argument reaches the agent ahead of the caller's.
+	argv, err := runArgs(a, "default", "yolo", []string{"-p", "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(argv, " ") != "--dangerously-skip-permissions -p hello" {
+		t.Errorf("argv = %q", argv)
+	}
+}
+
+// The two halves of `ap delete` against the sentinel, which must not be one
+// decision: removing the variant removes two lines of text ap wrote, and
+// removing the "profile" would remove the agent's own configuration directory.
+//
+// Asserted on cmdDelete's OWN message, not merely on "an error happened":
+// profile.Delete refuses the sentinel too (share.go, and its own test), so a
+// test that accepted any error would stay green with cmdDelete's early refusal
+// deleted — and the user would be asked whether to delete ~/.claude before the
+// deeper guard said no. Verified by removing it: this test goes red, that one
+// does not.
+func TestDeleteRefusesTheRealConfigButNotItsVariants(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AP_LINK_DIR", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	real := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch([]string{"variant", "claude:default:yolo", "--", "-p"}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := dispatch([]string{"delete", "claude:default", "--yes"})
+	if err == nil {
+		t.Fatal("ap delete claude:default must fail")
+	}
+	// On the PATH, which is what distinguishes the two refusals: profile.Delete
+	// says "it is your real config" and names nothing, because by then the user
+	// has already been asked about a directory only this layer can name.
+	if !strings.Contains(err.Error(), real) {
+		t.Errorf("error = %v, want cmdDelete's own refusal, which names %s", err, real)
+	}
+	if _, err := os.Stat(real); err != nil {
+		t.Fatalf("the real config directory is gone: %v", err)
+	}
+
+	if err := dispatch([]string{"delete", "claude:default:yolo"}); err != nil {
+		t.Fatalf("ap delete claude:default:yolo = %v, want nil", err)
+	}
+	a, _ := agentreg.Lookup("claude")
+	if _, err := profile.VariantArgs(a, "default", "yolo"); err == nil {
+		t.Error("the variant survived its own deletion")
+	}
+	if _, err := os.Stat(real); err != nil {
+		t.Fatalf("deleting a variant touched the real config directory: %v", err)
+	}
+}
+
+// lsNames is the sorted entry names of a directory, for asserting that nothing
+// was added to one.
+func lsNames(t *testing.T, dir string) string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return strings.Join(names, " ")
+}
+
 func TestDeleteDefaultLeavesTheRealConfigAlone(t *testing.T) {
 	a, _ := agentreg.Lookup("claude")
 	before, err := os.Stat(a.Config)
@@ -879,17 +999,24 @@ func TestLinkRefusesAProfileThatDoesNotExist(t *testing.T) {
 	}
 }
 
-// There is nothing to link: `ap run codex:default` is already the real config.
-// Named for what actually fires: ref(args, "link") routes through ParseRef,
-// which refuses Default before cmdLink's own "nothing to link" check is ever
-// reached. That check is kept anyway as a belt-and-braces backstop - see its
-// comment in cmdLink - but there is no way to exercise it through dispatch,
-// so this test cannot and does not claim to.
-func TestLinkRefusesDefaultViaParseRef(t *testing.T) {
+// There is nothing to link for a BARE claude:default: the wrapper would name
+// the configuration claude already reads with no arguments of its own, which is
+// what typing `claude` does.
+//
+// The refusal lives in cmdLink now and this test exercises it for real. It used
+// to be a belt over the parser's braces, unreachable through dispatch, because
+// ParseVariantRef refused the sentinel outright — and that is exactly why it had
+// to move: the parser now accepts it so a VARIANT over the real config can be
+// linked, which is a name worth having.
+func TestLinkRefusesABareRealConfigReference(t *testing.T) {
 	t.Setenv("AP_LINK_DIR", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	if err := dispatch([]string{"link", "claude:default"}); err == nil {
-		t.Error("want an error for claude:default")
+	err := dispatch([]string{"link", "claude:default"})
+	if err == nil {
+		t.Fatal("want an error for claude:default")
+	}
+	if !strings.Contains(err.Error(), "nothing to link") {
+		t.Errorf("error = %v, want cmdLink's own refusal", err)
 	}
 }
 
@@ -1393,13 +1520,12 @@ func TestVariantRejectsBadInvocations(t *testing.T) {
 	}
 	for _, args := range [][]string{
 		{"variant"},
-		{"variant", "claude:review:opus"},               // no separator, no payload
-		{"variant", "claude:review:opus", "--"},         // empty payload: same as the parent
-		{"variant", "claude:review:opus", "-p"},         // missing the -- separator
-		{"variant", "claude:review", "--", "-p"},        // two segments: no variant named
-		{"variant", "claude:review:opus:x", "--", "-p"}, // four segments
-		{"variant", "claude:default:opus", "--", "-p"},
-		{"variant", "claude:review:default", "--", "-p"},
+		{"variant", "claude:review:opus"},                // no separator, no payload
+		{"variant", "claude:review:opus", "--"},          // empty payload: same as the parent
+		{"variant", "claude:review:opus", "-p"},          // missing the -- separator
+		{"variant", "claude:review", "--", "-p"},         // two segments: no variant named
+		{"variant", "claude:review:opus:x", "--", "-p"},  // four segments
+		{"variant", "claude:review:default", "--", "-p"}, // reserved as a variant NAME
 	} {
 		if err := dispatch(args); err == nil {
 			t.Errorf("dispatch(%q) = nil error, want error", args)

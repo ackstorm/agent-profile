@@ -556,6 +556,44 @@ is not that and must not grow into it.
 
 **MUST read `docs/references/CLAUDE-JSON.md`** before acting on any of this.
 
+## A variant over `<agent>:default` is allowed, and the guards moved to fit
+
+`ParseVariantRef` accepts the sentinel as the profile, with or without a
+variant. It used to refuse a variant over `default` outright, on the grounds
+that nothing is ever created for the sentinel — which confused WHERE a variant
+lives with WHAT it names. A variant has no directory, no shim and no links: it
+is one file under `VariantsRoot`, a sibling of the profiles root, and `prepare`
+still returns an empty directory for `default`, so `Exec` gets no override.
+Nothing lands inside the agent's real configuration directory, which is what
+being read-only there actually means.
+
+`ap variant codex:default:yolo -- <args>` is the case that motivated it: name a
+launch mode over the configuration you already use, without cloning it into a
+profile that then drifts from it.
+
+What follows, and none of it is optional:
+
+- **There is no strict sibling parser any more.** `ParseVariantRefAllowDefault`
+  is gone and every caller uses `ParseVariantRef`. The strict one hid a decision
+  rather than making it — three of the four writing commands needed a guard of
+  their own regardless, because the sentinel is fine as the PARENT of a variant
+  and never fine on its own.
+- **Each command refuses the BARE form itself, with its own sentence.**
+  `ap delete <agent>:default` and `ap link <agent>:default` refuse in
+  `cmdDelete` and `cmdLink`; `ap variant <agent>:default` falls into the
+  existing "names no variant" branch. `which`, `env` and `run` answer for it,
+  as before.
+- **`cmdDelete`'s refusal is not redundant with `profile.Delete`'s.** Delete
+  refuses the sentinel on its own and always will, but only after `cmdDelete`
+  has already printed "delete ~/.claude?" and read the answer. Refusing early is
+  what keeps that question off the screen, so
+  `TestDeleteRefusesTheRealConfigButNotItsVariants` asserts on the resolved
+  PATH — the one thing only the early message contains. Written against the
+  shared phrase first, where it passed with the guard removed.
+- **`default` is still refused as a variant NAME**, by `agentreg.ValidName` on
+  the third segment. That name would be a file ap creates, which is the thing
+  the sentinel promises does not exist.
+
 ## Anything that turns user input into a path must call `profile.ValidName`
 
 `--from` once skipped it and became a path traversal that copied the user's real

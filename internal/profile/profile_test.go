@@ -213,11 +213,11 @@ func TestParseRefAllowDefaultStillRejectsTraversal(t *testing.T) {
 	}
 }
 
-// Depth is exactly three, and the third segment is validated by the same
-// agentreg.ValidName as the second — so `default` is refused as a variant name for the
-// same reason it is refused as a profile name. A variant over `default` is
-// refused whichever parser is used: it names the agent's real config, and
-// nothing is ever created for it.
+// Depth is exactly three. The third segment is validated by agentreg.ValidName
+// — so `default` is refused as a VARIANT name, because that name would be a file
+// ap creates — while the profile segment is validated with the sentinel allowed,
+// so `claude:default:opus` parses. What a bare `claude:default` means is each
+// command's own decision, not the parser's.
 func TestParseVariantRef(t *testing.T) {
 	tests := []struct {
 		in                   string
@@ -229,14 +229,14 @@ func TestParseVariantRef(t *testing.T) {
 		{in: "codex:plan:ci", agent: "codex", prof: "plan", variant: "ci"},
 		{in: "claude:review:opus:extra", wantErr: true}, // four segments, permanently
 		{in: "claude:review:default", wantErr: true},    // reserved as a variant name too
-		{in: "claude:default:opus", wantErr: true},      // nothing is created for default
+		{in: "claude:default:opus", agent: "claude", prof: "default", variant: "opus"},
 		{in: "claude:review:", wantErr: true},
 		{in: "claude:review:a/b", wantErr: true},
 		{in: "claude:review:.hidden", wantErr: true},
 		{in: "claude:review:..", wantErr: true},
 		{in: "nope:review:opus", wantErr: true},
 		{in: "claude", wantErr: true},
-		{in: "claude:default", wantErr: true}, // the writing parser refuses it
+		{in: "claude:default", agent: "claude", prof: "default"}, // each command decides
 	}
 	for _, tc := range tests {
 		a, p, v, err := ParseVariantRef(tc.in)
@@ -257,17 +257,23 @@ func TestParseVariantRef(t *testing.T) {
 	}
 }
 
-// The read-only parser relaxes exactly one thing: `default` as a two-segment
-// profile. It must not relax the variant case with it.
-func TestParseVariantRefAllowDefault(t *testing.T) {
-	if _, p, v, err := ParseVariantRefAllowDefault("claude:default"); err != nil || p != agentreg.Default || v != "" {
-		t.Errorf(`ParseVariantRefAllowDefault("claude:default") = (%q,%q,%v), want ("default","",nil)`, p, v, err)
+// A variant over the sentinel parses, and the sentinel is still refused as the
+// variant NAME. The pair is the whole rule: a variant is one file under
+// VariantsRoot, so hanging one off `default` writes nothing inside the agent's
+// real config directory — but naming one `default` would create exactly the
+// file the sentinel promises never exists.
+func TestAVariantMayHangOffTheRealConfigButMayNotBeNamedForIt(t *testing.T) {
+	if _, p, v, err := ParseVariantRef("claude:default"); err != nil || p != agentreg.Default || v != "" {
+		t.Errorf(`ParseVariantRef("claude:default") = (%q,%q,%v), want ("default","",nil)`, p, v, err)
 	}
-	if _, _, _, err := ParseVariantRefAllowDefault("claude:default:opus"); err == nil {
-		t.Error("a variant over default was accepted; nothing is ever created for default")
+	if _, p, v, err := ParseVariantRef("claude:default:opus"); err != nil || p != agentreg.Default || v != "opus" {
+		t.Errorf(`ParseVariantRef("claude:default:opus") = (%q,%q,%v), want ("default","opus",nil)`, p, v, err)
 	}
-	if _, p, v, err := ParseVariantRefAllowDefault("claude:review:opus"); err != nil || p != "review" || v != "opus" {
-		t.Errorf("ParseVariantRefAllowDefault on a normal variant = (%q,%q,%v)", p, v, err)
+	if _, _, _, err := ParseVariantRef("claude:review:default"); err == nil {
+		t.Error("a variant NAMED default was accepted; that name is a file ap would create")
+	}
+	if _, p, v, err := ParseVariantRef("claude:review:opus"); err != nil || p != "review" || v != "opus" {
+		t.Errorf("ParseVariantRef on a normal variant = (%q,%q,%v)", p, v, err)
 	}
 }
 

@@ -213,10 +213,25 @@ It exists for two things: reaching your normal setup through the same command as
 every profile (`ap run codex:default mcp`), and starting a new profile from the
 configuration you already have (`ap create codex:work --from default`).
 
-**Nothing is ever created for it.** `ap create claude:default`,
+**Nothing is ever created inside it.** `ap create claude:default`,
 `ap delete claude:default` and `ap link claude:default` all refuse — the last
 because there is nothing to link, `ap run codex:default` already reaches the
 real thing directly.
+
+**A variant over it is allowed**, and it is the one thing you can name here:
+
+```bash
+ap variant codex:default:yolo -- --dangerously-bypass-approvals-and-sandbox
+codex:default:yolo            # your real config, launched differently
+```
+
+A variant has no directory, no shim and no links — it is one file in a store
+that sits beside the profiles root, and running it still sets no config
+variable. So this writes nothing into `~/.codex` and adds no second copy of a
+configuration you would then have to keep in sync. `ap delete
+codex:default:yolo` takes it back; `ap delete codex:default` still refuses.
+`default` remains reserved as a variant *name*, since that would be a file
+`ap` creates.
 
 **It is no longer read-only.** `ap manifest apply`, `ap install` and
 `ap uninstall` all reach this root, because refusing them meant you could not

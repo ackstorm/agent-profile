@@ -251,6 +251,43 @@ if quiet "$AP" create claude:sbxrun; then
         bad variant "could not store the variant"
     fi
 
+    # A variant may hang off the agent's REAL config. The store is a sibling of
+    # the profiles root, so nothing is written inside ~/.claude, and `run` still
+    # sets no config variable at all — which is the property that makes this
+    # read-only in the sense that matters. Both halves are asserted: a composed
+    # argv proves the variant was found, and an absent CLAUDE_CONFIG_DIR proves
+    # the launch was still the plain one.
+    if quiet "$AP" variant claude:default:sbxdef -- --model haiku; then
+        before=$(find "$HOME/.claude" -mindepth 1 -maxdepth 1 | sed 's|.*/||' | sort | tr '\n' ' ')
+        out=$("$AP" run claude:default:sbxdef -p hi 2>&1 || true)
+        after=$(find "$HOME/.claude" -mindepth 1 -maxdepth 1 | sed 's|.*/||' | sort | tr '\n' ' ')
+        if [ "$(printf '%s' "$out" | sed -n 's/^argv://p')" != "--model haiku -p hi" ]; then
+            bad variant "a variant over default did not compose: $out"
+        elif printf '%s' "$out" | grep -q '^CLAUDE_CONFIG_DIR='; then
+            bad variant "running a variant over default set a config variable: $out"
+        elif [ "$before" != "$after" ]; then
+            bad variant "the real config directory gained entries: $after (was $before)"
+        else
+            pass variant "over default: composed, no config variable, nothing written"
+        fi
+    else
+        bad variant "could not store a variant over default"
+    fi
+
+    # A BARE default is still refused by the commands that would write for it,
+    # and `ap delete` must take the variant back without touching the directory.
+    if quiet "$AP" delete claude:default --yes; then
+        bad variant "ap delete claude:default was accepted"
+    elif ! [ -d "$HOME/.claude" ]; then
+        bad variant "the real config directory is gone"
+    elif ! quiet "$AP" delete claude:default:sbxdef; then
+        bad variant "a variant over default could not be deleted"
+    elif quiet "$AP" run claude:default:sbxdef; then
+        bad variant "the deleted variant still runs"
+    else
+        pass variant "over default: the variant is removable, the config is not"
+    fi
+
     # A variant that leaves {} is a prompt PREFIX: the caller's arguments are
     # substituted there, joined, and NOT also appended. Asserted on the bracketed
     # form, never on argv:, because "$*" joins with a space and would read the
